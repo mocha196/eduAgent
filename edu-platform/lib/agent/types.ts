@@ -74,6 +74,14 @@ export type OpenAITool = {
 
 // ---- Context ----------------------------------------------------------------
 
+/** Pre-fetched material info injected into the system prompt when the user is previewing a material. */
+export type MaterialContext = {
+  materialId: string;
+  filename: string;
+  fileType: string;
+  videoSummary: string | null;
+};
+
 export type TurnContext = {
   userId: string;
   sessionId: string;
@@ -82,6 +90,12 @@ export type TurnContext = {
   lessonId?: string | null;
   traceId?: string | null;
   debugTrace?: boolean;
+  /** When set, indicates this turn is for a personal KB chat; RAG tools should query the user's personal workspace. */
+  personalKbUserId?: string | null;
+  /** ID of the material the user is currently previewing (passed from frontend). Used by tools. */
+  materialId?: string | null;
+  /** Pre-fetched material metadata for system prompt injection. Populated by chatService when materialId is present. */
+  materialContext?: MaterialContext | null;
 };
 
 // ---- Agent config -----------------------------------------------------------

@@ -3,6 +3,7 @@ import { getRedisUrl } from "@/lib/config";
 
 let client: RedisClientType | null = null;
 let connectPromise: Promise<RedisClientType> | null = null;
+let hasLoggedRedisError = false;
 
 export function isRedisConfigured(): boolean {
   return Boolean(getRedisUrl());
@@ -21,10 +22,14 @@ export async function getRedis(): Promise<RedisClientType> {
   }
   connectPromise = (async () => {
     const c = createClient({ url });
-    c.on("error", () => {
-      /* avoid unhandled rejection; callers handle command errors */
+    c.on("error", (err) => {
+      if (!hasLoggedRedisError) {
+        hasLoggedRedisError = true;
+        console.error("[redis] client error", err);
+      }
     });
     await c.connect();
+    hasLoggedRedisError = false;
     client = c as RedisClientType;
     return client;
   })();

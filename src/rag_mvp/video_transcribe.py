@@ -101,8 +101,9 @@ def transcribe_audio_to_text(
     if lang == "":
         lang = None
 
-    logger.info("Loading Whisper model {} on {}", ms, dev)
-    model = WhisperModel(ms, device=dev)
+    model_ref = cfg.whisper_model_path.strip() or ms
+    logger.info("Loading Whisper model {} on {}", model_ref, dev)
+    model = WhisperModel(model_ref, device=dev)
     logger.info("Transcribing {}", audio)
     segments, info = model.transcribe(str(audio), language=lang)
     parts: list[str] = []

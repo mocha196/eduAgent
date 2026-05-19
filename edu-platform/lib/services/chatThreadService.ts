@@ -167,7 +167,7 @@ export async function assertThreadAccess(
   if (qcs) return { kind: "global", courseId: null };
 
   const ccs = await prisma.courseChatSession.findFirst({
-    where: { agentSessionId: sessionId, studentId },
+    where: { agentSessionId: sessionId, studentId, deletedAt: null },
   });
   if (ccs) return { kind: "course", courseId: ccs.courseId };
 

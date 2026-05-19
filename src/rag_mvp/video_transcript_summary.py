@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from .config import Settings, settings
+from .tracing import create_trace, end_span, flush, span
 
 _LINE_RE = re.compile(r"^\s*\[(\d+(?:\.\d+)?)s\]\s*(.*)\s*$")
 
@@ -31,7 +32,29 @@ DEFAULT_VIDEO_SUMMARY_SYSTEM_PROMPT = """你是一个视频内容摘要生成专
 4. 避免逐字转录原文，尽量减少噪音，但要保证 summary 足够详细，可以让不看原视频的人理解主要内容。
 5. 只输出一个 JSON 数组，不要输出任何其他文字、不要 Markdown 代码围栏。每个元素形如：
    {"start_time":"00:00:00","end_time":"00:05:00","summary":"..."}
-6. 各段的 start_time / end_time 必须落在本片段给定的时间范围内（秒边界已说明）。"""
+6. 各段的 start_time / end_time 必须落在本片段给定的时间范围内（秒边界已说明）。
+7. 转录文本由语音识别生成，可能存在专业术语的误识别（如同音字、拼写变体）。请根据上下文语义自动还原为正确的术语形式，并在 summary 中使用正确拼写。"""
+
+
+def _inject_domain_terms(system_prompt: str, domain_terms: str) -> str:
+    """Append a domain glossary section to system_prompt when domain_terms is non-empty.
+
+    domain_terms may be comma-separated or newline-separated.
+    Example: "harness engineering, Kubernetes, CI/CD"
+    """
+    raw = domain_terms.strip()
+    if not raw:
+        return system_prompt
+    # Normalise separators: split on comma or newline, strip whitespace, drop empties
+    terms = [t.strip() for t in re.split(r"[,\n]", raw) if t.strip()]
+    if not terms:
+        return system_prompt
+    bullet_list = "\n".join(f"  - {t}" for t in terms)
+    section = (
+        "\n\n领域术语表（语音识别易误识，请以此列表为准修正 summary 中的术语拼写）：\n"
+        + bullet_list
+    )
+    return system_prompt + section
 
 
 def seconds_to_hhmmss(total_seconds: float) -> str:
@@ -188,6 +211,8 @@ async def _call_llm_chunk(
     cfg: Settings,
     system_prompt: str,
     model: str,
+    _trace: "Any | None" = None,
+    _chunk_index: int = 0,
 ) -> list[dict[str, Any]]:
     from lightrag.llm.openai import openai_complete_if_cache
 
@@ -201,6 +226,11 @@ async def _call_llm_chunk(
         f"本片段在整段视频中的时间范围约为 {seconds_to_hhmmss(t_start)} 至 {seconds_to_hhmmss(t_end)} "
         f"（约 {t_start:.1f}s – {t_end:.1f}s）。请只基于下列转录生成 JSON 数组。\n\n"
         f"{chunk_text}"
+    )
+    _sp = span(
+        _trace,
+        f"video_summary.chunk_{_chunk_index}",
+        input={"t_start": seconds_to_hhmmss(t_start), "t_end": seconds_to_hhmmss(t_end), "model": model},
     )
 
     last_err: Exception | None = None
@@ -216,14 +246,18 @@ async def _call_llm_chunk(
                 max_tokens=cfg.llm_max_tokens,
                 temperature=cfg.llm_temperature,
             )
-            return parse_json_segment_array(raw)
+            result = parse_json_segment_array(raw)
+            end_span(_sp, output={"segments": len(result)})
+            return result
         except (json.JSONDecodeError, ValueError) as exc:
             last_err = exc
             logger.warning("structured summary JSON parse failed (attempt {}): {}", attempt + 1, exc)
         except Exception as exc:
             last_err = exc
             logger.warning("structured summary LLM failed (attempt {}): {}", attempt + 1, exc)
+            end_span(_sp, output={"error": str(exc)})
             raise
+    end_span(_sp, output={"error": str(last_err)})
     if last_err:
         raise last_err
     return []
@@ -235,6 +269,7 @@ async def generate_structured_segments_async(
     cfg: Settings | None = None,
     target_seconds: float | None = None,
     max_seconds: float | None = None,
+    domain_terms: str | None = None,
 ) -> list[dict[str, str]]:
     cfg = cfg or settings
     target = float(target_seconds if target_seconds is not None else cfg.video_summary_target_segment_seconds)
@@ -243,6 +278,9 @@ async def generate_structured_segments_async(
         max_seg = target
 
     system = (cfg.video_summary_system_prompt or "").strip() or DEFAULT_VIDEO_SUMMARY_SYSTEM_PROMPT
+    # Inject domain terms: explicit arg takes precedence over config
+    effective_terms = domain_terms if domain_terms is not None else (cfg.video_summary_domain_terms or "")
+    system = _inject_domain_terms(system, effective_terms)
     model = (cfg.video_summary_llm_model or "").strip() or cfg.refine_model
 
     lines = parse_timestamped_transcript(transcript_text)
@@ -251,13 +289,20 @@ async def generate_structured_segments_async(
         return []
 
     chunks = chunk_transcript_by_duration(lines, target_seconds=target, max_seconds=max_seg)
+    _trace = create_trace(
+        "video.transcript_summary",
+        input={"chunks": len(chunks), "model": model},
+        metadata={"target_seconds": target, "max_seconds": max_seg},
+    )
     results: list[list[dict[str, Any]]] = []
     for i, chunk in enumerate(chunks):
         logger.info("Structured summary LLM chunk {}/{}", i + 1, len(chunks))
-        part = await _call_llm_chunk(chunk, cfg=cfg, system_prompt=system, model=model)
+        part = await _call_llm_chunk(chunk, cfg=cfg, system_prompt=system, model=model, _trace=_trace, _chunk_index=i)
         results.append(part)
 
     merged = merge_and_sort_segments(results)
+    end_span(_trace, output={"total_segments": len(merged)})
+    flush()
     return merged
 
 
@@ -267,6 +312,7 @@ def generate_structured_segments_sync(
     cfg: Settings | None = None,
     target_seconds: float | None = None,
     max_seconds: float | None = None,
+    domain_terms: str | None = None,
 ) -> list[dict[str, str]]:
     return asyncio.run(
         generate_structured_segments_async(
@@ -274,6 +320,7 @@ def generate_structured_segments_sync(
             cfg=cfg,
             target_seconds=target_seconds,
             max_seconds=max_seconds,
+            domain_terms=domain_terms,
         )
     )
 
@@ -307,6 +354,7 @@ def build_structured_summary_from_transcript_text(
     target_seconds: float | None = None,
     max_seconds: float | None = None,
     md_title: str | None = None,
+    domain_terms: str | None = None,
 ) -> tuple[list[dict[str, str]], Path, Path]:
     """Run LLM pipeline and write json+md; returns segments and paths."""
     segments = generate_structured_segments_sync(
@@ -314,6 +362,7 @@ def build_structured_summary_from_transcript_text(
         cfg=cfg,
         target_seconds=target_seconds,
         max_seconds=max_seconds,
+        domain_terms=domain_terms,
     )
     jp, mp = write_structured_summary_files(stem, segments, out_dir, md_title=md_title)
     return segments, jp, mp

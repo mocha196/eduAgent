@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   ChevronLeft,
@@ -14,7 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
-import type { StructuredGenerationParams } from "@/lib/dto/assignment.dto";
+import type { AssignmentDetailDto, StructuredGenerationParams } from "@/lib/dto/assignment.dto";
 
 type Mode = "nlp" | "structured";
 
@@ -103,6 +103,8 @@ type Lesson = { id: string; title: string; order_index: number };
 export default function NewAssignmentPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const retryFrom = searchParams.get("retryFrom");
 
   // ── Shared state ──────────────────────────────────────────────────────────
   const [mode, setMode] = useState<Mode>("nlp");
@@ -132,6 +134,40 @@ export default function NewAssignmentPage() {
         setLessons((d.lessons ?? []).sort((a, b) => a.order_index - b.order_index))
       );
   }, [courseId]);
+
+  // ── Pre-fill from failed assignment (retry) ───────────────────────────────
+  useEffect(() => {
+    if (!retryFrom) return;
+    void fetch(`/api/v1/courses/${courseId}/assignments/${retryFrom}`, { credentials: "include" })
+      .then((r) => r.ok ? r.json() as Promise<{ assignment: AssignmentDetailDto }> : null)
+      .then((d) => {
+        if (!d?.assignment) return;
+        const a = d.assignment;
+        if (a.title) setTitle(a.title);
+        if (a.teacherRequest) setTeacherRequest(a.teacherRequest);
+        if (a.structuredParams) {
+          const sp = a.structuredParams;
+          setMode("structured");
+          if (sp.lessonIds?.length) setSelectedLessons(sp.lessonIds);
+          if (sp.knowledgePoints?.length) setKnowledgeTags(sp.knowledgePoints);
+          if (sp.difficultyWeights) setDifficultyWeights(sp.difficultyWeights);
+          if (sp.count) { setCount(sp.count); setCountInput(String(sp.count)); }
+          if (sp.typeWeights) {
+            const types = Object.entries(sp.typeWeights)
+              .filter(([, w]) => w > 0)
+              .map(([k]) => k);
+            if (types.length) setSelectedTypes(types);
+          }
+          if (sp.objectiveWeights) {
+            const objs = Object.entries(sp.objectiveWeights)
+              .filter(([, w]) => w > 0)
+              .map(([k]) => k);
+            if (objs.length) setSelectedObjectives(objs);
+          }
+        }
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryFrom]);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function toggleLesson(id: string) {

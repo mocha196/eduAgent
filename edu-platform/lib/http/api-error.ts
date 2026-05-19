@@ -11,7 +11,11 @@ export type ApiErrorCode =
   | "SERVICE_UNAVAILABLE"
   | "AGENT_CHAT_FAILED"
   | "PREVIEW_NOT_READY"
-  | "NOT_IMPLEMENTED";
+  | "NOT_IMPLEMENTED"
+  | "NOT_PUBLISHED"
+  | "DEADLINE_PASSED"
+  | "ALREADY_RETURNED"
+  | "NOT_GRADED";
 
 export class ApiError extends Error {
   readonly status: number;

@@ -231,8 +231,8 @@ async def vision_model_func(
 
     if messages is not None:
         client = AsyncOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
+            api_key=settings.effective_vision_api_key,
+            base_url=settings.effective_vision_base_url,
         )
         token = _llm_role.set(f"vision/{settings.vision_model}")
         try:
@@ -257,8 +257,8 @@ async def vision_model_func(
         msg_list.append({"role": "user", "content": content_parts})
 
         client = AsyncOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
+            api_key=settings.effective_vision_api_key,
+            base_url=settings.effective_vision_base_url,
         )
         token = _llm_role.set(f"vision/{settings.vision_model}")
         try:
@@ -318,7 +318,7 @@ async def _call_vision_raw(
         msg_list.append({"role": "system", "content": system_prompt})
     msg_list.append({"role": "user", "content": content_parts})
 
-    client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    client = AsyncOpenAI(api_key=settings.effective_vision_api_key, base_url=settings.effective_vision_base_url)
     token = _llm_role.set(f"vision-filter/{settings.vision_model}")
     try:
         resp = await client.chat.completions.create(
@@ -383,6 +383,3 @@ async def _filtered_vision_model_func(
         image_mime=image_mime,
         **kwargs,
     )
-
-
-from .embedding_factory import build_embedding_func  # noqa: E402

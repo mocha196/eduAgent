@@ -1,21 +1,21 @@
 import type { Metadata } from "next";
-import { Lora, DM_Sans } from "next/font/google";
+import { Noto_Sans_SC, Noto_Serif_SC } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import "katex/dist/katex.min.css";
 
-const lora = Lora({
-  subsets: ["latin"],
+const notoSerifSC = Noto_Serif_SC({
   variable: "--font-serif",
   display: "swap",
+  preload: false,
   weight: ["400", "500", "600", "700"],
 });
 
-const dmSans = DM_Sans({
-  subsets: ["latin"],
+const notoSansSC = Noto_Sans_SC({
   variable: "--font-sans",
   display: "swap",
-  weight: ["300", "400", "500", "600", "700"],
+  preload: false,
+  weight: ["400", "500", "700"],
 });
 
 export const metadata: Metadata = {
@@ -29,7 +29,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning className={`${lora.variable} ${dmSans.variable}`}>
+    <html lang="zh-CN" suppressHydrationWarning className={`${notoSerifSC.variable} ${notoSansSC.variable}`}>
       <body suppressHydrationWarning>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           {children}

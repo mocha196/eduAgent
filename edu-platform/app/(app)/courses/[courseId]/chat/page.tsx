@@ -1,14 +1,20 @@
 "use client";
 
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ChevronLeft, LayoutGrid, MessageSquarePlus } from "lucide-react";
+import { ChevronLeft, MessageSquarePlus, PanelLeftOpen } from "lucide-react";
 import CourseChatDockview from "@/components/CourseChatDockview";
+import type { ClosedPanelInfo } from "@/components/CourseChatDockview";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 export default function CourseChatPage() {
   const params = useParams();
   const courseId = typeof params?.courseId === "string" ? params.courseId : null;
+
+  const [closedPanels, setClosedPanels] = useState<ClosedPanelInfo[]>([]);
+  const restorePanelFnRef = useRef<((info: ClosedPanelInfo) => void) | null>(null);
 
   if (!courseId) {
     return (
@@ -30,6 +36,36 @@ export default function CourseChatPage() {
         </Link>
         <h2 className="font-display text-sm font-semibold text-foreground">课程问答</h2>
         <div className="flex items-center gap-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 text-xs shrink-0"
+                title="显示已关闭的面板"
+              >
+                <PanelLeftOpen size={14} />
+                显示面板{closedPanels.length > 0 ? ` (${closedPanels.length})` : ""}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-44 p-1.5">
+              {closedPanels.length === 0 ? (
+                <p className="text-xs text-muted-foreground px-2 py-1.5">所有面板均已显示</p>
+              ) : (
+                closedPanels.map((panel) => (
+                  <button
+                    key={panel.id}
+                    type="button"
+                    className="w-full text-left text-sm px-2 py-1.5 rounded-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+                    onClick={() => restorePanelFnRef.current?.(panel)}
+                  >
+                    {panel.title}
+                  </button>
+                ))
+              )}
+            </PopoverContent>
+          </Popover>
           <Button
             type="button"
             variant="outline"
@@ -47,27 +83,14 @@ export default function CourseChatPage() {
             <MessageSquarePlus size={14} />
             新建对话窗口
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 text-xs shrink-0"
-            title="若三栏都被关闭或布局异常，点此恢复资料列表、预览与问答"
-            onClick={() =>
-              window.dispatchEvent(
-                new CustomEvent("edu:reset-course-chat-dockview", {
-                  detail: { courseId },
-                }),
-              )
-            }
-          >
-            <LayoutGrid size={14} />
-            恢复三栏
-          </Button>
         </div>
       </div>
 
-      <CourseChatDockview courseId={courseId} />
+      <CourseChatDockview
+        courseId={courseId}
+        onClosedPanelsChange={setClosedPanels}
+        restorePanelFnRef={restorePanelFnRef}
+      />
     </div>
   );
 }

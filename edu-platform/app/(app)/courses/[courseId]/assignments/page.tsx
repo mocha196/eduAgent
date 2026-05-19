@@ -62,7 +62,7 @@ function AssignmentRow({ a, courseId }: { a: AssignmentSummaryDto; courseId: str
           {a.qualityScore !== null && (
             <span className="ml-2 inline-flex items-center gap-0.5">
               <Star size={10} />
-              {a.qualityScore} 分
+              {a.qualityScore !== null ? (a.qualityScore * 10).toFixed(1) : a.qualityScore} 分
             </span>
           )}
           {a.deadline && (

@@ -4,7 +4,11 @@ import { jsonOk, jsonError } from "@/lib/http/json-response";
 import { ApiError } from "@/lib/http/api-error";
 import { requireAuthenticated } from "@/lib/admin";
 import { getAuthFromRequest } from "@/lib/request-auth";
-import { getAssignment, patchAssignment } from "@/lib/services/assignmentService";
+import {
+  getAssignment,
+  getAssignmentForStudent,
+  patchAssignment,
+} from "@/lib/services/assignmentService";
 import type { PatchAssignmentBody } from "@/lib/dto/assignment.dto";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +19,15 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   try {
     const auth = requireAuthenticated(await getAuthFromRequest(_req));
     const { courseId, assignmentId } = await ctx.params;
+    if (auth.role === UserRole.STUDENT) {
+      const assignment = await getAssignmentForStudent(
+        auth.sub,
+        auth.role,
+        courseId,
+        assignmentId,
+      );
+      return jsonOk({ assignment });
+    }
     const assignment = await getAssignment(
       auth.sub,
       auth.role as UserRole,

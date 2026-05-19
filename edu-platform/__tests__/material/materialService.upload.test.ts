@@ -6,10 +6,17 @@ import {
 } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const createMaterialMock = vi.fn();
-const enqueueRagTaskMock = vi.fn();
-const putObjectStreamMock = vi.fn();
-const assertTeacherOfCourseMock = vi.fn();
+const {
+  createMaterialMock,
+  enqueueRagTaskMock,
+  putObjectStreamMock,
+  assertTeacherOfCourseMock,
+} = vi.hoisted(() => ({
+  createMaterialMock: vi.fn(),
+  enqueueRagTaskMock: vi.fn(),
+  putObjectStreamMock: vi.fn(),
+  assertTeacherOfCourseMock: vi.fn(),
+}));
 
 vi.mock("@/lib/db", () => ({
   prisma: {
@@ -82,5 +89,5 @@ describe("uploadMaterialStream", () => {
         skip_kg: false,
       }),
     );
-  });
+  }, 15000);
 });

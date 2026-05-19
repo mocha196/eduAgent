@@ -5,6 +5,7 @@
 
 import OpenAI from "openai";
 import { getRoleExtraBody } from "./llm-registry";
+import { createStandaloneTrace, flushLangfuse, recordGeneration } from "./tracing/langfuse-tracer";
 import type { Tool, TurnContext } from "./types";
 
 const MAX_ITERATIONS = 6;
@@ -55,13 +56,23 @@ export async function runSubAgent(
     },
   }));
 
+  const subModel = config.model ?? model;
+  const trace = createStandaloneTrace({
+    name: "subagent.run",
+    input: config.task,
+    metadata: {
+      model: subModel,
+      parentTraceId: config.ctx?.traceId,
+      allowedTools: allowedTools.map((t) => t.name),
+    },
+  });
+
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: MINIMAL_SYSTEM },
     { role: "user", content: config.task },
   ];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const subModel = config.model ?? model;
     // Detect DeepSeek by model name when role context isn't available here
     const subExtraBody = subModel.toLowerCase().startsWith("deepseek")
       ? getRoleExtraBody("chat")
@@ -77,6 +88,18 @@ export async function runSubAgent(
 
     const msg = resp.choices[0]?.message;
     if (!msg) break;
+
+    recordGeneration(trace, {
+      name: `subagent.iter_${i}`,
+      model: subModel,
+      input: messages,
+      output: msg.content ?? msg.tool_calls,
+      usage: {
+        promptTokens: resp.usage?.prompt_tokens,
+        completionTokens: resp.usage?.completion_tokens,
+        totalTokens: resp.usage?.total_tokens,
+      },
+    });
 
     messages.push(msg as OpenAI.Chat.ChatCompletionMessageParam);
 
@@ -117,6 +140,7 @@ export async function runSubAgent(
       }
     } else {
       // Final text response
+      void flushLangfuse();
       return {
         success: true,
         summary: msg.content ?? "",
@@ -129,5 +153,6 @@ export async function runSubAgent(
   // Extract last assistant message
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const content = typeof lastAssistant?.content === "string" ? lastAssistant.content : "";
+  void flushLangfuse();
   return { success: true, summary: content };
 }

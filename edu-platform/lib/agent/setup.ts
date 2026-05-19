@@ -10,7 +10,6 @@ import { getLLMClient, getChatModel, getMemoryModel } from "./llm-registry";
 import { SessionStore } from "./session-store";
 import { ContextManager } from "./context-manager";
 import { PromptBuilder, promptBuilder } from "./prompt-builder";
-import { SkillsLoader } from "./skills-loader";
 import { MemoryStore, memoryStore } from "./memory/memory-store";
 import { MemoryRetriever } from "./memory/memory-retriever";
 import { MemoryExtractor } from "./memory/memory-extractor";
@@ -58,25 +57,21 @@ export function getMemoryCoordinator(): MemoryCoordinator {
 }
 
 // ---- SkillsLoader ----------------------------------------------------------
-
-let _skillsLoader: SkillsLoader | null = null;
-
-export function getSkillsLoader(): SkillsLoader {
-  if (_skillsLoader) return _skillsLoader;
-  // Skills directory is at project root (one level above edu-platform/)
-  const skillsDir = path.join(process.cwd(), "..", "skills");
-  _skillsLoader = new SkillsLoader(skillsDir);
-  return _skillsLoader;
-}
+// Singleton and config loading live in skills-loader.ts to avoid circular
+// imports (tools/skills.ts → skills-loader.ts, tools/index.ts → setup.ts).
+export { getSkillsLoader } from "./skills-loader";
 
 // ---- AgentConfig builder --------------------------------------------------
 
+const EVAL_PERSONA = `You are a retrieval-augmented question answering system. Answer questions directly and concisely based on the retrieved knowledge base content. Always call knowledge_query to retrieve relevant information before answering. Do not apply educational scaffolding or pedagogical filtering. You must **answer in the same language as the question.**`;
+
 export function buildAgentConfig(
   attachments?: AgentConfig["attachments"],
+  evalMode?: boolean,
 ): AgentConfig {
   return {
     model: getChatModel(),
-    systemPrompt: DEFAULT_PERSONA,
+    systemPrompt: evalMode ? EVAL_PERSONA : DEFAULT_PERSONA,
     maxIterations: parseInt(process.env.AGENT_MAX_ITERATIONS ?? "8", 10),
     ragServiceUrl: process.env.RAG_SERVICE_URL ?? "http://localhost:8001",
     ragServiceKey: process.env.RAG_SERVICE_API_KEY ?? "",

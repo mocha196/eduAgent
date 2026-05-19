@@ -25,6 +25,8 @@ export type MaterialDetailDto = {
   indexed_chunk_count: number;
   created_at: string;
   status_message: string | null;
+  transcript: string | null;
+  video_summary: string | null;
 };
 
 export type MaterialCreatedDto = {

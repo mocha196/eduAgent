@@ -17,6 +17,11 @@ from rag_mvp.material_processor import (
     process_delete_material,
     process_index_only,
     process_parse_and_index,
+    process_personal_convert_preview,
+    process_personal_delete_material,
+    process_personal_index_only,
+    process_personal_parse_and_index,
+    process_personal_transcribe_and_index,
     process_repair_preview,
     process_transcribe_and_index,
 )
@@ -46,37 +51,32 @@ def _material_stale_sec() -> int:
 def _mark_stale_jobs_failed(conn: Any) -> None:
     """On startup: mark any PARSING/PARSED/INDEXING materials whose ``updated_at`` has
     not moved in more than ``RAG_MATERIAL_STALE_SEC`` seconds as FAILED.
-
-    This cleans up materials that were abandoned because a previous worker process was
-    killed (SIGKILL, OOM, crash) before it could finish processing and commit the final
-    READY or FAILED status.
+    Applies to both course materials and personal materials.
     """
     stale_sec = _material_stale_sec()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE materials
-                SET status = 'FAILED',
-                    status_message = 'WORKER_ABANDONED: worker was interrupted or crashed',
-                    updated_at = NOW()
-                WHERE is_deleted = false
-                  AND status IN ('PARSING', 'PARSED', 'INDEXING')
-                  AND updated_at < NOW() - (%s * INTERVAL '1 second')
-                RETURNING id::text
-                """,
-                (stale_sec,),
-            )
-            rows = cur.fetchall()
-        if rows:
-            ids = [r[0] for r in rows]
-            logger.warning(
-                "Marked {} stale material(s) as FAILED on startup: {}",
-                len(ids),
-                ids,
-            )
-    except Exception:
-        logger.exception("Failed to clean up stale materials on startup")
+    stale_sql = """
+        UPDATE {table}
+        SET status = 'FAILED',
+            status_message = 'WORKER_ABANDONED: worker was interrupted or crashed',
+            updated_at = NOW()
+        WHERE is_deleted = false
+          AND status IN ('PARSING', 'PARSED', 'INDEXING')
+          AND updated_at < NOW() - (%s * INTERVAL '1 second')
+        RETURNING id::text
+    """
+    for table in ("materials", "personal_materials"):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(stale_sql.format(table=table), (stale_sec,))
+                rows = cur.fetchall()
+            if rows:
+                ids = [r[0] for r in rows]
+                logger.warning(
+                    "Marked {} stale {} as FAILED on startup: {}",
+                    len(ids), table, ids,
+                )
+        except Exception:
+            logger.exception("Failed to clean up stale {} on startup", table)
 
 
 def _ensure_group(r: redis.Redis, stream: str, group: str) -> None:
@@ -159,6 +159,16 @@ def _process_one(conn: Any, r: redis.Redis, fields: dict[str, str]) -> None:
         process_convert_preview(conn, material_id, text_only=text_only, skip_kg=skip_kg)
     elif op == "transcribe_and_index":
         process_transcribe_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
+    elif op == "personal_parse_and_index":
+        process_personal_parse_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
+    elif op == "personal_convert_preview":
+        process_personal_convert_preview(conn, material_id, text_only=text_only, skip_kg=skip_kg)
+    elif op == "personal_delete_material":
+        process_personal_delete_material(conn, material_id)
+    elif op == "personal_transcribe_and_index":
+        process_personal_transcribe_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
+    elif op == "personal_index_only":
+        process_personal_index_only(conn, material_id, text_only=text_only, skip_kg=skip_kg)
     else:
         raise ValueError(f"unknown operation: {op!r}")
 

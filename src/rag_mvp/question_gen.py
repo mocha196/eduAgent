@@ -24,6 +24,7 @@ from loguru import logger
 
 from .config import settings
 from .llm import llm_chat_model_func
+from .tracing import end_span, generation as _gen_span, span
 
 _GRAPHML_NS = "http://graphml.graphdrawing.org/xmlns"
 
@@ -365,38 +366,45 @@ async def _call_question_llm(
     q_type: str,
     user_prompt: str,
     system_prompt: str,
+    _trace: "Any | None" = None,
 ) -> dict[str, Any] | None:
     """Single LLM round: return parsed question dict or None."""
+    _sp = span(_trace, f"question_gen.single.{q_type}", input={"entity": entity_name, "type": q_type})
     try:
         logger.debug("LLM prompt for '{}' ({}): {}...", entity_name, q_type, user_prompt[:2000])
         raw = await llm_chat_model_func(user_prompt, system_prompt=system_prompt)
         logger.debug("LLM response for '{}': {}...", entity_name, raw[:1000])
     except Exception as exc:
+        end_span(_sp, output={"error": str(exc)})
         logger.warning(f"LLM call failed for '{entity_name}': {exc}")
         return None
 
     raw = re.sub(r"```(?:json)?", "", raw).strip()
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if not match:
+        end_span(_sp, output={"error": "no_json"})
         logger.warning(f"No JSON found in response for '{entity_name}'")
         return None
 
     try:
         parsed = json.loads(match.group())
     except json.JSONDecodeError as exc:
+        end_span(_sp, output={"error": f"json_decode: {exc}"})
         logger.warning(f"JSON parse error for '{entity_name}': {exc}")
         return None
 
     if not parsed.get("question") or not parsed.get("answer"):
+        end_span(_sp, output={"error": "incomplete"})
         logger.warning(f"Incomplete question data for '{entity_name}', skipping")
         return None
+    end_span(_sp, output={"question": parsed.get("question", "")[:200]})
     return parsed
 
 
 _DIFFICULTY_STEPS: dict[str, int] = {"easy": 1, "medium": 2, "hard": 3}
 
 
-def _build_prompt(entity: str, context: str, q_type: str, objective: str = "knowledge", difficulty: str = "medium") -> str:
+def _build_prompt(entity: str, context: str, q_type: str, objective: str = "knowledge", difficulty: str = "medium", focus: str = "") -> str:
     label = _TYPE_LABELS[q_type]
     obj_instruction = _OBJECTIVE_INSTRUCTIONS.get(objective, "")
     expected_steps = _DIFFICULTY_STEPS.get(difficulty, 2)
@@ -417,6 +425,9 @@ def _build_prompt(entity: str, context: str, q_type: str, objective: str = "know
         f"需要的事实请用简短陈述直接写在题干中\n"
         f"- 请在 JSON 输出中如实填写 reasoning_steps 字段（你实际用了几步推理）\n"
     )
+
+    if focus:
+        prompt += f"- 考查焦点：{focus}（题目应围绕该焦点设计）\n"
 
     if q_type == "single_choice":
         prompt += (
@@ -458,7 +469,7 @@ def _build_prompt(entity: str, context: str, q_type: str, objective: str = "know
     return prompt
 
 
-async def _generate_scenario(entity_name: str, context: str, objective: str) -> str:
+async def _generate_scenario(entity_name: str, context: str, objective: str, _trace: "Any | None" = None) -> str:
     """First-stage LLM call: generate a scenario or analysis for application/synthesis.
 
     Returns a natural-language description (not JSON) to enrich the second-stage prompt.
@@ -475,11 +486,14 @@ async def _generate_scenario(entity_name: str, context: str, objective: str) -> 
             f'请以"{entity_name}"为主线，梳理以上内容中多个知识点之间的关联与依赖关系，'
             f"该分析将用于后续综合题命题。"
         )
+    _sp = span(_trace, "question_gen.scenario", input={"entity": entity_name, "objective": objective})
     try:
         scenario = await llm_chat_model_func(user_msg, system_prompt=_SCENARIO_SYSTEM_PROMPT)
+        end_span(_sp, output={"length": len(scenario)})
         logger.debug(f"Scenario generated for '{entity_name}' ({objective}): {len(scenario)} chars")
         return scenario
     except Exception as exc:
+        end_span(_sp, output={"error": str(exc)})
         logger.warning(f"Scenario generation failed for '{entity_name}': {exc}")
         return ""
 
@@ -494,6 +508,8 @@ async def _generate_one(
     objective: str = "knowledge",
     entity_names: list[str] | None = None,
     difficulty: str = "medium",
+    focus: str = "",
+    _trace: "Any | None" = None,
 ) -> dict[str, Any] | None:
     """Call LLM and parse one question. Returns None on any failure.
 
@@ -503,13 +519,13 @@ async def _generate_one(
     """
     # Two-stage generation for application and synthesis
     if objective in ("application", "synthesis"):
-        scenario = await _generate_scenario(entity_name, context, objective)
+        scenario = await _generate_scenario(entity_name, context, objective, _trace)
         enriched_context = f"{context}\n\n【情境/分析】\n{scenario}" if scenario else context
     else:
         enriched_context = context
 
-    prompt = _build_prompt(entity_name, enriched_context, q_type, objective, difficulty)
-    parsed = await _call_question_llm(entity_name, q_type, prompt, _SYSTEM_PROMPT)
+    prompt = _build_prompt(entity_name, enriched_context, q_type, objective, difficulty, focus)
+    parsed = await _call_question_llm(entity_name, q_type, prompt, _SYSTEM_PROMPT, _trace)
     if parsed is None:
         return None
 
@@ -520,7 +536,7 @@ async def _generate_one(
             entity_name, q_type, question_text[:120],
         )
         retry_prompt = prompt + _DEIXIS_RETRY_USER_APPEND
-        parsed = await _call_question_llm(entity_name, q_type, retry_prompt, _SYSTEM_PROMPT)
+        parsed = await _call_question_llm(entity_name, q_type, retry_prompt, _SYSTEM_PROMPT, _trace)
         if parsed is None:
             return None
         question_text = str(parsed.get("question", ""))

@@ -39,3 +39,7 @@ test.py
 .env(1)
 data/cron_jobs.json
 scripts/test.sql
+毕设文献/
+thesis.md
+tests/eval/results/*
+faster-whisper-base/

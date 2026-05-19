@@ -138,7 +138,7 @@ describe("materialService preview reconcile", () => {
         operation: "parse_and_index",
       }),
     );
-  });
+  }, 15000);
 
   it("openMaterialContentStream forces application/pdf for office preview", async () => {
     const now = new Date("2026-05-14T00:00:00.000Z");

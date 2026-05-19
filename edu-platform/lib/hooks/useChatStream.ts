@@ -2,6 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+/**
+ * A single item in the interleaved assistant message timeline.
+ * Text and tool events are stored in chronological order so the UI can
+ * render them inline rather than as a separate header block.
+ */
+export type MessageTimelineItem =
+  | { kind: "text"; content: string }
+  | {
+      kind: "tool";
+      clientKey: string;
+      name: string;
+      status: "running" | "done";
+      success?: boolean;
+      durationMs?: number;
+    };
+
 export type ChatMessage = {
   clientId: string;
   role: "user" | "assistant";
@@ -9,7 +25,9 @@ export type ChatMessage = {
   attachments?: AttachmentRef[];
   /** Same QaLog row id for hydrated user/assistant pair */
   qaLogId?: string;
-  /** Tool calls recorded during this turn (populated from history) */
+  /** Interleaved timeline of text chunks and tool events (new messages). */
+  timeline?: MessageTimelineItem[];
+  /** Tool calls recorded during this turn (populated from history, legacy). */
   toolActivity?: ToolActivityItem[];
   /** Citations recorded during this turn (populated from history) */
   citations?: Citation[];
@@ -81,11 +99,20 @@ export type UseChatStreamConfig =
       courseId: string;
       /** When set, load historical Q/A from QA center API into the transcript. */
       hydrateSessionId?: string | null;
+      /** ID of the material the user is currently previewing. Sent as material_id in chat requests. */
+      activeMaterialId?: string | null;
     }
   | {
       kind: "qa_center_global";
       sessionId: string | null;
       onResolvedSessionId?: (id: string) => void;
+    }
+  | {
+      kind: "personal_kb";
+      /** Session ID resolved from /api/v1/me/personal-kb/session (pass null while loading). */
+      sessionId: string | null;
+      /** ID of the material the user is currently previewing. Sent as material_id in chat requests. */
+      activeMaterialId?: string | null;
     };
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -179,6 +206,8 @@ export function useChatStream(config: UseChatStreamConfig) {
   const [streaming, setStreaming] = useState<string>("");
   const [toolActivity, setToolActivity] = useState<ToolActivityItem[]>([]);
   const toolSeqRef = useRef(0);
+  const streamTimelineRef = useRef<MessageTimelineItem[]>([]);
+  const [streamTimeline, setStreamTimeline] = useState<MessageTimelineItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [citations, setCitations] = useState<Citation[]>([]);
   const [lastMeta, setLastMeta] = useState<DoneMeta | null>(null);
@@ -227,6 +256,8 @@ export function useChatStream(config: UseChatStreamConfig) {
   const historyLoadKey =
     config.kind === "qa_center_global"
       ? `q:${config.sessionId ?? ""}`
+      : config.kind === "personal_kb"
+      ? `pkb:${config.sessionId ?? ""}`
       : `c:${config.courseId}:h:${config.hydrateSessionId ?? ""}`;
 
   useEffect(() => {
@@ -276,6 +307,31 @@ export function useChatStream(config: UseChatStreamConfig) {
           const body = (await res.json()) as {
             messages?: HydratedRow[];
           };
+          const rows = Array.isArray(body.messages) ? body.messages : [];
+          if (!cancelled) setMsgs(logToMsgs(rows));
+        } catch {
+          if (!cancelled) setMsgs([]);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (c.kind === "personal_kb") {
+      if (!c.sessionId) {
+        setMsgs([]);
+        return;
+      }
+      const sid = c.sessionId;
+      let cancelled = false;
+      void (async () => {
+        try {
+          const res = await fetch(
+            `/api/v1/me/personal-kb/messages/${encodeURIComponent(sid)}`,
+            { credentials: "include" },
+          );
+          if (!res.ok || cancelled) return;
+          const body = (await res.json()) as { messages?: HydratedRow[] };
           const rows = Array.isArray(body.messages) ? body.messages : [];
           if (!cancelled) setMsgs(logToMsgs(rows));
         } catch {
@@ -341,6 +397,8 @@ export function useChatStream(config: UseChatStreamConfig) {
       setBusy(true);
       setStreaming("");
       setToolActivity([]);
+      streamTimelineRef.current = [];
+      setStreamTimeline([]);
       toolSeqRef.current = 0;
       setCitations([]);
       setLastMeta(null);
@@ -355,18 +413,31 @@ export function useChatStream(config: UseChatStreamConfig) {
 
       try {
         const isQaGlobal = config.kind === "qa_center_global";
+        const isPersonalKb = config.kind === "personal_kb";
         const courseId = config.kind === "course" ? config.courseId : "";
         const url = isQaGlobal
           ? "/api/v1/qa-center/chat"
+          : isPersonalKb
+          ? "/api/v1/me/personal-kb/chat"
           : `/api/v1/courses/${courseId}/chat`;
 
+        const materialId =
+          config.kind === "course"
+            ? (config.activeMaterialId ?? undefined)
+            : config.kind === "personal_kb"
+            ? (config.activeMaterialId ?? undefined)
+            : undefined;
         const body: Record<string, unknown> = {
           message,
           ...(lessonId ? { lesson_id: lessonId } : {}),
+          ...(materialId ? { material_id: materialId } : {}),
           ...(attachmentsPayload.length ? { attachments: attachmentsPayload } : {}),
           ...(trimHistoryTo !== undefined ? { trim_history_to: trimHistoryTo } : {}),
         };
         if (isQaGlobal && config.sessionId) {
+          body.session_id = config.sessionId;
+        }
+        if (config.kind === "personal_kb" && config.sessionId) {
           body.session_id = config.sessionId;
         }
         if (config.kind === "course" && config.hydrateSessionId) {
@@ -439,6 +510,17 @@ export function useChatStream(config: UseChatStreamConfig) {
               if (event.type === "text" && event.content) {
                 streamText += event.content;
                 setStreaming(streamText);
+                // Build interleaved timeline: merge consecutive text chunks
+                const tl = streamTimelineRef.current;
+                const last = tl.length > 0 ? tl[tl.length - 1] : undefined;
+                let nextTl: MessageTimelineItem[];
+                if (last?.kind === "text") {
+                  nextTl = [...tl.slice(0, -1), { ...last, content: last.content + event.content }];
+                } else {
+                  nextTl = [...tl, { kind: "text", content: event.content }];
+                }
+                streamTimelineRef.current = nextTl;
+                setStreamTimeline(nextTl);
               } else if (event.type === "tool_call" && event.name) {
                 const id =
                   typeof event.tool_call_id === "string" && event.tool_call_id
@@ -448,6 +530,12 @@ export function useChatStream(config: UseChatStreamConfig) {
                   ...prev,
                   { clientKey: id, name: event.name!, status: "running" },
                 ]);
+                const nextTl: MessageTimelineItem[] = [
+                  ...streamTimelineRef.current,
+                  { kind: "tool", clientKey: id, name: event.name!, status: "running" },
+                ];
+                streamTimelineRef.current = nextTl;
+                setStreamTimeline(nextTl);
               } else if (event.type === "tool_result" && event.name) {
                 const toolName = event.name;
                 setToolActivity((prev) => {
@@ -468,6 +556,17 @@ export function useChatStream(config: UseChatStreamConfig) {
                   };
                   return next;
                 });
+                // Update matching running tool item in timeline
+                const tl = [...streamTimelineRef.current];
+                for (let i = tl.length - 1; i >= 0; i--) {
+                  const item = tl[i];
+                  if (item.kind === "tool" && item.name === toolName && item.status === "running") {
+                    tl[i] = { ...item, status: "done", success: event.success, durationMs: event.duration_ms };
+                    break;
+                  }
+                }
+                streamTimelineRef.current = tl;
+                setStreamTimeline([...tl]);
               } else if (event.type === "citation") {
                 newCitations.push({
                   chunk_id: event.chunk_id,
@@ -507,10 +606,16 @@ export function useChatStream(config: UseChatStreamConfig) {
         }
 
         if (streamText) {
+          // Snapshot the timeline (filter out any lingering "running" items)
+          const finalTimeline = streamTimelineRef.current.filter(
+            (item): item is MessageTimelineItem =>
+              item.kind !== "tool" || item.status === "done",
+          );
           const assistantMsg: ChatMessage = {
             clientId: newClientId(),
             role: "assistant",
             text: streamText,
+            ...(finalTimeline.length > 0 ? { timeline: finalTimeline } : {}),
           };
           setMsgs((prev) => {
             const next = [...prev, assistantMsg];
@@ -520,6 +625,8 @@ export function useChatStream(config: UseChatStreamConfig) {
         }
         setStreaming("");
         setToolActivity([]);
+        streamTimelineRef.current = [];
+        setStreamTimeline([]);
       } catch (e) {
         if ((e as { name?: string }).name !== "AbortError") {
           const msg = e instanceof Error ? e.message : "请求失败";
@@ -537,6 +644,8 @@ export function useChatStream(config: UseChatStreamConfig) {
         }
         setStreaming("");
         setToolActivity([]);
+        streamTimelineRef.current = [];
+        setStreamTimeline([]);
       } finally {
         setBusy(false);
       }
@@ -721,6 +830,7 @@ export function useChatStream(config: UseChatStreamConfig) {
     msgs,
     streaming,
     toolActivity,
+    streamTimeline,
     busy,
     citations,
     lastMeta,

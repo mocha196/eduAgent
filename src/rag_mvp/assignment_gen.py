@@ -25,7 +25,8 @@ from loguru import logger
 
 from .config import settings
 from .engine import course_aquery_data
-from .llm import llm_model_func, llm_chat_model_func
+from .llm import llm_chat_model_func
+from .tracing import create_assignment_trace, end_span, flush, span
 from .worker_async_loop import is_worker_async_loop_started, run_worker_coroutine
 from .question_gen import (
     DEFAULT_OBJECTIVE_WEIGHTS,
@@ -489,7 +490,7 @@ async def _run_fixer(
             orig["options"] = fix.get("options", orig.get("options", []))
             orig["answer"] = fix.get("answer", orig["answer"])
             orig["explanation"] = fix.get("explanation", orig.get("explanation", ""))
-            logger.info("FixerAgent: rewrote Q{} (entity={})", qid, orig.get("entity"))
+            logger.info("FixerAgent: rewrote Q{} (entities={})", qid, orig.get("entities") or orig.get("entity"))
 
     # Remove deleted questions
     questions = [q for q in questions if q["id"] not in delete_ids]
@@ -798,6 +799,12 @@ def generate_assignment(
                     assignment_id, course_id,
                 )
 
+                _trace = create_assignment_trace(
+                    assignment_id=assignment_id,
+                    course_id=course_id,
+                    teacher_request=teacher_request,
+                )
+
                 # ── Step 1: Extract generation params (structured or NLP defaults) ─
                 if structured_params is not None:
                     sp = structured_params
@@ -842,7 +849,9 @@ def generate_assignment(
 
                 # ── Step 4: Planner — assign entities + focus per slot ─────────
                 planner_candidates = candidates[:min(len(candidates), max(count * 2, 10), 40)]
+                _sp_planner = span(_trace, "planner", input={"count": count, "topic_hint": topic_hint})
                 blueprint = await _run_planner(teacher_request, planner_candidates, slots, dw)
+                end_span(_sp_planner, output={"title": blueprint.get("title"), "questions_count": len(blueprint.get("questions") or [])})
                 logger.info("Blueprint ready: title={}", blueprint.get("title"))
 
                 # ── Step 5: Merge slots into blueprint.questions + fallback/pad ─
@@ -882,6 +891,7 @@ def generate_assignment(
 
                 # ── Step 6: Generate questions per blueprint slot ──────────────
                 sem = asyncio.Semaphore(settings.llm_max_async)
+                _sp_qgen = span(_trace, "question_generation", input={"count": len(blueprint["questions"])})
 
                 async def _guarded(bq: dict) -> dict | None:
                     entity = _match_entity(
@@ -901,6 +911,8 @@ def generate_assignment(
                             objective=bq["objective"],
                             entity_names=bq.get("entity_names") or [entity["name"]],
                             difficulty=bq["difficulty"],
+                            focus=bq.get("focus", ""),
+                            _trace=_sp_qgen,
                         )
 
                 tasks = [_guarded(bq) for bq in blueprint["questions"]]
@@ -915,6 +927,8 @@ def generate_assignment(
                         questions.append(r)
                     elif isinstance(r, Exception):
                         logger.warning("Question generation task failed: {}", r)
+
+                end_span(_sp_qgen, output={"generated": len(questions), "failed": len(tasks) - len(questions)})
 
                 if not questions:
                     raise RuntimeError("All question generation tasks failed — check LLM logs.")
@@ -938,6 +952,7 @@ def generate_assignment(
                 MAX_ROUNDS = 3
                 PASS_SCORE = 0.85
                 quality_report: dict[str, Any] = {}
+                _sp_review = span(_trace, "reviewer", input={"question_count": len(questions)})
                 for _round in range(1, MAX_ROUNDS + 1):
                     quality_report = await _run_reviewer(questions, blueprint)
                     score = float(quality_report.get("overall_score", 0))
@@ -971,10 +986,12 @@ def generate_assignment(
                     status="DRAFT",
                 )
                 final_score = quality_report.get("overall_score", "N/A")
+                end_span(_sp_review, output={"overall_score": final_score, "passed": quality_report.get("passed")})
                 logger.info(
                     "Assignment {} DRAFT — final_score={} total_questions={}",
                     assignment_id, final_score, len(questions),
                 )
+                flush()
 
             except Exception as exc:
                 logger.exception(

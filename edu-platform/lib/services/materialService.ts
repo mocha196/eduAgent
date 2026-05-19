@@ -658,6 +658,8 @@ export async function getMaterialDetailDto(
     indexed_chunk_count: m.indexedChunkCount,
     created_at: m.createdAt.toISOString(),
     status_message: m.statusMessage,
+    transcript: m.transcriptText ?? null,
+    video_summary: m.videoSummary ?? null,
   };
 }
 

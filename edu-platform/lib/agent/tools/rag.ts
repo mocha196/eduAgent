@@ -4,6 +4,8 @@
  */
 
 import type { Tool, TurnContext, ToolResult } from "../types";
+import { runSubAgent } from "../subagent";
+import { getLLMClient, getRoleConfig } from "../llm-registry";
 
 // ---- Shared HTTP helper ----------------------------------------------------
 
@@ -60,6 +62,77 @@ function _hitsToB3Citations(hits: HitItem[]): ToolResult["citations"] {
   }));
 }
 
+// ---- Agentic-RAG helpers ---------------------------------------------------
+
+const RELEVANCE_THRESHOLD = 0.2;
+
+/** Merge hits from multiple sub-queries, deduplicating by chunk_id (keep max score). */
+function _mergeHits(hitArrays: HitItem[][]): HitItem[] {
+  const map = new Map<string, HitItem>();
+  for (const hits of hitArrays) {
+    for (const hit of hits) {
+      const existing = map.get(hit.chunk_id);
+      if (!existing || (hit.relevance_score ?? 0) > (existing.relevance_score ?? 0)) {
+        map.set(hit.chunk_id, hit);
+      }
+    }
+  }
+  return Array.from(map.values()).sort(
+    (a, b) => (b.relevance_score ?? 0) - (a.relevance_score ?? 0),
+  );
+}
+
+/** Ask a sub-agent (title model, no tools) whether the query needs decomposition. */
+async function _decomposeQuery(
+  question: string,
+  ctx: TurnContext,
+): Promise<{ decompose: boolean; sub_queries: string[] }> {
+  const client = getLLMClient("title");
+  const { model } = getRoleConfig("title");
+  const task =
+    `你是查询分析器。判断以下查询是否包含多个独立子问题（如比较不同概念、多方面权衡），需分别检索才能完整回答。\n\n` +
+    `查询：${question}\n\n` +
+    `仅输出 JSON，格式：{"decompose": boolean, "sub_queries": ["子问题1", "子问题2"], "reason": "理由"}\n` +
+    `sub_queries 上限 3 个；decompose=false 时 sub_queries 为空数组。`;
+  try {
+    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx }, 0);
+    if (!result.success) return { decompose: false, sub_queries: [] };
+    const jsonMatch = result.summary.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { decompose: false, sub_queries: [] };
+    const parsed = JSON.parse(jsonMatch[0]) as { decompose?: boolean; sub_queries?: unknown[] };
+    if (!parsed.decompose || !Array.isArray(parsed.sub_queries)) {
+      return { decompose: false, sub_queries: [] };
+    }
+    const sub_queries = (parsed.sub_queries as unknown[])
+      .filter((q): q is string => typeof q === "string" && q.trim().length > 0)
+      .slice(0, 3);
+    return sub_queries.length >= 2
+      ? { decompose: true, sub_queries }
+      : { decompose: false, sub_queries: [] };
+  } catch {
+    return { decompose: false, sub_queries: [] };
+  }
+}
+
+/** Ask sub-agent (title model, no tools) to rewrite a low-confidence query. */
+async function _rewriteQuery(question: string, ctx: TurnContext): Promise<string | null> {
+  const client = getLLMClient("title");
+  const { model } = getRoleConfig("title");
+  const task =
+    `将以下查询改写为更精确、专业、适合知识库语义检索的形式。仅输出 JSON：{"rewritten": "改写后的查询"}\n\n原始查询：${question}`;
+  try {
+    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx }, 0);
+    if (!result.success) return null;
+    const jsonMatch = result.summary.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    const parsed = JSON.parse(jsonMatch[0]) as { rewritten?: string };
+    const rewritten = parsed.rewritten?.trim();
+    return rewritten && rewritten !== question ? rewritten : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- knowledge_query -------------------------------------------------------
 
 function _normalizeSource(raw: unknown): string | null {
@@ -85,15 +158,18 @@ export const knowledgeQueryTool: Tool = {
   name: "knowledge_query",
   description:
     "从知识库中检索信息，回答关于已导入文档/课程资料（如 PPT、PDF、讲义）的任何问题。" +
-    "在回答概念、原理、定义、事实类问题时应首先调用此工具。",
+    "在回答概念、原理、定义、事实类问题时应优先调用此工具。",
   parameters: {
     type: "object",
     properties: {
       question: { type: "string", description: "要查询的自然语言问题" },
       mode: {
         type: "string",
-        enum: ["hybrid", "local", "global", "naive"],
-        description: "检索模式：hybrid（默认）、local、global、naive",
+        enum: ["naive", "mix", "hybrid", "local", "global"],
+        description:
+          "检索模式。naive：纯向量检索，速度快；" +
+          "mix：向量 + 知识图谱，覆盖更广；" +
+          "hybrid/local/global：其他图谱模式。",
       },
       sources: {
         description:
@@ -141,27 +217,75 @@ export const knowledgeQueryTool: Tool = {
     }
 
     const top_k = typeof args.top_k === "number" ? Math.max(1, Math.min(20, args.top_k)) : 5;
+    const mode = typeof args.mode === "string" ? args.mode : "mix";
 
     type QueryResp = { hits: HitItem[]; warnings: string[] };
-    const resp = await ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, {
+    const baseBody = {
       source,
       user_id: ctx.userId,
       accessible_course_ids: ctx.accessibleCourseIds,
       course_id: ctx.courseId ?? null,
-      question,
-      mode: args.mode ?? "hybrid",
+      mode,
       top_k,
-    });
+    };
 
-    const content = _formatHitsForLlm(resp.hits);
-    const citations = _hitsToB3Citations(resp.hits);
+    // ---- Phase 4: LLM-driven query decomposition -------------------------
+    const decomposition = await _decomposeQuery(question, ctx);
+    let hits: HitItem[];
+    if (decomposition.decompose) {
+      const results = await Promise.all(
+        decomposition.sub_queries.map((q) =>
+          ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, { ...baseBody, question: q }),
+        ),
+      );
+      hits = _mergeHits(results.map((r) => r.hits));
+    } else {
+      const resp = await ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, {
+        ...baseBody,
+        question,
+      });
+      hits = resp.hits;
+    }
+
+    // ---- Phase 2: Relevance verification ---------------------------------
+    const maxScore =
+      hits.length > 0 ? Math.max(...hits.map((h) => h.relevance_score ?? 0)) : 0;
+    let lowConfidence = hits.length === 0 || maxScore < RELEVANCE_THRESHOLD;
+
+    // ---- Phase 3: Adaptive query rewriting --------------------------------
+    let rewritten = false;
+    if (lowConfidence) {
+      const newQuery = await _rewriteQuery(question, ctx);
+      if (newQuery) {
+        const retryResp = await ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, {
+          ...baseBody,
+          question: newQuery,
+        });
+        const retryMax =
+          retryResp.hits.length > 0
+            ? Math.max(...retryResp.hits.map((h) => h.relevance_score ?? 0))
+            : 0;
+        if (retryMax > maxScore) {
+          hits = retryResp.hits;
+          lowConfidence = retryMax < RELEVANCE_THRESHOLD;
+          rewritten = true;
+        }
+      }
+    }
+
+    // ---- Format result ---------------------------------------------------
+    let content = _formatHitsForLlm(hits);
+    if (rewritten) content += "\n\n（已自动改写查询）";
+    if (lowConfidence) content += "\n\n[置信度: 低]";
+
+    const citations = _hitsToB3Citations(hits);
     return { content, citations };
   },
 };
 
-// ---- generate_quiz ---------------------------------------------------------
+// ---- generate_quiz (disabled) ----------------------------------------------
 
-export const generateQuizTool: Tool = {
+/* export const generateQuizTool: Tool = {
   name: "generate_quiz",
   description:
     "根据课程知识库生成练习题。当用户要求练习、做题、出题或测验时调用此工具。",
@@ -196,7 +320,7 @@ export const generateQuizTool: Tool = {
     });
     return JSON.stringify(result);
   },
-};
+}; */
 
 // ---- build_mindmap ---------------------------------------------------------
 

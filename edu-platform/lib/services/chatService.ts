@@ -5,7 +5,9 @@ const px = prisma as any;
 import { ApiError } from "@/lib/http/api-error";
 import { randomUUID } from "crypto";
 import OpenAI from "openai";
-import { getLLMClient, getTitleModel, getVisionModel, getChatModel, getRoleExtraBody } from "@/lib/agent/llm-registry";
+import { getLLMClient, getTitleModel, getVisionModel, getChatModel, getRoleExtraBody, getMemoryModel } from "@/lib/agent/llm-registry";
+import { runWithUserLlm } from "@/lib/agent/user-llm-store";
+import { createStandaloneTrace, flushLangfuse, recordGeneration } from "@/lib/agent/tracing/langfuse-tracer";
 import { createReActStream } from "@/lib/agent/react-loop";
 import { sessionStore } from "@/lib/agent/session-store";
 import type { Message } from "@/lib/agent/types";
@@ -13,6 +15,7 @@ import {
   getMemoryCoordinator,
   getSkillsLoader,
   buildAgentConfig,
+  ContextManager,
 } from "@/lib/agent/setup";
 import { promptBuilder } from "@/lib/agent/prompt-builder";
 import { memoryStore } from "@/lib/agent/memory/memory-store";
@@ -401,6 +404,8 @@ type PersistTransformOpts = {
   sessionId: string;
   question: string;
   persist: boolean;
+  /** Langfuse trace ID — stored in QaLog.metadata for cross-system correlation. */
+  traceId?: string;
   /** Snapshot of session history at request-start time (after any trimming). Used by flush() to avoid re-reading Redis. */
   baseHistory: Message[];
 };
@@ -479,6 +484,7 @@ function createB3PersistTransform(
               hitSources: [],
               toolCalls: collectedToolCalls,
               citations: collectedCitations,
+              metadata: opts.traceId ? { langfuseTraceId: opts.traceId } : undefined,
             } as Parameters<typeof prisma.qaLog.create>[0]["data"],
           });
           // Fire-and-forget: set session title on the first message
@@ -510,6 +516,60 @@ function createB3PersistTransform(
 
 // ---- Vision pre-processing ------------------------------------------------
 
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase();
+  if (!h) return true;
+  if (h === "localhost" || h === "::1" || h.endsWith(".local")) return true;
+  if (!h.includes(".")) return true; // e.g. docker internal host: "minio"
+  if (/^127\./.test(h)) return true;
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+  return false;
+}
+
+function normalizeVisionUrl(raw: string): string {
+  // Keep query string intact while escaping non-ASCII chars (common in filenames).
+  return encodeURI(raw.trim());
+}
+
+async function toInlineDataUrl(url: string, fallbackMime: string): Promise<string | null> {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return null;
+  const contentType = (res.headers.get("content-type") ?? fallbackMime)
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  if (!contentType.startsWith("image/")) return null;
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return `data:${contentType};base64,${bytes.toString("base64")}`;
+}
+
+async function buildVisionImageUrl(att: AttachmentParam): Promise<string | null> {
+  const raw = att.presigned_url?.trim();
+  if (!raw) return null;
+
+  let normalized: string;
+  try {
+    normalized = normalizeVisionUrl(raw);
+    const parsed = new URL(normalized);
+    const isHttp = parsed.protocol === "http:" || parsed.protocol === "https:";
+    if (!isHttp) return null;
+
+    // Many hosted vision providers reject/无法访问私网地址；改成 data URL 更稳。
+    if (isPrivateOrLocalHostname(parsed.hostname)) {
+      const inline = await toInlineDataUrl(normalized, att.mime_type || "image/png");
+      if (inline) return inline;
+      return null; // Cannot pass private/local URL to external vision model
+    }
+  } catch {
+    return null;
+  }
+
+  return normalized;
+}
+
 /**
  * If there are image attachments, call the vision model (e.g. qwen3.6-plus) first
  * to generate a text description, then prepend it to the user message.
@@ -526,14 +586,23 @@ async function describeImageAttachments(
     const client = getLLMClient("vision");
     const model = getVisionModel();
 
+    const imageUrls = (
+      await Promise.all(imageAtts.map((a) => buildVisionImageUrl(a)))
+    ).filter((u): u is string => !!u);
+    if (imageUrls.length === 0) return userMessage;
+
     const contentParts: OpenAI.Chat.ChatCompletionContentPart[] = [
       { type: "text", text: "请详细描述以下图片的内容，包括文字、图表、示意图、公式等所有可见信息：" },
-      ...imageAtts.map((a) => ({
+      ...imageUrls.map((url) => ({
         type: "image_url" as const,
-        image_url: { url: a.presigned_url },
+        image_url: { url },
       })),
     ];
 
+    const trace = createStandaloneTrace({
+      name: "chat.describe_images",
+      metadata: { model, imageCount: imageUrls.length },
+    });
     const resp = await client.chat.completions.create({
       model,
       messages: [{ role: "user", content: contentParts }],
@@ -541,6 +610,18 @@ async function describeImageAttachments(
     });
 
     const description = resp.choices[0]?.message?.content?.trim();
+    recordGeneration(trace, {
+      name: "describe_images_llm",
+      model,
+      input: contentParts,
+      output: description,
+      usage: {
+        promptTokens: resp.usage?.prompt_tokens,
+        completionTokens: resp.usage?.completion_tokens,
+        totalTokens: resp.usage?.total_tokens,
+      },
+    });
+    void flushLangfuse();
     if (!description) return userMessage;
 
     return `[图片内容理解]\n${description}\n\n${userMessage}`;
@@ -557,6 +638,7 @@ async function generateChatTitle(question: string): Promise<string | null> {
     const client = getLLMClient("title");
     const model = getTitleModel();
     const titleExtraBody = getRoleExtraBody("title");
+    const trace = createStandaloneTrace({ name: "chat.generate_title", metadata: { model } });
     const resp = await client.chat.completions.create({
       model,
       messages: [
@@ -572,6 +654,18 @@ async function generateChatTitle(question: string): Promise<string | null> {
       ...titleExtraBody,
     } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
     const title = resp.choices[0]?.message?.content?.trim();
+    recordGeneration(trace, {
+      name: "generate_title_llm",
+      model,
+      input: question.slice(0, 500),
+      output: title,
+      usage: {
+        promptTokens: resp.usage?.prompt_tokens,
+        completionTokens: resp.usage?.completion_tokens,
+        totalTokens: resp.usage?.total_tokens,
+      },
+    });
+    void flushLangfuse();
     return title ?? null;
   } catch {
     return null;
@@ -625,6 +719,7 @@ export type CourseChatParams = {
   message: string;
   accessibleCourseIds: string[];
   lessonId?: string | null;
+  materialId?: string | null;
   attachments?: AttachmentParam[];
   traceId?: string | null;
   debugTrace?: boolean;
@@ -632,6 +727,8 @@ export type CourseChatParams = {
   trimHistoryTo?: number;
   /** When set, route message to this specific session instead of the default get-or-create session. */
   sessionId?: string | null;
+  /** When true, bypass pedagogical system prompt and skills for evaluation/benchmark use. */
+  evalMode?: boolean;
 };
 
 /**
@@ -640,6 +737,7 @@ export type CourseChatParams = {
 export async function courseChatSseResponse(
   p: CourseChatParams,
 ): Promise<Response> {
+  return runWithUserLlm(p.platformStudentId, async () => {
   const user = await prisma.user.findFirst({
     where: { id: p.platformStudentId, isActive: true },
     select: { qaCollectionEnabled: true },
@@ -664,16 +762,45 @@ export async function courseChatSseResponse(
     memoryStore.loadProfile(p.platformStudentId).catch(() => null),
   ]);
 
+  // Pre-fetch material context when user is viewing a specific material
+  let materialContext: import("@/lib/agent/types").MaterialContext | null = null;
+  if (p.materialId) {
+    const mat = await prisma.material.findUnique({
+      where: { id: p.materialId },
+      select: { id: true, originalFilename: true, fileType: true, videoSummary: true },
+    });
+    if (mat) {
+      materialContext = {
+        materialId: mat.id,
+        filename: mat.originalFilename,
+        fileType: mat.fileType,
+        videoSummary: mat.videoSummary ?? null,
+      };
+    }
+  }
+
   // Apply trim: when regenerating or editing, discard history beyond the branch point.
   const effectiveHistory: Message[] =
     p.trimHistoryTo !== undefined ? history.slice(0, p.trimHistoryTo) : history;
+
+  // Summarise older turns with LLM when history is too long; falls back to sliding-window on error.
+  const ctxMgr = new ContextManager(
+    parseInt(process.env.AGENT_MAX_CONTEXT_TOKENS ?? "120000", 10),
+  );
+  const { messages: summarizedHistory } = await ctxMgr
+    .compressWithSummary(effectiveHistory, getLLMClient("memory"), getMemoryModel())
+    .catch(() => ({ messages: effectiveHistory, didSummarize: false }));
 
   const coordinator = getMemoryCoordinator();
   const memoryBlock = await coordinator
     .buildRetrievedMemoryBlock(p.platformStudentId, p.message)
     .catch(() => "");
 
-  const skills = getSkillsLoader().load();
+  const skills = p.evalMode
+    ? [] // No pedagogical skills in eval mode
+    : getSkillsLoader()
+        .load()
+        .map((s) => (s.name === "course_qa" ? { ...s, alwaysInject: true } : s));
   const userMessage = await describeImageAttachments(p.attachments, p.message);
   const config = buildAgentConfig(
     p.attachments?.map((a) => ({
@@ -682,8 +809,10 @@ export async function courseChatSseResponse(
       mime_type: a.mime_type,
       name: a.name,
     })),
+    p.evalMode,
   );
 
+  const traceId = p.traceId ?? randomUUID();
   const stream = createReActStream({
     userMessage,
     config,
@@ -694,7 +823,9 @@ export async function courseChatSseResponse(
       accessibleCourseIds: p.accessibleCourseIds,
       courseId: p.courseId,
       lessonId: p.lessonId ?? null,
-      traceId: p.traceId ?? null,
+      materialId: p.materialId ?? null,
+      materialContext,
+      traceId,
       debugTrace: p.debugTrace ?? false,
     },
     coordinator,
@@ -702,7 +833,8 @@ export async function courseChatSseResponse(
     skills,
     profile,
     memoryBlock,
-    history: effectiveHistory,
+    history: summarizedHistory,
+    allowedTools: p.evalMode ? ["knowledge_query"] : undefined,
   });
 
   const out = stream.pipeThrough(
@@ -713,7 +845,8 @@ export async function courseChatSseResponse(
       sessionId,
       question: p.message,
       persist: user.qaCollectionEnabled,
-      baseHistory: effectiveHistory,
+      traceId,
+      baseHistory: summarizedHistory,
     }),
   );
 
@@ -725,6 +858,7 @@ export async function courseChatSseResponse(
       Connection: "keep-alive",
     },
   });
+  }); // end runWithUserLlm
 }
 
 export type QaCenterChatParams = {
@@ -737,6 +871,17 @@ export type QaCenterChatParams = {
   traceId?: string | null;
   debugTrace?: boolean;
   /** When set, truncate session history to this many messages before processing (used for regenerate/edit). */
+  trimHistoryTo?: number;
+};
+
+export type PersonalKbChatParams = {
+  userId: string;
+  message: string;
+  sessionId: string;
+  materialId?: string | null;
+  attachments?: AttachmentParam[];
+  traceId?: string | null;
+  debugTrace?: boolean;
   trimHistoryTo?: number;
 };
 
@@ -784,6 +929,7 @@ async function getOrCreateQaCenterAgentSession(
 export async function qaCenterChatSseResponse(
   p: QaCenterChatParams,
 ): Promise<Response> {
+  return runWithUserLlm(p.platformStudentId, async () => {
   const user = await prisma.user.findFirst({
     where: { id: p.platformStudentId, isActive: true },
     select: { qaCollectionEnabled: true },
@@ -805,12 +951,22 @@ export async function qaCenterChatSseResponse(
   const effectiveHistory: Message[] =
     p.trimHistoryTo !== undefined ? history.slice(0, p.trimHistoryTo) : history;
 
+  // Summarise older turns with LLM when history is too long; falls back to sliding-window on error.
+  const ctxMgr = new ContextManager(
+    parseInt(process.env.AGENT_MAX_CONTEXT_TOKENS ?? "120000", 10),
+  );
+  const { messages: summarizedHistory } = await ctxMgr
+    .compressWithSummary(effectiveHistory, getLLMClient("memory"), getMemoryModel())
+    .catch(() => ({ messages: effectiveHistory, didSummarize: false }));
+
   const coordinator = getMemoryCoordinator();
   const memoryBlock = await coordinator
     .buildRetrievedMemoryBlock(p.platformStudentId, p.message)
     .catch(() => "");
 
-  const skills = getSkillsLoader().load();
+  const skills = getSkillsLoader()
+    .load()
+    .map((s) => (s.name === "course_qa" ? { ...s, alwaysInject: true } : s));
   const userMessage = await describeImageAttachments(p.attachments, p.message);
   const config = buildAgentConfig(
     p.attachments?.map((a) => ({
@@ -831,7 +987,7 @@ export async function qaCenterChatSseResponse(
       accessibleCourseIds: p.accessibleCourseIds,
       courseId: null,
       lessonId: null,
-      traceId: p.traceId ?? null,
+      traceId: p.traceId ?? randomUUID(),
       debugTrace: p.debugTrace ?? false,
     },
     coordinator,
@@ -839,7 +995,7 @@ export async function qaCenterChatSseResponse(
     skills,
     profile,
     memoryBlock,
-    history: effectiveHistory,
+    history: summarizedHistory,
   });
 
   const out = stream.pipeThrough(
@@ -850,7 +1006,8 @@ export async function qaCenterChatSseResponse(
       sessionId,
       question: p.message,
       persist: user.qaCollectionEnabled,
-      baseHistory: effectiveHistory,
+      traceId: p.traceId ?? undefined,
+      baseHistory: summarizedHistory,
     }),
   );
 
@@ -863,4 +1020,120 @@ export async function qaCenterChatSseResponse(
       "X-Qa-Center-Session-Id": sessionId,
     },
   });
+  }); // end runWithUserLlm
 }
+
+/** Personal knowledge base chat: RAG queries only the user's personal uploaded materials. */
+export async function personalKbChatSseResponse(
+  p: PersonalKbChatParams,
+): Promise<Response> {
+  return runWithUserLlm(p.userId, async () => {
+  const user = await prisma.user.findFirst({
+    where: { id: p.userId, isActive: true },
+    select: { qaCollectionEnabled: true },
+  });
+  if (!user) {
+    throw new ApiError(404, "NOT_FOUND", "User not found");
+  }
+
+  const [history, profile] = await Promise.all([
+    sessionStore.get(p.sessionId).catch(() => []),
+    memoryStore.loadProfile(p.userId).catch(() => null),
+  ]);
+
+  const effectiveHistory: Message[] =
+    p.trimHistoryTo !== undefined ? history.slice(0, p.trimHistoryTo) : history;
+
+  // Summarise older turns with LLM when history is too long; falls back to sliding-window on error.
+  const ctxMgr = new ContextManager(
+    parseInt(process.env.AGENT_MAX_CONTEXT_TOKENS ?? "120000", 10),
+  );
+  const { messages: summarizedHistory } = await ctxMgr
+    .compressWithSummary(effectiveHistory, getLLMClient("memory"), getMemoryModel())
+    .catch(() => ({ messages: effectiveHistory, didSummarize: false }));
+
+  // Pre-fetch personal material context when user is viewing a specific material
+  let materialContext: import("@/lib/agent/types").MaterialContext | null = null;
+  if (p.materialId) {
+    const mat = await prisma.personalMaterial.findUnique({
+      where: { id: p.materialId },
+      select: { id: true, originalFilename: true, fileType: true, videoSummary: true },
+    });
+    if (mat) {
+      materialContext = {
+        materialId: mat.id,
+        filename: mat.originalFilename,
+        fileType: mat.fileType,
+        videoSummary: mat.videoSummary ?? null,
+      };
+    }
+  }
+
+  const coordinator = getMemoryCoordinator();
+  const memoryBlock = await coordinator
+    .buildRetrievedMemoryBlock(p.userId, p.message)
+    .catch(() => "");
+
+  // Inject personal_kb skill; keep rag_usage skill if present
+  const skills = getSkillsLoader()
+    .load()
+    .filter((s) => ["rag_usage", "concept_clarification", "scaffolding"].includes(s.name));
+
+  const userMessage = await describeImageAttachments(p.attachments, p.message);
+  const config = buildAgentConfig(
+    p.attachments?.map((a) => ({
+      id: a.id,
+      presigned_url: a.presigned_url,
+      mime_type: a.mime_type,
+      name: a.name,
+    })),
+  );
+
+  const stream = createReActStream({
+    userMessage,
+    config,
+    toolRegistry,
+    ctx: {
+      userId: p.userId,
+      sessionId: p.sessionId,
+      accessibleCourseIds: [],
+      courseId: null,
+      lessonId: null,
+      materialId: p.materialId ?? null,
+      materialContext,
+      traceId: p.traceId ?? randomUUID(),
+      debugTrace: p.debugTrace ?? false,
+      personalKbUserId: p.userId,
+    },
+    coordinator,
+    promptBuilder,
+    skills,
+    profile,
+    memoryBlock,
+    history: summarizedHistory,
+  });
+
+  const out = stream.pipeThrough(
+    createB3PersistTransform({
+      courseId: null,
+      platformStudentId: p.userId,
+      lessonId: null,
+      sessionId: p.sessionId,
+      question: p.message,
+      persist: false,
+      traceId: p.traceId ?? undefined,
+      baseHistory: summarizedHistory,
+    }),
+  );
+
+  return new Response(out, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
+  }); // end runWithUserLlm
+}
+

@@ -16,6 +16,7 @@ from typing import Any
 from loguru import logger
 
 from .config import settings
+from .tracing import create_trace, end_span, flush, span
 
 # ---------------------------------------------------------------------------
 # Output directory
@@ -234,6 +235,10 @@ async def _refine_with_llm(text: str) -> str:
     )
     prompt = _REFINE_PROMPT.replace("{text}", text)
     logger.info(f"[refine] Sending {len(text):,} chars to {settings.refine_model} …")
+    _trace = create_trace(
+        "mindmap.refine",
+        input={"chars": len(text), "model": settings.refine_model},
+    )
     response = await client.chat.completions.create(
         model=settings.refine_model,
         messages=[
@@ -244,6 +249,8 @@ async def _refine_with_llm(text: str) -> str:
         temperature=0.1,
     )
     refined = response.choices[0].message.content or ""
+    end_span(_trace, output={"chars": len(refined)})
+    flush()
     logger.debug(f"[refine] raw response:\n{refined}")
     logger.info(f"[refine] Received {len(refined):,} chars from model")
     return refined
@@ -358,16 +365,19 @@ def _extract_json(text: str) -> dict:
     raise ValueError("Malformed JSON in LLM response")
 
 
-async def _llm_call(prompt: str) -> str:
+async def _llm_call(prompt: str, _trace: "Any | None" = None, _span_name: str = "mindmap.llm") -> str:
     from .llm import llm_model_func
-    return await llm_model_func(prompt, system_prompt="You are a helpful assistant.")
+    _sp = span(_trace, _span_name, input={"prompt_chars": len(prompt)})
+    result = await llm_model_func(prompt, system_prompt="You are a helpful assistant.")
+    end_span(_sp, output={"response_chars": len(result)})
+    return result
 
 
-async def _extract_chunk_tree(chunk: str, stem: str) -> dict:
+async def _extract_chunk_tree(chunk: str, stem: str, _trace: "Any | None" = None, _index: int = 0) -> dict:
     prompt = _EXTRACT_PROMPT.replace("{chunk}", chunk)
     resp: str | None = None
     try:
-        resp = await _llm_call(prompt)
+        resp = await _llm_call(prompt, _trace=_trace, _span_name=f"mindmap.extract_chunk_{_index}")
         logger.debug(f"[chunk-extract] raw response:\n{resp}")
         tree = _extract_json(resp)
         return tree
@@ -377,14 +387,14 @@ async def _extract_chunk_tree(chunk: str, stem: str) -> dict:
         return {"name": stem, "children": []}
 
 
-async def _merge_trees(trees: list[dict], root_name: str) -> dict:
+async def _merge_trees(trees: list[dict], root_name: str, _trace: "Any | None" = None) -> dict:
     if len(trees) == 1:
         return trees[0]
     trees_json = json.dumps(trees, ensure_ascii=False)
     prompt = _MERGE_PROMPT.replace("{trees_json}", trees_json)
     resp: str | None = None
     try:
-        resp = await _llm_call(prompt)
+        resp = await _llm_call(prompt, _trace=_trace, _span_name="mindmap.merge")
         logger.debug(f"[merge] raw response:\n{resp}")
         merged = _extract_json(resp)
         if "name" not in merged:
@@ -400,12 +410,17 @@ async def _build_llm_tree(md_path: Path, max_chars: int) -> dict:
     stem = md_path.stem
     chunks = _split_md_into_chunks(md_path, max_chars)
     logger.info(f"{stem}: {len(chunks)} chunks to process")
+    _trace = create_trace(
+        "mindmap.generate",
+        input={"stem": stem, "chunks": len(chunks)},
+        metadata={"max_chars": max_chars},
+    )
 
     # Chunk Loop
     local_trees: list[dict] = []
     for i, chunk in enumerate(chunks, 1):
         logger.info(f"  chunk {i}/{len(chunks)} …")
-        tree = await _extract_chunk_tree(chunk, stem)
+        tree = await _extract_chunk_tree(chunk, stem, _trace=_trace, _index=i)
         local_trees.append(tree)
 
     # Merge Loop: batch-merge in groups of 3 until single tree
@@ -415,13 +430,15 @@ async def _build_llm_tree(md_path: Path, max_chars: int) -> dict:
         next_round: list[dict] = []
         for i in range(0, len(local_trees), batch):
             group = local_trees[i : i + batch]
-            merged = await _merge_trees(group, stem)
+            merged = await _merge_trees(group, stem, _trace=_trace)
             next_round.append(merged)
         local_trees = next_round
 
     final = local_trees[0] if local_trees else {"name": stem, "children": []}
     if not final.get("name"):
         final["name"] = stem
+    end_span(_trace, output={"root": final.get("name"), "children": len(final.get("children", []))})
+    flush()
     return final
 
 

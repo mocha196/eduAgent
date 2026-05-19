@@ -9,3 +9,7 @@ coverage
 .DS_Store
 
 /app/generated/prisma
+
+# User LLM config (encrypted API keys — must not be committed)
+/data/llm-config/
+

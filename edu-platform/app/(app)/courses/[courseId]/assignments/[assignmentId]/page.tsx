@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
   ChevronLeft,
@@ -14,6 +14,7 @@ import {
   Star,
   FileQuestion,
   Plus,
+  Users,
 } from "lucide-react";
 import {
   DndContext,
@@ -34,8 +35,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { QuestionCard } from "@/components/assignment/QuestionCard";
 import { AddQuestionDialog } from "@/components/assignment/AddQuestionDialog";
+import { SubmissionForm } from "@/components/assignment/SubmissionForm";
+import { SubmissionResultView } from "@/components/assignment/SubmissionResultView";
 import { useNotify } from "@/hooks/useNotify";
-import type { AssignmentDetailDto, CompleteQuestionBody, QuestionItem, RegenerateQuestionBody } from "@/lib/dto/assignment.dto";
+import type { AssignmentDetailDto, AssignmentStudentViewDto, CompleteQuestionBody, QuestionItem, RegenerateQuestionBody } from "@/lib/dto/assignment.dto";
+import type { SubmissionDetailDto } from "@/lib/dto/submission.dto";
 import { AssignmentStatus } from "@prisma/client";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -50,6 +54,14 @@ export default function AssignmentDetailPage() {
   const { courseId, assignmentId } = useParams<{ courseId: string; assignmentId: string }>();
   const { notification, notify } = useNotify();
 
+  const [userRole, setUserRole] = useState<"STUDENT" | "TEACHER" | "ADMIN" | null>(null);
+
+  // ── Student state ──────────────────────────────────────────────────────────
+  const [studentAssignment, setStudentAssignment] = useState<AssignmentStudentViewDto | null>(null);
+  const [mySubmission, setMySubmission] = useState<SubmissionDetailDto | null>(null);
+  const [studentLoaded, setStudentLoaded] = useState(false);
+
+  // ── Teacher state ──────────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -62,6 +74,36 @@ export default function AssignmentDetailPage() {
 
   const sensors = useSensors(useSensor(PointerSensor));
 
+  // Detect role first
+  useEffect(() => {
+    fetch("/api/v1/user", { credentials: "include" })
+      .then((r) => r.json() as Promise<{ role?: string }>)
+      .then((d) => setUserRole((d.role ?? "TEACHER") as "STUDENT" | "TEACHER" | "ADMIN"))
+      .catch(() => setUserRole("TEACHER"));
+  }, []);
+
+  // ── Student load ───────────────────────────────────────────────────────────
+  const loadStudent = useCallback(async () => {
+    const [aRes, sRes] = await Promise.all([
+      fetch(`/api/v1/courses/${courseId}/assignments/${assignmentId}`, { credentials: "include" }),
+      fetch(`/api/v1/courses/${courseId}/assignments/${assignmentId}/submissions/mine`, { credentials: "include" }),
+    ]);
+    if (aRes.ok) {
+      const d = (await aRes.json()) as { assignment: AssignmentStudentViewDto };
+      setStudentAssignment(d.assignment);
+    }
+    if (sRes.ok) {
+      const d = (await sRes.json()) as { submission: SubmissionDetailDto | null };
+      setMySubmission(d.submission);
+    }
+    setStudentLoaded(true);
+  }, [courseId, assignmentId]);
+
+  useEffect(() => {
+    if (userRole === "STUDENT") void loadStudent();
+  }, [userRole, loadStudent]);
+
+  // ── Teacher load ───────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     const res = await fetch(
       `/api/v1/courses/${courseId}/assignments/${assignmentId}`,
@@ -77,15 +119,63 @@ export default function AssignmentDetailPage() {
   }, [courseId, assignmentId]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (userRole && userRole !== "STUDENT") void load();
+  }, [userRole, load]);
 
-  // Poll while GENERATING
+  // Poll while GENERATING (teacher)
   useEffect(() => {
     if (assignment?.status !== AssignmentStatus.GENERATING) return;
     const id = setInterval(() => void load(), 5000);
     return () => clearInterval(id);
   }, [assignment?.status, load]);
+
+  // ── Student branch ─────────────────────────────────────────────────────────
+  if (userRole === "STUDENT") {
+    if (!studentLoaded) {
+      return (
+        <div className="mx-auto w-full max-w-3xl px-4 py-6 space-y-3">
+          {[1, 2, 3].map((i) => <Skeleton key={i} className="h-24 rounded-lg" />)}
+        </div>
+      );
+    }
+
+    if (!studentAssignment) {
+      return (
+        <div className="mx-auto w-full max-w-3xl px-4 py-6 text-center text-muted-foreground">
+          作业不存在或未发布
+        </div>
+      );
+    }
+
+    return (
+      <div className="mx-auto w-full max-w-3xl px-4 py-6 space-y-6">
+        <div className="flex items-center gap-3">
+          <Link href={`/courses/${courseId}/assignments`} className="text-muted-foreground hover:text-foreground">
+            <ChevronLeft size={20} />
+          </Link>
+          <h1 className="text-lg font-semibold flex-1 truncate">{studentAssignment.title}</h1>
+        </div>
+
+        {mySubmission?.status === "RETURNED" ? (
+          <SubmissionResultView
+            submission={mySubmission}
+            questions={(studentAssignment.questions ?? []) as unknown as QuestionItem[]}
+            assignmentTitle={studentAssignment.title}
+          />
+        ) : (
+          <SubmissionForm
+            assignment={studentAssignment}
+            existingSubmission={mySubmission}
+            courseId={courseId}
+            assignmentId={assignmentId}
+            onSubmitted={(sub) => setMySubmission(sub)}
+          />
+        )}
+      </div>
+    );
+  }
+
+
 
   // ── Drag-and-drop ──────────────────────────────────────────────────────────
   function handleDragEnd(event: DragEndEvent) {
@@ -287,10 +377,16 @@ export default function AssignmentDetailPage() {
       {!loading && assignment?.status === "FAILED" && (
         <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
           <AlertCircle size={18} className="text-destructive shrink-0 mt-0.5" />
-          <div>
+          <div className="flex-1">
             <p className="text-sm font-semibold text-destructive">生成失败</p>
             <p className="text-sm text-muted-foreground mt-1">{assignment.errorMessage ?? "未知错误"}</p>
           </div>
+          <Link
+            href={`/courses/${courseId}/assignments/new?retryFrom=${assignmentId}`}
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-md bg-destructive/10 hover:bg-destructive/20 border border-destructive/30 px-3 py-1.5 text-xs font-medium text-destructive transition-colors"
+          >
+            修改并重试
+          </Link>
         </div>
       )}
 
@@ -303,7 +399,7 @@ export default function AssignmentDetailPage() {
                 <Star size={14} className="text-yellow-500" />
                 质量报告
                 <span className="ml-auto text-base font-bold text-primary">
-                  {assignment.qualityReport.overall_score} / 10
+                  {(assignment.qualityReport.overall_score * 10).toFixed(1)} / 10
                 </span>
               </div>
               {assignment.qualityReport.summary && (
@@ -415,11 +511,18 @@ export default function AssignmentDetailPage() {
             </div>
           )}
 
-          {/* Published info */}
           {assignment.status === "PUBLISHED" && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground pt-2 border-t">
+            <div className="flex items-center gap-3 pt-2 border-t">
               <CheckCircle2 size={14} className="text-green-600" />
-              已于 {assignment.publishedAt ? new Date(assignment.publishedAt).toLocaleString("zh-CN") : ""} 发布
+              <span className="text-sm text-muted-foreground flex-1">
+                已于 {assignment.publishedAt ? new Date(assignment.publishedAt).toLocaleString("zh-CN") : ""} 发布
+              </span>
+              <Link href={`/courses/${courseId}/assignments/${assignmentId}/submissions`}>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                  <Users size={14} />
+                  查看提交
+                </Button>
+              </Link>
             </div>
           )}
         </>

@@ -20,8 +20,6 @@ export const rememberFactTool: Tool = {
   name: "remember_fact",
   description:
     "将当前对话中发现的重要学习事实记录到长期记忆中（如掌握情况、偏好、困惑点）。",
-  requiresApproval: true,
-  approvalReason: "此操作将在您的长期记忆中写入一条新记录，后续对话中 AI 会持续引用它。",
   category: "write",
   parameters: {
     type: "object",

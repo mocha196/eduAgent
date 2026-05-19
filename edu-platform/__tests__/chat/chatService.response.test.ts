@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const {
   userFindFirstMock,
+  courseSessionFindFirstMock,
   courseSessionFindUniqueMock,
   courseSessionCreateMock,
   qaCenterFindFirstMock,
@@ -15,6 +16,7 @@ const {
   loadProfileMock,
 } = vi.hoisted(() => ({
   userFindFirstMock: vi.fn(),
+  courseSessionFindFirstMock: vi.fn(),
   courseSessionFindUniqueMock: vi.fn(),
   courseSessionCreateMock: vi.fn(),
   qaCenterFindFirstMock: vi.fn(),
@@ -36,6 +38,7 @@ vi.mock("@/lib/db", () => ({
   prisma: {
     user: { findFirst: userFindFirstMock },
     courseChatSession: {
+      findFirst: courseSessionFindFirstMock,
       findUnique: courseSessionFindUniqueMock,
       create: courseSessionCreateMock,
     },
@@ -99,6 +102,7 @@ import { courseChatSseResponse, qaCenterChatSseResponse } from "@/lib/services/c
 describe("chatService response integration", () => {
   beforeEach(() => {
     userFindFirstMock.mockReset();
+    courseSessionFindFirstMock.mockReset();
     courseSessionFindUniqueMock.mockReset();
     courseSessionCreateMock.mockReset();
     qaCenterFindFirstMock.mockReset();
@@ -122,6 +126,7 @@ describe("chatService response integration", () => {
   it("业务规则：课程对话应输出 SSE 并持久化问答与会话历史", async () => {
     // given
     userFindFirstMock.mockResolvedValue({ qaCollectionEnabled: true });
+    courseSessionFindFirstMock.mockResolvedValue({ agentSessionId: "course-sess-1" });
     courseSessionFindUniqueMock.mockResolvedValue({ agentSessionId: "course-sess-1" });
     sessionGetMock.mockResolvedValue([{ role: "user", content: "历史问题" }]);
 

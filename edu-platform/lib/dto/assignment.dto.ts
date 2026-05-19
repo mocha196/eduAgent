@@ -125,4 +125,25 @@ export interface AssignmentDetailDto extends AssignmentSummaryDto {
   questions: QuestionItem[] | null;
   qualityReport: QualityReport | null;
   publishedAt: string | null;
+  /** Original NLP request stored for retry. */
+  teacherRequest: string | null;
+  /** Original structured params stored for retry. */
+  structuredParams: StructuredGenerationParams | null;
+}
+
+/** Question as seen by a student — answer/explanation redacted until RETURNED. */
+export type StudentQuestionItem = Omit<QuestionItem, "answer" | "explanation"> & {
+  answer: null;
+  explanation: null;
+};
+
+/** Assignment view for enrolled students (no answers until submission is returned). */
+export interface AssignmentStudentViewDto {
+  id: string;
+  title: string;
+  description: string | null;
+  deadline: string | null;
+  publishedAt: string | null;
+  questions: StudentQuestionItem[] | null;
+  totalScore: number;
 }

@@ -22,8 +22,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     const body = (await req.json()) as {
       message?: string;
       lesson_id?: string;
+      material_id?: string;
       session_id?: string;
       trim_history_to?: number;
+      eval_mode?: boolean;
       attachments?: { id: string; key: string; presigned_url: string; mime_type: string; name: string }[];
     };
     const message = typeof body.message === "string" ? body.message.trim() : "";
@@ -51,6 +53,17 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       }
       lessonId = le.id;
     }
+    let materialId: string | null = null;
+    if (body.material_id) {
+      assertUuid(body.material_id, "material_id");
+      const mat = await prisma.material.findFirst({
+        where: { id: body.material_id, courseId, isDeleted: false },
+      });
+      if (!mat) {
+        throw new ApiError(404, "NOT_FOUND", "Material not found in this course");
+      }
+      materialId = mat.id;
+    }
     const traceId = req.headers.get("x-trace-id")?.trim() || null;
     const debugTraceRaw = req.headers.get("x-debug-trace")?.trim().toLowerCase() || "";
     const debugTrace = ["1", "true", "yes", "on"].includes(debugTraceRaw);
@@ -66,11 +79,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       accessibleCourseIds,
       message,
       lessonId,
+      materialId,
       attachments,
       traceId,
       debugTrace,
       trimHistoryTo,
       sessionId,
+      evalMode: body.eval_mode === true,
     });
   } catch (e) {
     if (e instanceof ApiError) return jsonError(e);

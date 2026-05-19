@@ -26,6 +26,7 @@ import {
   useChatStream,
   type AttachmentRef,
   type ChatMessage,
+  type MessageTimelineItem,
   type UseChatStreamConfig,
 } from "@/lib/hooks/useChatStream";
 import { toolEmoji } from "@/lib/chatToolEmoji";
@@ -46,12 +47,20 @@ export type ChatComponentProps =
       variant?: "course";
       courseId: string;
       hydrateSessionId?: string | null;
+      /** ID of the material the user is currently previewing in the dockview. */
+      activeMaterialId?: string | null;
       emptyHint?: string;
     }
   | {
       variant: "qa_center";
       sessionId: string | null;
       onSessionResolved?: (sessionId: string) => void;
+      emptyHint?: string;
+    }
+  | {
+      variant: "personal_kb";
+      sessionId: string | null;
+      activeMaterialId?: string | null;
       emptyHint?: string;
     };
 
@@ -63,16 +72,27 @@ function buildStreamConfig(props: ChatComponentProps): UseChatStreamConfig {
       onResolvedSessionId: props.onSessionResolved,
     };
   }
+  if (props.variant === "personal_kb") {
+    return {
+      kind: "personal_kb",
+      sessionId: props.sessionId,
+      activeMaterialId: props.activeMaterialId ?? null,
+    };
+  }
   return {
     kind: "course",
     courseId: props.courseId,
     hydrateSessionId: props.hydrateSessionId ?? null,
+    activeMaterialId: props.activeMaterialId ?? null,
   };
 }
 
 function defaultEmptyHint(props: ChatComponentProps): string {
   if (props.variant === "qa_center") {
     return "向助手提问，将检索你有权限的全部课程资料";
+  }
+  if (props.variant === "personal_kb") {
+    return "向助手提问，将检索你的个人知识库";
   }
   return "向我提问关于本节课的任何问题";
 }
@@ -96,12 +116,14 @@ export default function ChatComponent(props: ChatComponentProps) {
   const [input, setInput] = useState("");
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const [imagePreview, setImagePreview] = useState<{ src: string; name: string } | null>(null);
   const { copiedId: copiedClientId, trigger: triggerCopyFeedback } = useCopyFeedback();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const {
     msgs,
     streaming,
     toolActivity,
+    streamTimeline,
     busy,
     citations,
     lastMeta,
@@ -124,6 +146,8 @@ export default function ChatComponent(props: ChatComponentProps) {
   const threadKey =
     props.variant === "qa_center"
       ? props.sessionId ?? ""
+      : props.variant === "personal_kb"
+      ? `pkb:${props.sessionId ?? ""}`
       : `${props.courseId}:${props.hydrateSessionId ?? ""}`;
 
   useEffect(() => {
@@ -179,7 +203,7 @@ export default function ChatComponent(props: ChatComponentProps) {
         scrollElement.scrollTop = scrollElement.scrollHeight;
       }
     }
-  }, [msgs, streaming, toolActivity]);
+  }, [msgs, streaming, toolActivity, streamTimeline]);
 
   const handleSend = () => {
     if ((!input.trim() && pendingAttachments.length === 0) || busy) return;
@@ -256,12 +280,16 @@ export default function ChatComponent(props: ChatComponentProps) {
                       )}
                     >
                       {msg.attachments.map((att) => (
-                        <AttachmentBubble key={att.id} att={att} />
+                        <AttachmentBubble
+                          key={att.id}
+                          att={att}
+                          onPreview={(src, name) => setImagePreview({ src, name })}
+                        />
                       ))}
                     </div>
                   )}
 
-                  {msg.role === "assistant" && (msg.toolActivity?.length ?? 0) > 0 && (
+                  {msg.role === "assistant" && (msg.toolActivity?.length ?? 0) > 0 && !msg.timeline?.length && (
                     <ul className="m-0 mb-1.5 flex list-none flex-col gap-1.5 p-0 text-sm text-muted-foreground">
                       {msg.toolActivity!.map((row, ri) => (
                         <li
@@ -271,8 +299,14 @@ export default function ChatComponent(props: ChatComponentProps) {
                           <span className="tabular-nums" aria-hidden>{toolEmoji(row.name)}</span>
                           <span className="font-mono text-xs text-foreground/90">{row.name}</span>
                           <span className="text-xs">
-                            <span className={row.success === false ? "text-destructive" : "text-emerald-600 dark:text-emerald-400"}>
-                              {row.success === false ? "✗" : "✓"}
+                            <span className={
+                              row.success === false
+                                ? "text-destructive"
+                                : row.success === true
+                                  ? "text-emerald-600 dark:text-emerald-400"
+                                  : "text-muted-foreground"
+                            }>
+                              {row.success === false ? "✗" : row.success === true ? "✓" : "?"}
                             </span>
                             {typeof row.durationMs === "number" && (
                               <span className="ml-1.5 opacity-80">{(row.durationMs / 1000).toFixed(1)}s</span>
@@ -327,6 +361,8 @@ export default function ChatComponent(props: ChatComponentProps) {
                       >
                         {msg.role === "user" ? (
                           <div className="whitespace-pre-wrap">{msg.text}</div>
+                        ) : msg.timeline?.length ? (
+                          <AssistantTimeline items={msg.timeline} isLive={false} />
                         ) : (
                           <ReactMarkdown
                             remarkPlugins={markdownRemarkPlugins}
@@ -460,46 +496,37 @@ export default function ChatComponent(props: ChatComponentProps) {
 
           {busy && (
             <div className="group flex w-full flex-col gap-2 pl-4">
-              {toolActivity.length > 0 && (
-                <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm text-muted-foreground">
-                  {toolActivity.map((row) => (
-                    <li
-                      key={row.clientKey}
-                      className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-1.5"
-                    >
-                      <span className="tabular-nums" aria-hidden>
-                        {toolEmoji(row.name)}
-                      </span>
-                      <span className="font-mono text-xs text-foreground/90">{row.name}</span>
-                      {row.status === "running" && (
-                        <Loader2
-                          className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70"
-                          aria-label="执行中"
-                        />
-                      )}
-                      {row.status === "done" && (
-                        <span className="text-xs">
-                          <span
-                            className={
-                              row.success === false
-                                ? "text-destructive"
-                                : "text-emerald-600 dark:text-emerald-400"
-                            }
-                          >
-                            {row.success === false ? "✗" : "✓"}
-                          </span>
-                          {typeof row.durationMs === "number" && (
-                            <span className="ml-1.5 opacity-80">
-                              {(row.durationMs / 1000).toFixed(1)}s
-                            </span>
+              {streamTimeline.length > 0 ? (
+                <div className="flex w-full justify-start">
+                  <div className="flex min-w-0 w-full flex-col items-start">
+                    <div className="rounded-none px-4 py-3 bg-transparent text-foreground prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0">
+                      <AssistantTimeline items={streamTimeline} isLive={true} />
+                    </div>
+                    {streaming.length > 0 && (
+                      <div className="mt-1 flex opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                          aria-label="复制正在生成的内容"
+                          onClick={() => {
+                            void copyToClipboard(streaming)
+                              .then(() => triggerCopyFeedback("streaming"))
+                              .catch(() => {});
+                          }}
+                        >
+                          {copiedClientId === "streaming" ? (
+                            <Check size={14} strokeWidth={2} className="text-emerald-500" />
+                          ) : (
+                            <Copy size={14} strokeWidth={2} />
                           )}
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {!streaming && (
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
                 <div
                   className="flex items-center gap-2 text-sm text-muted-foreground"
                   aria-live="polite"
@@ -507,42 +534,6 @@ export default function ChatComponent(props: ChatComponentProps) {
                 >
                   <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
                   <span>思考中…</span>
-                </div>
-              )}
-              {streaming && (
-                <div className="flex w-full justify-start">
-                  <div className="flex min-w-0 w-full flex-col items-start">
-                    <div className="rounded-none px-4 py-3 bg-transparent text-foreground prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0">
-                      <ReactMarkdown
-                        remarkPlugins={markdownRemarkPlugins}
-                        rehypePlugins={markdownRehypePlugins}
-                      >
-                        {normalizeMathDelimiters(streaming)}
-                      </ReactMarkdown>
-                      <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
-                    </div>
-                    <div className="mt-1 flex opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                        disabled={streaming.length === 0}
-                        aria-label="复制正在生成的内容"
-                        onClick={() => {
-                          void copyToClipboard(streaming)
-                            .then(() => triggerCopyFeedback("streaming"))
-                            .catch(() => {});
-                        }}
-                      >
-                        {copiedClientId === "streaming" ? (
-                          <Check size={14} strokeWidth={2} className="text-emerald-500" />
-                        ) : (
-                          <Copy size={14} strokeWidth={2} />
-                        )}
-                      </Button>
-                    </div>
-                  </div>
                 </div>
               )}
             </div>
@@ -738,11 +729,141 @@ export default function ChatComponent(props: ChatComponentProps) {
           EduAgent 可能会犯错。请补充核实。
         </div>
       </div>
+
+      {imagePreview && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/75 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="附件图片预览"
+          onClick={() => setImagePreview(null)}
+        >
+          <button
+            type="button"
+            className="absolute top-4 right-4 h-9 w-9 rounded-full bg-white/15 text-white hover:bg-white/25 inline-flex items-center justify-center"
+            onClick={() => setImagePreview(null)}
+            aria-label="关闭预览"
+          >
+            <X size={16} />
+          </button>
+          <div
+            className="relative max-w-[92vw] max-h-[88vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Image
+              src={imagePreview.src}
+              alt={imagePreview.name}
+              width={1600}
+              height={1200}
+              unoptimized
+              className="max-w-[92vw] max-h-[88vh] h-auto w-auto rounded-lg shadow-2xl"
+            />
+            <p className="mt-2 text-center text-xs text-white/85 break-all">
+              {imagePreview.name}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function AttachmentBubble({ att }: { att: AttachmentRef }) {
+/**
+ * Renders an interleaved timeline of text chunks and tool call cards.
+ * Used for both live streaming (isLive=true) and historical messages (isLive=false).
+ */
+function AssistantTimeline({
+  items,
+  isLive,
+}: {
+  items: MessageTimelineItem[];
+  isLive: boolean;
+}) {
+  const lastItem = items.length > 0 ? items[items.length - 1] : undefined;
+  // Show a thinking spinner when busy but no events have arrived yet,
+  // or when waiting for LLM to respond after a tool result.
+  const showThinking =
+    isLive &&
+    (items.length === 0 ||
+      (lastItem?.kind === "tool" && lastItem.status === "done"));
+
+  return (
+    <>
+      {items.map((item, i) => {
+        if (item.kind === "text") {
+          const isLastAndLive = isLive && i === items.length - 1;
+          return (
+            // Key by index: consecutive text items are merged, so index is stable per position.
+            <span key={`text-${i}`} className="contents">
+              <ReactMarkdown
+                remarkPlugins={markdownRemarkPlugins}
+                rehypePlugins={markdownRehypePlugins}
+              >
+                {normalizeMathDelimiters(item.content)}
+              </ReactMarkdown>
+              {isLastAndLive && (
+                <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
+              )}
+            </span>
+          );
+        }
+        // Tool item
+        return (
+          <div
+            key={item.clientKey}
+            className="my-1.5 flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-1.5 not-prose"
+          >
+            <span className="tabular-nums" aria-hidden>{toolEmoji(item.name)}</span>
+            <span className="font-mono text-xs text-foreground/90">{item.name}</span>
+            {item.status === "running" ? (
+              <Loader2
+                className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70"
+                aria-label="执行中"
+              />
+            ) : (
+              <span className="text-xs">
+                <span
+                  className={
+                    item.success === false
+                      ? "text-destructive"
+                      : item.success === true
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : "text-muted-foreground"
+                  }
+                >
+                  {item.success === false ? "✗" : item.success === true ? "✓" : "?"}
+                </span>
+                {typeof item.durationMs === "number" && (
+                  <span className="ml-1.5 opacity-80">
+                    {(item.durationMs / 1000).toFixed(1)}s
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+        );
+      })}
+      {showThinking && (
+        <div
+          className="flex items-center gap-2 text-sm text-muted-foreground not-prose"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+          <span>思考中…</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function AttachmentBubble({
+  att,
+  onPreview,
+}: {
+  att: AttachmentRef;
+  onPreview?: (src: string, name: string) => void;
+}) {
   const imgSrc =
     att.mime_type.startsWith("image/") && (att.localPreviewUrl ?? att.presigned_url)
       ? (att.localPreviewUrl ?? att.presigned_url)
@@ -750,14 +871,21 @@ function AttachmentBubble({ att }: { att: AttachmentRef }) {
 
   if (imgSrc) {
     return (
-      <Image
-        src={imgSrc}
-        alt={att.name}
-        width={200}
-        height={200}
-        unoptimized
-        className="max-w-[200px] max-h-[200px] rounded-xl object-cover border border-border"
-      />
+      <button
+        type="button"
+        className="rounded-xl overflow-hidden border border-border hover:opacity-90 transition-opacity"
+        onClick={() => onPreview?.(imgSrc, att.name)}
+        aria-label={`预览附件：${att.name}`}
+      >
+        <Image
+          src={imgSrc}
+          alt={att.name}
+          width={200}
+          height={200}
+          unoptimized
+          className="max-w-[200px] max-h-[200px] rounded-xl object-cover"
+        />
+      </button>
     );
   }
   return (

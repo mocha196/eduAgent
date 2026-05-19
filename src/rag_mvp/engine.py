@@ -208,8 +208,21 @@ _TEXT_IMAGE_FALLBACK_SYSTEM = (
 )
 
 
+def _has_postgres_env() -> bool:
+    """Return True if a PostgreSQL DSN is available for LightRAG PG storage."""
+    import os as _os
+    return bool(
+        _os.environ.get("LIGHTRAG_PG_DSN") or _os.environ.get("DATABASE_URL")
+    )
+
+
 def _build_rag(*, workspace: str = "personal") -> RAGAnything:
     """Instantiate and return a configured RAGAnything instance.
+
+    When a PostgreSQL DSN is available (LIGHTRAG_PG_DSN or DATABASE_URL),
+    PG-backed storages are used so data survives container restarts in
+    production.  Without PG env the legacy file-based defaults are kept for
+    local CLI use.
 
     LightRAG storages are **not** initialised here; callers must
     ``await _ensure_lightrag_storages(rag)`` inside the same ``asyncio.run``
@@ -219,7 +232,20 @@ def _build_rag(*, workspace: str = "personal") -> RAGAnything:
     settings.working_dir.mkdir(parents=True, exist_ok=True)
     settings.output_dir.mkdir(parents=True, exist_ok=True)
 
+    use_pg = _has_postgres_env()
+    if use_pg:
+        ensure_postgres_env_from_database_url()
+
     emb = build_embedding_func()
+    pg_storage_kwargs: dict[str, str] = (
+        {
+            "kv_storage": "PGKVStorage",
+            "vector_storage": "PGVectorStorage",
+            "doc_status_storage": "PGDocStatusStorage",
+        }
+        if use_pg
+        else {}
+    )
     lightrag = LightRAG(
         working_dir=str(settings.working_dir),
         workspace=workspace,
@@ -229,6 +255,7 @@ def _build_rag(*, workspace: str = "personal") -> RAGAnything:
         llm_model_max_async=settings.llm_max_async,
         embedding_func_max_async=settings.embedding_max_async,
         max_parallel_insert=settings.max_parallel_insert,
+        **pg_storage_kwargs,
         **_lightrag_insertion_tuning_kwargs(),
         **_lightrag_constructor_extras(),
     )
@@ -265,14 +292,58 @@ def get_rag() -> RAGAnything:
 
 
 async def get_personal_rag_anything(user_id: str) -> RAGAnything:
-    """Return per-user personal RAGAnything (isolated by user workspace)."""
+    """Return per-user personal RAGAnything (isolated by user workspace, always PG-backed)."""
     workspace = personal_user_to_workspace(user_id)
     async with _personal_init_lock:
         if workspace in _personal_cache:
             return _personal_cache[workspace]
 
-        rag = _build_rag(workspace=workspace)
-        await _ensure_lightrag_storages(rag)
+        # Always use PG storage — never fall back to local JSON files in service context.
+        # Mirrors get_course_rag_anything; raises if DATABASE_URL is absent.
+        ensure_postgres_env_from_database_url()
+
+        settings.working_dir.mkdir(parents=True, exist_ok=True)
+        settings.output_dir.mkdir(parents=True, exist_ok=True)
+
+        emb = build_embedding_func()
+        lightrag = LightRAG(
+            working_dir=str(settings.working_dir),
+            workspace=workspace,
+            llm_model_func=llm_model_func,
+            embedding_func=emb,
+            llm_model_max_async=settings.llm_max_async,
+            embedding_func_max_async=settings.embedding_max_async,
+            max_parallel_insert=settings.max_parallel_insert,
+            kv_storage="PGKVStorage",
+            vector_storage="PGVectorStorage",
+            graph_storage="Neo4JStorage",
+            doc_status_storage="PGDocStatusStorage",
+            **_lightrag_insertion_tuning_kwargs(),
+            **_lightrag_constructor_extras(),
+        )
+        await lightrag.initialize_storages()
+
+        cfg = RAGAnythingConfig(
+            working_dir=str(settings.working_dir),
+            parser_output_dir=str(settings.output_dir),
+            parser=settings.parser,
+            parse_method=settings.parse_method,
+            enable_image_processing=True,
+            enable_table_processing=True,
+            enable_equation_processing=True,
+        )
+
+        rag = RAGAnything(
+            lightrag=lightrag,
+            config=cfg,
+            llm_model_func=llm_model_func,
+            vision_model_func=_filtered_vision_model_func if settings.enable_image_filter else vision_model_func,
+            embedding_func=emb,
+        )
+        init = await rag._ensure_lightrag_initialized()
+        if not init.get("success"):
+            raise RuntimeError(init.get("error") or "RAGAnything init failed for personal")
+
         _personal_cache[workspace] = rag
         logger.info("Personal RAGAnything ready workspace={}", workspace)
         return rag
@@ -1059,6 +1130,34 @@ def course_retrieval_hits_sync(
         _invalidate_course_rag_cache_for(course_id)
 
 
+async def course_retrieval_hits(
+    course_id: str,
+    question: str,
+    *,
+    mode: str,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Async retrieval wrapper for request handlers already running in an event loop."""
+    raw = await course_aquery_data(course_id, question, mode=mode, top_k=top_k)
+    data = raw.get("data") or {}
+    chunks = data.get("chunks") or []
+    return _hits_from_aquery_chunks(chunks, origin="course")
+
+
+async def personal_retrieval_hits(
+    user_id: str,
+    question: str,
+    *,
+    mode: str,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Async retrieval wrapper for request handlers already running in an event loop."""
+    raw = await personal_aquery_data(user_id, question, mode=mode, top_k=top_k)
+    data = raw.get("data") or {}
+    chunks = data.get("chunks") or []
+    return _hits_from_aquery_chunks(chunks, origin="personal")
+
+
 def personal_retrieval_hits_sync(
     user_id: str,
     question: str,
@@ -1078,17 +1177,29 @@ def personal_retrieval_hits_sync(
         _invalidate_personal_rag_cache(user_id)
 
 
-async def ingest_parsed_material_into_course_async(
-    course_id: str,
+# ---------------------------------------------------------------------------
+# Shared core for MinerU-parsed material ingest (course + personal)
+# ---------------------------------------------------------------------------
+
+async def _ingest_parsed_async_core(
+    rag: Any,
     material_id: str,
     source_file: Path,
-    original_filename: str | None = None,
-    text_only: bool = True,
-    skip_entity_extraction: bool = True,
+    original_filename: str | None,
+    text_only: bool,
+    skip_entity_extraction: bool,
 ) -> int:
-    """Insert already-parsed MinerU JSON (under output_dir / stem) into course LightRAG."""
-    ensure_embedding_backend_reachable()
+    """Three-branch ingest logic shared by course and personal KB.
 
+    Branches:
+      1. ``use_fast_kg_skip``: all text, no extraction → ``ainsert_custom_kg``
+      2. ``use_multimodal_surrogate``: skip extraction but has multimodal blocks →
+         VLM/surrogate descriptions + ``ainsert_custom_kg``
+      3. Full path: ``insert_content_list`` + doc-status polling
+
+    The caller is responsible for obtaining ``rag`` and for any finally-cleanup
+    (``_finalize_course_rag`` / ``_invalidate_personal_rag_cache``).
+    """
     stem = source_file.stem
     scan_dir = settings.output_dir / stem
     if not scan_dir.exists():
@@ -1101,180 +1212,195 @@ async def ingest_parsed_material_into_course_async(
     if not json_files:
         raise FileNotFoundError(f"No *_content_list.json under {scan_dir}")
 
+    doc_id = material_stable_doc_id(material_id)
+    lr = rag.lightrag
+    assert lr is not None
+
+    prepared: list[tuple[list, str]] = []
+    for json_path in json_files:
+        sub_stem = json_path.stem.replace("_content_list", "")
+        display_stem = Path(original_filename).stem if original_filename else sub_stem
+        rag_file_path = _make_material_file_path(material_id, display_stem)
+        raw: list = json.loads(json_path.read_text(encoding="utf-8"))
+        content_list = _fix_image_paths(raw, json_path.parent)
+        if text_only:
+            filtered_list, skipped = _filter_text_only_content(content_list)
+            logger.info(
+                "text_only ingest material={} file={} kept_text={} skipped_types={}",
+                material_id,
+                json_path.name,
+                len(filtered_list),
+                skipped,
+            )
+            content_list = filtered_list
+        prepared.append((content_list, rag_file_path))
+
+    use_fast_kg_skip = skip_entity_extraction and all(
+        len(separate_content(cl)[1]) == 0 for cl, _ in prepared
+    )
+    use_multimodal_surrogate = (
+        skip_entity_extraction
+        and not text_only
+        and any(len(separate_content(cl)[1]) > 0 for cl, _ in prepared)
+    )
+
+    if use_fast_kg_skip:
+        all_chunks: list[dict[str, Any]] = []
+        for content_list, rag_file_path in prepared:
+            text_content, _mm = separate_content(content_list)
+            if not text_content.strip():
+                continue
+            all_chunks.extend(_custom_kg_chunks_from_text(lr, text_content, rag_file_path))
+        if not all_chunks:
+            raise RuntimeError(
+                f"No text chunks to index for material {material_id} (doc_id={doc_id}); "
+                "check MinerU output or disable text-only / enable multimodal blocks."
+            )
+        await lr.ainsert_custom_kg({"chunks": all_chunks}, full_doc_id=doc_id)
+        logger.success(
+            "Indexed material {} ({} chunks via LightRAG ainsert_custom_kg, no entity extraction)",
+            material_id,
+            len(all_chunks),
+        )
+        return len(all_chunks)
+
+    if use_multimodal_surrogate:
+        logger.info(
+            "ingest material={} using custom multimodal surrogate chunks + ainsert_custom_kg",
+            material_id,
+        )
+        per_file_chunks: list[list[dict[str, Any]]] = []
+        for content_list, rag_file_path in prepared:
+            text_content, mm = separate_content(content_list)
+            file_chunks: list[dict[str, Any]] = []
+            if text_content.strip():
+                file_chunks.extend(
+                    _custom_kg_chunks_from_text(lr, text_content, rag_file_path),
+                )
+            if mm:
+                file_chunks.extend(
+                    await multimodal_items_to_custom_chunks_async(
+                        lr,
+                        mm,
+                        rag_file_path,
+                        order_base=len(file_chunks),
+                        use_vlm_for_images=settings.ingest_surrogate_image_vlm,
+                    ),
+                )
+            per_file_chunks.append(file_chunks)
+
+        all_mm_chunks = merge_file_chunks_with_global_indices(per_file_chunks)
+        if not all_mm_chunks:
+            raise RuntimeError(
+                f"No chunks to index for material {material_id} (doc_id={doc_id}); "
+                "check MinerU output or multimodal surrogate coverage.",
+            )
+        await lr.ainsert_custom_kg({"chunks": all_mm_chunks}, full_doc_id=doc_id)
+        logger.success(
+            "Indexed material {} ({} chunks via surrogate multimodal + ainsert_custom_kg, "
+            "no entity extraction)",
+            material_id,
+            len(all_mm_chunks),
+        )
+        return len(all_mm_chunks)
+
+    total = 0
+    for content_list, rag_file_path in prepared:
+        await rag.insert_content_list(
+            content_list,
+            file_path=rag_file_path,
+            doc_id=doc_id,
+        )
+        total += len(content_list)
+
+    # DocStatus storage can be briefly stale after inserts (especially for multimodal),
+    # so poll for a short window to avoid false failures.
+    poll_deadline_s = 60.0
+    poll_sleep_s = 1.0
+    poll_started = time.monotonic()
+    st: dict[str, Any] = {}
+    while True:
+        st = await rag.get_document_processing_status(doc_id)
+        if st.get("error") or st.get("fully_processed"):
+            break
+        if (time.monotonic() - poll_started) >= poll_deadline_s:
+            break
+        await asyncio.sleep(poll_sleep_s)
+
+    if st.get("error"):
+        raise RuntimeError(
+            f"LightRAG document status lookup failed (doc_id={doc_id}): {st['error']}"
+        )
+    if total > 0 and not st.get("exists"):
+        raise RuntimeError(
+            f"LightRAG has no document record after ingest (doc_id={doc_id}, "
+            f"content_blocks={total}). Check embedding and PostgreSQL connectivity."
+        )
+    if total > 0 and not st.get("fully_processed"):
+        status = st.get("status")
+        chunks_count = st.get("chunks_count")
+        text_processed = st.get("text_processed")
+        multimodal_processed = st.get("multimodal_processed")
+        waited_ms = int((time.monotonic() - poll_started) * 1000)
+
+        # Relaxed success criteria (prevents false FAILED when multimodal flag lags):
+        # - doc exists and is marked processed
+        # - we have chunks, and text processing is done
+        try:
+            chunks_int = int(chunks_count or 0)
+        except (TypeError, ValueError):
+            chunks_int = 0
+
+        if (
+            status == "processed"
+            and chunks_int > 0
+            and text_processed is True
+            and st.get("exists")
+        ):
+            logger.warning(
+                "LightRAG doc_status not fully processed after ingest; continuing with relaxed success "
+                "(material_id={}, doc_id={}, waited_ms={}, fully_processed={}, text_processed={}, "
+                "multimodal_processed={}, status={!r}, chunks_count={}, embedding_mode={!r})",
+                material_id,
+                doc_id,
+                waited_ms,
+                st.get("fully_processed"),
+                text_processed,
+                multimodal_processed,
+                status,
+                chunks_count,
+                settings.embedding_mode,
+            )
+            return chunks_int
+
+        raise RuntimeError(
+            f"LightRAG did not fully index material {material_id} (doc_id={doc_id}): "
+            f"waited_ms={waited_ms}, "
+            f"text_processed={text_processed}, "
+            f"multimodal_processed={multimodal_processed}, "
+            f"fully_processed={st.get('fully_processed')}, "
+            f"status={status!r}, chunks_count={chunks_count}. "
+            "Possible cause: doc_status update lag, embedding backend failure, or PostgreSQL write issues."
+        )
+
+    return int(st.get("chunks_count") or total)
+
+
+async def ingest_parsed_material_into_course_async(
+    course_id: str,
+    material_id: str,
+    source_file: Path,
+    original_filename: str | None = None,
+    text_only: bool = True,
+    skip_entity_extraction: bool = True,
+) -> int:
+    """Insert already-parsed MinerU JSON (under output_dir / stem) into course LightRAG."""
+    ensure_embedding_backend_reachable()
     try:
         rag = await get_course_rag_anything(course_id)
-        doc_id = material_stable_doc_id(material_id)
-        lr = rag.lightrag
-        assert lr is not None
-
-        prepared: list[tuple[list, str]] = []
-        for json_path in json_files:
-            sub_stem = json_path.stem.replace("_content_list", "")
-            display_stem = Path(original_filename).stem if original_filename else sub_stem
-            rag_file_path = _make_material_file_path(material_id, display_stem)
-            raw: list = json.loads(json_path.read_text(encoding="utf-8"))
-            content_list = _fix_image_paths(raw, json_path.parent)
-            if text_only:
-                filtered_list, skipped = _filter_text_only_content(content_list)
-                logger.info(
-                    "text_only ingest material={} file={} kept_text={} skipped_types={}",
-                    material_id,
-                    json_path.name,
-                    len(filtered_list),
-                    skipped,
-                )
-                content_list = filtered_list
-            prepared.append((content_list, rag_file_path))
-
-        use_fast_kg_skip = skip_entity_extraction and all(
-            len(separate_content(cl)[1]) == 0 for cl, _ in prepared
+        return await _ingest_parsed_async_core(
+            rag, material_id, source_file, original_filename, text_only, skip_entity_extraction,
         )
-        use_multimodal_surrogate = (
-            skip_entity_extraction
-            and not text_only
-            and any(len(separate_content(cl)[1]) > 0 for cl, _ in prepared)
-        )
-
-        if use_fast_kg_skip:
-            all_chunks: list[dict[str, Any]] = []
-            for content_list, rag_file_path in prepared:
-                text_content, _mm = separate_content(content_list)
-                if not text_content.strip():
-                    continue
-                all_chunks.extend(_custom_kg_chunks_from_text(lr, text_content, rag_file_path))
-            if not all_chunks:
-                raise RuntimeError(
-                    f"No text chunks to index for material {material_id} (doc_id={doc_id}); "
-                    "check MinerU output or disable text-only / enable multimodal blocks."
-                )
-            await lr.ainsert_custom_kg({"chunks": all_chunks}, full_doc_id=doc_id)
-            logger.success(
-                "Indexed material {} ({} chunks via LightRAG ainsert_custom_kg, no entity extraction)",
-                material_id,
-                len(all_chunks),
-            )
-            return len(all_chunks)
-
-        if use_multimodal_surrogate:
-            logger.info(
-                "ingest material={} using custom multimodal surrogate chunks + ainsert_custom_kg",
-                material_id,
-            )
-            per_file_chunks: list[list[dict[str, Any]]] = []
-            for content_list, rag_file_path in prepared:
-                text_content, mm = separate_content(content_list)
-                file_chunks: list[dict[str, Any]] = []
-                if text_content.strip():
-                    file_chunks.extend(
-                        _custom_kg_chunks_from_text(lr, text_content, rag_file_path),
-                    )
-                if mm:
-                    file_chunks.extend(
-                        await multimodal_items_to_custom_chunks_async(
-                            lr,
-                            mm,
-                            rag_file_path,
-                            order_base=len(file_chunks),
-                            use_vlm_for_images=settings.ingest_surrogate_image_vlm,
-                        ),
-                    )
-                per_file_chunks.append(file_chunks)
-
-            all_mm_chunks = merge_file_chunks_with_global_indices(per_file_chunks)
-            if not all_mm_chunks:
-                raise RuntimeError(
-                    f"No chunks to index for material {material_id} (doc_id={doc_id}); "
-                    "check MinerU output or multimodal surrogate coverage.",
-                )
-            await lr.ainsert_custom_kg({"chunks": all_mm_chunks}, full_doc_id=doc_id)
-            logger.success(
-                "Indexed material {} ({} chunks via surrogate multimodal + ainsert_custom_kg, "
-                "no entity extraction)",
-                material_id,
-                len(all_mm_chunks),
-            )
-            return len(all_mm_chunks)
-
-        total = 0
-        for content_list, rag_file_path in prepared:
-            await rag.insert_content_list(
-                content_list,
-                file_path=rag_file_path,
-                doc_id=doc_id,
-            )
-            total += len(content_list)
-
-        # DocStatus storage can be briefly stale after inserts (especially for multimodal),
-        # so poll for a short window to avoid false failures.
-        poll_deadline_s = 60.0
-        poll_sleep_s = 1.0
-        poll_started = time.monotonic()
-        st: dict[str, Any] = {}
-        while True:
-            st = await rag.get_document_processing_status(doc_id)
-            if st.get("error") or st.get("fully_processed"):
-                break
-            if (time.monotonic() - poll_started) >= poll_deadline_s:
-                break
-            await asyncio.sleep(poll_sleep_s)
-
-        if st.get("error"):
-            raise RuntimeError(
-                f"LightRAG document status lookup failed (doc_id={doc_id}): {st['error']}"
-            )
-        if total > 0 and not st.get("exists"):
-            raise RuntimeError(
-                f"LightRAG has no document record after ingest (doc_id={doc_id}, "
-                f"content_blocks={total}). Check embedding and PostgreSQL connectivity."
-            )
-        if total > 0 and not st.get("fully_processed"):
-            status = st.get("status")
-            chunks_count = st.get("chunks_count")
-            text_processed = st.get("text_processed")
-            multimodal_processed = st.get("multimodal_processed")
-            waited_ms = int((time.monotonic() - poll_started) * 1000)
-
-            # Relaxed success criteria (prevents false FAILED when multimodal flag lags):
-            # - doc exists and is marked processed
-            # - we have chunks, and text processing is done
-            try:
-                chunks_int = int(chunks_count or 0)
-            except (TypeError, ValueError):
-                chunks_int = 0
-
-            if (
-                status == "processed"
-                and chunks_int > 0
-                and text_processed is True
-                and st.get("exists")
-            ):
-                logger.warning(
-                    "LightRAG doc_status not fully processed after ingest; continuing with relaxed success "
-                    "(material_id={}, doc_id={}, waited_ms={}, fully_processed={}, text_processed={}, "
-                    "multimodal_processed={}, status={!r}, chunks_count={}, embedding_mode={!r})",
-                    material_id,
-                    doc_id,
-                    waited_ms,
-                    st.get("fully_processed"),
-                    text_processed,
-                    multimodal_processed,
-                    status,
-                    chunks_count,
-                    settings.embedding_mode,
-                )
-                return chunks_int
-
-            raise RuntimeError(
-                f"LightRAG did not fully index material {material_id} (doc_id={doc_id}): "
-                f"waited_ms={waited_ms}, "
-                f"text_processed={text_processed}, "
-                f"multimodal_processed={multimodal_processed}, "
-                f"fully_processed={st.get('fully_processed')}, "
-                f"status={status!r}, chunks_count={chunks_count}. "
-                "Possible cause: doc_status update lag, embedding backend failure, or PostgreSQL write issues."
-            )
-
-        return int(st.get("chunks_count") or total)
     finally:
         await _finalize_course_rag(course_id)
 
@@ -1396,6 +1522,127 @@ def delete_material_course_sync(course_id: str, material_id: str) -> None:
         asyncio.run(delete_material_course_async(course_id, material_id))
     finally:
         _invalidate_course_rag_cache_for(course_id)
+
+
+# ---------------------------------------------------------------------------
+# Personal KB ingest helpers (mirror of course ingest, uses personal workspace)
+# ---------------------------------------------------------------------------
+
+async def ingest_parsed_material_into_personal_async(
+    user_id: str,
+    material_id: str,
+    source_file: Path,
+    original_filename: str | None = None,
+    text_only: bool = True,
+    skip_entity_extraction: bool = True,
+) -> int:
+    """Insert already-parsed MinerU JSON into the user's personal LightRAG workspace."""
+    ensure_embedding_backend_reachable()
+    try:
+        rag = await get_personal_rag_anything(user_id)
+        return await _ingest_parsed_async_core(
+            rag, material_id, source_file, original_filename, text_only, skip_entity_extraction,
+        )
+    finally:
+        _invalidate_personal_rag_cache(user_id)
+
+
+def ingest_parsed_material_into_personal_sync(
+    user_id: str,
+    material_id: str,
+    source_file: Path,
+    original_filename: str | None = None,
+    text_only: bool = True,
+    skip_entity_extraction: bool = True,
+) -> int:
+    try:
+        return asyncio.run(
+            ingest_parsed_material_into_personal_async(
+                user_id, material_id, source_file,
+                original_filename=original_filename,
+                text_only=text_only,
+                skip_entity_extraction=skip_entity_extraction,
+            )
+        )
+    finally:
+        _invalidate_personal_rag_cache(user_id)
+
+
+async def ingest_text_into_personal_async(
+    user_id: str,
+    material_id: str,
+    text: str,
+    original_filename: str | None = None,
+    skip_entity_extraction: bool = True,
+) -> int:
+    """Insert plain text (e.g. transcript) into the user's personal LightRAG workspace."""
+    ensure_embedding_backend_reachable()
+    if not text or not text.strip():
+        raise ValueError(f"Empty text for personal material {material_id}; nothing to ingest.")
+
+    try:
+        rag = await get_personal_rag_anything(user_id)
+        doc_id = material_stable_doc_id(material_id)
+        lr = rag.lightrag
+        assert lr is not None
+
+        display_stem = Path(original_filename).stem if original_filename else material_id
+        rag_file_path = _make_material_file_path(material_id, display_stem)
+
+        if skip_entity_extraction:
+            chunks = _custom_kg_chunks_from_text(lr, text.strip(), rag_file_path)
+            if not chunks:
+                raise RuntimeError(f"No text chunks for personal material {material_id}")
+            await lr.ainsert_custom_kg({"chunks": chunks}, full_doc_id=doc_id)
+            logger.success(
+                "Indexed personal material {} ({} chunks via transcript)", material_id, len(chunks)
+            )
+            return len(chunks)
+        else:
+            await lr.ainsert(text.strip(), ids=[doc_id], file_paths=[rag_file_path])
+            chunks = _custom_kg_chunks_from_text(lr, text.strip(), rag_file_path)
+            return len(chunks)
+    finally:
+        _invalidate_personal_rag_cache(user_id)
+
+
+def ingest_text_into_personal_sync(
+    user_id: str,
+    material_id: str,
+    text: str,
+    original_filename: str | None = None,
+    skip_entity_extraction: bool = True,
+) -> int:
+    try:
+        return asyncio.run(
+            ingest_text_into_personal_async(
+                user_id, material_id, text,
+                original_filename=original_filename,
+                skip_entity_extraction=skip_entity_extraction,
+            )
+        )
+    finally:
+        _invalidate_personal_rag_cache(user_id)
+
+
+async def delete_material_personal_async(user_id: str, material_id: str) -> None:
+    try:
+        rag = await get_personal_rag_anything(user_id)
+        if rag.lightrag is None:
+            raise RuntimeError("Personal RAGAnything has no LightRAG instance")
+        doc_id = material_stable_doc_id(material_id)
+        result = await rag.lightrag.adelete_by_doc_id(doc_id)
+        if result.status not in ("success", "not_found"):
+            raise RuntimeError(f"LightRAG delete failed: {result.status} {result.message}")
+    finally:
+        _invalidate_personal_rag_cache(user_id)
+
+
+def delete_material_personal_sync(user_id: str, material_id: str) -> None:
+    try:
+        asyncio.run(delete_material_personal_async(user_id, material_id))
+    finally:
+        _invalidate_personal_rag_cache(user_id)
 
 
 async def get_lightrag_for_course(course_id: str) -> LightRAG:

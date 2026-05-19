@@ -4,7 +4,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { requireAuthenticated } from "@/lib/admin";
 import { getAuthFromRequest } from "@/lib/request-auth";
 import { getS3Client } from "@/lib/minio";
-import { getMinioConfig } from "@/lib/config";
+import { getMinioConfig, isCosEnabled } from "@/lib/config";
+import { getCosPresignedUrl, putCosObject } from "@/lib/cos";
 import { ApiError } from "@/lib/http/api-error";
 import { jsonError, jsonOk } from "@/lib/http/json-response";
 
@@ -67,6 +68,22 @@ export async function POST(req: NextRequest) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
+    // ── Image uploads: use COS when configured (generates public HTTPS presigned URLs
+    //    that are accessible by external vision models such as Qwen-VL). ──
+    if (mimeType.startsWith("image/") && isCosEnabled()) {
+      await putCosObject({ objectKey, body: buffer, contentType: mimeType });
+      const presignedUrl = await getCosPresignedUrl(objectKey);
+      return jsonOk({
+        id,
+        key: objectKey,
+        presigned_url: presignedUrl,
+        mime_type: mimeType,
+        name: file.name || safeName,
+        size: file.size,
+      });
+    }
+
+    // ── All other uploads (or image uploads when COS is not configured): use MinIO ──
     const c = getMinioConfig();
     const client = getS3Client();
 

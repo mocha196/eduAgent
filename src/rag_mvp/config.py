@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     llm_chat_api_key: str = ""      # LLM_CHAT_API_KEY; empty → use llm_api_key
     llm_chat_base_url: str = ""     # LLM_CHAT_BASE_URL; empty → use llm_base_url
     llm_chat_model: str = ""        # LLM_CHAT_MODEL; empty → use llm_model
+
+    # Vision model — separate provider/endpoint (e.g. SiliconFlow Qwen-VL).
+    # Falls back to default LLM settings when unset.
+    vision_api_key: str = ""        # VISION_API_KEY; empty → use llm_api_key
+    vision_base_url: str = ""       # VISION_BASE_URL; empty → use llm_base_url
     # Embedding backend: ollama (local) | openai_compatible (OpenAI /v1/embeddings API, incl. DashScope compatible-mode)
     embedding_mode: str = "openai_compatible"
     # Optional overrides for openai_compatible; empty → use LLM_BASE_URL / LLM_API_KEY
@@ -101,6 +106,16 @@ class Settings(BaseSettings):
         """Model name for chat/assignment LLM (falls back to default llm_model)."""
         return self.llm_chat_model.strip() or self.llm_model
 
+    @property
+    def effective_vision_api_key(self) -> str:
+        """API key for vision LLM (falls back to default llm_api_key)."""
+        return self.vision_api_key.strip() or self.llm_api_key
+
+    @property
+    def effective_vision_base_url(self) -> str:
+        """Base URL for vision LLM (falls back to default llm_base_url)."""
+        return self.vision_base_url.strip() or self.llm_base_url
+
     # LLM generation
     llm_max_tokens: int = 4096
     llm_temperature: float = 0.1
@@ -121,6 +136,14 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     # Empty string = auto language detection in faster-whisper
     whisper_language: str = ""
+    # Absolute path to a pre-downloaded faster-whisper model directory.
+    # When non-empty, passed directly to WhisperModel() instead of whisper_model_size,
+    # bypassing all HuggingFace Hub network calls.
+    # Download once with: HF_ENDPOINT=https://hf-mirror.com python -c
+    #   "from huggingface_hub import snapshot_download; snapshot_download(
+    #    'Systran/faster-whisper-base', local_dir='models/faster-whisper-base',
+    #    local_dir_use_symlinks=False)"
+    whisper_model_path: str = ""
 
     # Video structured summary (before RAG ingest; LLM segments → .summary.md)
     video_summary_target_segment_seconds: int = 300
@@ -129,6 +152,9 @@ class Settings(BaseSettings):
     video_summary_llm_model: str = ""
     # Empty = use built-in prompt in video_transcript_summary.py
     video_summary_system_prompt: str = ""
+    # Comma or newline-separated list of correct domain terms (e.g. "harness engineering,Kubernetes").
+    # When non-empty, appended to the system prompt so the LLM can fix Whisper mis-recognitions.
+    video_summary_domain_terms: str = ""
 
     # MinerU
     mineru_backend: str = "pipeline"

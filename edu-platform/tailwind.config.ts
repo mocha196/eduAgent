@@ -11,9 +11,17 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
-        display: ["var(--font-serif)", "ui-serif", "Georgia", "serif"],
-        serif: ["var(--font-serif)", "ui-serif", "Georgia", "serif"],
+        sans: [
+          "var(--font-sans)",
+          "PingFang SC",
+          "Hiragino Sans GB",
+          "Microsoft YaHei",
+          "Source Han Sans SC",
+          "Noto Sans CJK SC",
+          "sans-serif",
+        ],
+        display: ["var(--font-serif)", "Songti SC", "STSong", "Source Han Serif SC", "serif"],
+        serif: ["var(--font-serif)", "Songti SC", "STSong", "Source Han Serif SC", "serif"],
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       colors: {

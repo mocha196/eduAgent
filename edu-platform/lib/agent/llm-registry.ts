@@ -24,11 +24,16 @@
  *   memory → key: LLM_API_KEY → OPENAI_API_KEY
  *            url: LLM_BASE_URL
  *          model: LLM_AUXILIARY_MODEL → LLM_MODEL → "gpt-4o-mini"
+ *
+ *   grading → key: LLM_API_KEY → OPENAI_API_KEY
+ *             url: LLM_BASE_URL
+ *           model: LLM_AUXILIARY_MODEL → LLM_MODEL → "gpt-4o-mini"
  */
 
 import OpenAI from "openai";
+import { getUserLlmStore } from "./user-llm-store";
 
-export type LLMRole = "chat" | "vision" | "title" | "memory";
+export type LLMRole = "chat" | "vision" | "title" | "memory" | "grading";
 
 export type RoleConfig = {
   apiKey: string;
@@ -42,38 +47,57 @@ function e(name: string): string | undefined {
   return v && v.trim() ? v.trim() : undefined;
 }
 
+/** Return non-empty string or undefined. */
+function s(value: string | undefined): string | undefined {
+  return value && value.trim() ? value.trim() : undefined;
+}
+
 export function getRoleConfig(role: LLMRole): RoleConfig {
   const defaultKey = e("LLM_API_KEY") ?? e("OPENAI_API_KEY") ?? "";
   const defaultBase = e("LLM_BASE_URL");
   const defaultModel = e("LLM_MODEL") ?? "gpt-4o";
 
+  // Per-user overrides from AsyncLocalStorage (set by runWithUserLlm in chatService et al.)
+  const userCfg = getUserLlmStore();
+  const u = userCfg?.[role] ?? {};
+  // Fallback helper: user override first, then env-derived value
+  const pick = (userVal: string | undefined, envVal: string | undefined) =>
+    s(userVal) ?? envVal;
+
   switch (role) {
     case "chat":
       return {
-        apiKey: e("LLM_CHAT_API_KEY") ?? defaultKey,
-        baseURL: e("LLM_CHAT_BASE_URL") ?? defaultBase,
-        model: e("LLM_CHAT_MODEL") ?? defaultModel,
+        apiKey: pick(u.apiKey, e("LLM_CHAT_API_KEY") ?? defaultKey),
+        baseURL: pick(u.baseURL, e("LLM_CHAT_BASE_URL") ?? defaultBase),
+        model: pick(u.model, e("LLM_CHAT_MODEL") ?? defaultModel),
       };
 
     case "title":
       return {
-        apiKey: e("LLM_TITLE_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey,
-        baseURL: e("LLM_TITLE_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase,
-        model: e("LLM_TITLE_MODEL") ?? e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini",
+        apiKey: pick(u.apiKey, e("LLM_TITLE_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
+        baseURL: pick(u.baseURL, e("LLM_TITLE_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
+        model: pick(u.model, e("LLM_TITLE_MODEL") ?? e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
       };
 
     case "vision":
       return {
-        apiKey: e("LLM_VISION_API_KEY") ?? defaultKey,
-        baseURL: e("LLM_VISION_BASE_URL") ?? defaultBase,
-        model: e("LLM_VISION_MODEL") ?? defaultModel,
+        apiKey: pick(u.apiKey, e("LLM_VISION_API_KEY") ?? defaultKey),
+        baseURL: pick(u.baseURL, e("LLM_VISION_BASE_URL") ?? defaultBase),
+        model: pick(u.model, e("LLM_VISION_MODEL") ?? defaultModel),
       };
 
     case "memory":
       return {
-        apiKey: defaultKey,
-        baseURL: defaultBase,
-        model: e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini",
+        apiKey: pick(u.apiKey, defaultKey),
+        baseURL: pick(u.baseURL, defaultBase),
+        model: pick(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+      };
+
+    case "grading":
+      return {
+        apiKey: pick(u.apiKey, defaultKey),
+        baseURL: pick(u.baseURL, defaultBase),
+        model: pick(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
       };
   }
 }

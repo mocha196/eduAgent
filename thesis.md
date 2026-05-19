@@ -727,7 +727,9 @@ flowchart TD
 
 #### 1. E-R 图
 
-系统共设计 19 个数据表，核心实体及其关系如图 5-1 所示（采用 Mermaid `erDiagram` 语法）。
+系统共设计 19 个数据表，按业务域拆分为 6 个子图（跨域外键实体仅列名称，完整定义见对应子图）。
+
+##### 子图 5-1a：用户与认证域
 
 ```mermaid
 erDiagram
@@ -741,6 +743,21 @@ erDiagram
         bool qaCollectionEnabled
         datetime createdAt
     }
+    RefreshToken {
+        uuid id PK
+        uuid userId FK
+        string tokenHash
+        datetime expiresAt
+        datetime revokedAt
+    }
+
+    User ||--o{ RefreshToken : "持有令牌"
+```
+
+##### 子图 5-1b：课程管理域
+
+```mermaid
+erDiagram
     Course {
         uuid id PK
         uuid teacherId FK
@@ -768,6 +785,19 @@ erDiagram
         uuid teacherId FK
         datetime createdAt
     }
+
+    User ||--o{ Course : "教师创建"
+    User ||--o{ CourseEnrollment : "学生选课"
+    User ||--o{ CourseCollaborator : "协作教师"
+    Course ||--o{ Lesson : "包含课时"
+    Course ||--o{ CourseEnrollment : "注册学生"
+    Course ||--o{ CourseCollaborator : "协作教师"
+```
+
+##### 子图 5-1c：教学材料域
+
+```mermaid
+erDiagram
     Material {
         uuid id PK
         uuid courseId FK
@@ -792,13 +822,17 @@ erDiagram
         string chunkId
         int pageIdx
     }
-    RefreshToken {
-        uuid id PK
-        uuid userId FK
-        string tokenHash
-        datetime expiresAt
-        datetime revokedAt
-    }
+
+    Course ||--o{ Material : "包含材料"
+    Lesson ||--o{ Material : "属于课时"
+    Material ||--o{ MaterialImage : "页面图像"
+    Material ||--o{ ChunkPageMapping : "分块映射"
+```
+
+##### 子图 5-1d：AI 问答与会话域
+
+```mermaid
+erDiagram
     CourseChatSession {
         uuid id PK
         uuid courseId FK
@@ -825,10 +859,23 @@ erDiagram
         int answerTokens
         int executionTimeMs
         string modelUsed
-        json toolCalls
-        json citations
+        text toolCalls
+        text citations
         datetime createdAt
     }
+
+    User ||--o{ CourseChatSession : "发起会话"
+    User ||--o{ QaCenterSession : "发起QA中心会话"
+    User ||--o{ QaLog : "提出问题"
+    Course ||--o{ CourseChatSession : "聊天会话"
+    Course ||--o{ QaLog : "问答记录"
+    Lesson ||--o{ QaLog : "关联问答"
+```
+
+##### 子图 5-1e：AI 作业管理域
+
+```mermaid
+erDiagram
     Assignment {
         uuid id PK
         uuid courseId FK
@@ -841,6 +888,15 @@ erDiagram
         datetime deadline
         datetime publishedAt
     }
+
+    Course ||--o{ Assignment : "课程作业"
+    User ||--o{ Assignment : "创建作业"
+```
+
+##### 子图 5-1f：学习记忆与分析域
+
+```mermaid
+erDiagram
     UserLearningProfile {
         uuid id PK
         uuid userId FK
@@ -877,38 +933,15 @@ erDiagram
         string jobId FK
         string status
         text output
-        json toolCalls
+        text toolCalls
         datetime startedAt
         datetime finishedAt
     }
 
-    User ||--o{ Course : "教师创建"
-    User ||--o{ CourseCollaborator : "协作教师"
-    User ||--o{ CourseEnrollment : "学生选课"
-    User ||--o{ RefreshToken : "持有令牌"
-    User ||--o{ QaLog : "提出问题"
-    User ||--o{ CourseChatSession : "发起会话"
-    User ||--o{ QaCenterSession : "发起QA中心会话"
     User ||--o| UserLearningProfile : "拥有档案"
     User ||--o{ UserMemoryFact : "记忆事实"
     User ||--o{ UserMemoryConcept : "掌握概念"
     User ||--o{ CronJob : "创建定时任务"
-    User ||--o{ Assignment : "创建作业"
-
-    Course ||--o{ Lesson : "包含课时"
-    Course ||--o{ CourseEnrollment : "注册学生"
-    Course ||--o{ CourseCollaborator : "协作教师"
-    Course ||--o{ Material : "包含材料"
-    Course ||--o{ QaLog : "问答记录"
-    Course ||--o{ CourseChatSession : "聊天会话"
-    Course ||--o{ Assignment : "课程作业"
-
-    Lesson ||--o{ Material : "属于课时"
-    Lesson ||--o{ QaLog : "关联问答"
-
-    Material ||--o{ MaterialImage : "页面图像"
-    Material ||--o{ ChunkPageMapping : "分块映射"
-
     CronJob ||--o{ CronJobRun : "执行记录"
 ```
 
@@ -1242,8 +1275,6 @@ for (const chunk of data.hit_chunks ?? []) {
 **系统功能回顾：** 系统实现了六大核心功能模块——用户认证与管理、课程与课时管理、教学材料的多模态处理与知识库构建、基于 ReAct 范式的 AI 智能问答、AI 辅助作业的三阶段生成流水线，以及面向教师与学生双端的学习分析与统计。通过材料处理状态机（UPLOADED → PARSING → READY）与 Redis Stream 异步队列，实现了大文件处理与用户界面的完全解耦；通过 JWT 双令牌机制与中间件无感刷新，在安全性与用户体验之间取得了良好的平衡。
 
 **技术创新点：** 第一，将 GraphRAG（知识图谱增强检索）与向量检索相融合，采用 LightRAG 框架同时维护 PostgreSQL 向量库与 Neo4j 知识图谱，实现了语义相似度与概念关联的双路召回；第二，在 TypeScript 运行时内原生实现 ReAct Agent，避免了引入独立 Python Agent 进程带来的部署复杂度和跨语言通信开销，Agent 的工具注册、会话管理、记忆系统均以模块化方式集成于 Next.js 服务中；第三，设计了三层记忆系统（短期会话历史、中期事实记忆 `UserMemoryFact`、长期概念掌握度 `UserMemoryConcept`），使 Agent 能够跨会话积累对学生知识状态的理解，提供真正的个性化辅导；第四，作业生成采用 Planner-Generator-Reviewer 三智能体协作流水线，通过专项 ReviewerAgent 对生成题目进行质量量化评分与失败题目定向重生成，显著提升了 AI 生成内容的可用性。
-
-**不足与展望：** 当前系统仍存在若干局限。一是 LLM 调用成本较高，大规模并发场景下需引入缓存与批处理优化；二是作业生成的个性化程度有限，尚未结合学生历史答题记录动态调整难度；三是知识图谱构建依赖 LLM 实体抽取，质量受提示工程影响较大，可引入专用 NER 模型提升精度。未来工作将重点探索：基于学生知识掌握度的自适应题目推荐、多模态材料（图表/公式）的深度理解与检索，以及联邦学习框架下的学习数据隐私保护。
 
 
 

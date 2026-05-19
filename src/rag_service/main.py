@@ -59,7 +59,7 @@ class QueryRequest(BaseModel):
     course_id: str | None = None
     accessible_course_ids: list[str] = Field(default_factory=list)
     question: str
-    mode: str = "hybrid"
+    mode: str = "mix"
     top_k: int = Field(default=5, ge=1, le=20)
 
 
@@ -184,14 +184,14 @@ def _fetch_material_images(material_ids: list[str]) -> dict[str, list[dict[str, 
 
 
 @app.post("/rag/query", response_model=QueryResponse)
-def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> QueryResponse:
+async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> QueryResponse:
     from rag_mvp.engine import (
-        course_retrieval_hits_sync,
-        personal_retrieval_hits_sync,
+        course_retrieval_hits,
+        personal_retrieval_hits,
     )
 
     source = body.source.strip().lower()
-    mode = body.mode or "hybrid"
+    mode = body.mode or "mix"
     top_k = body.top_k
     question = body.question.strip()
     warnings: list[str] = []
@@ -216,21 +216,21 @@ def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> QueryR
     raw_hits: list[dict[str, Any]] = []
 
     if source == "personal":
-        raw_hits = personal_retrieval_hits_sync(body.user_id, question, mode=mode, top_k=top_k)
+        raw_hits = await personal_retrieval_hits(body.user_id, question, mode=mode, top_k=top_k)
 
     elif source == "course":
         if not body.course_id:
             raise HTTPException(status_code=400, detail="course_id required for source=course")
-        raw_hits = course_retrieval_hits_sync(
+        raw_hits = await course_retrieval_hits(
             body.course_id, question, mode=mode, top_k=top_k
         )
 
     elif source == "all":
         # personal + current course merged
-        personal = personal_retrieval_hits_sync(body.user_id, question, mode=mode, top_k=top_k)
+        personal = await personal_retrieval_hits(body.user_id, question, mode=mode, top_k=top_k)
         course_hits: list[dict[str, Any]] = []
         if body.course_id:
-            course_hits = course_retrieval_hits_sync(
+            course_hits = await course_retrieval_hits(
                 body.course_id, question, mode=mode, top_k=top_k
             )
         raw_hits = course_hits + personal
@@ -240,7 +240,7 @@ def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> QueryR
         seen: set[str] = set()
         for cid in (body.accessible_course_ids or []):
             try:
-                hits = course_retrieval_hits_sync(cid, question, mode=mode, top_k=top_k)
+                hits = await course_retrieval_hits(cid, question, mode=mode, top_k=top_k)
                 for h in hits:
                     cid_chunk = str(h.get("chunk_id") or "")
                     if cid_chunk and cid_chunk in seen:

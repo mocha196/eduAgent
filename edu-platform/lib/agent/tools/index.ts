@@ -4,17 +4,18 @@
 
 export { toolRegistry } from "./registry";
 import { toolRegistry } from "./registry";
-import { knowledgeQueryTool, generateQuizTool, buildMindmapTool } from "./rag";
+import { knowledgeQueryTool, /* generateQuizTool, */ buildMindmapTool } from "./rag";
 import { hintGeneratorTool, scoreEssayTool, evaluateCodeTool } from "./eval";
 import { rememberFactTool, searchMemoryTool } from "./memory";
 import { webSearchTool, wikipediaSearchTool } from "./search";
 import { listSkillsTool, viewSkillTool } from "./skills";
 import { parseDocumentTool } from "./ocr";
 import { analyzeImageTool } from "./vision";
+import { getCourseInfoTool, listCourseMaterialsTool, getMaterialSummaryTool } from "./course";
 
 // RAG tools
 toolRegistry.register(knowledgeQueryTool);
-toolRegistry.register(generateQuizTool);
+// toolRegistry.register(generateQuizTool);
 toolRegistry.register(buildMindmapTool);
 
 // Eval tools
@@ -40,11 +41,16 @@ toolRegistry.register(parseDocumentTool);
 // Vision tool — image understanding via dedicated vision model
 toolRegistry.register(analyzeImageTool);
 
+// Course structure tools — metadata, material lists, summaries
+toolRegistry.register(getCourseInfoTool);
+toolRegistry.register(listCourseMaterialsTool);
+toolRegistry.register(getMaterialSummaryTool);
+
 // delegation tool — imported after other tools to avoid circular import issue
 import { delegateTaskTool } from "./delegation";
 toolRegistry.register(delegateTaskTool);
 
-export { knowledgeQueryTool, generateQuizTool, buildMindmapTool };
+export { knowledgeQueryTool, /* generateQuizTool, */ buildMindmapTool };
 export { hintGeneratorTool, scoreEssayTool, evaluateCodeTool };
 export { rememberFactTool, searchMemoryTool };
 export { webSearchTool, wikipediaSearchTool };
@@ -52,3 +58,4 @@ export { listSkillsTool, viewSkillTool };
 export { parseDocumentTool };
 export { delegateTaskTool };
 export { analyzeImageTool };
+export { getCourseInfoTool, listCourseMaterialsTool, getMaterialSummaryTool };

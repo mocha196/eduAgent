@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "path": "../skills",
+      "label": "built-in",
+      "enabled": true
+    }
+  ]
+}

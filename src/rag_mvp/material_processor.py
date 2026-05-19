@@ -36,6 +36,7 @@ import redis
 from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
 import psycopg
+from psycopg import sql
 from loguru import logger
 
 from rag_mvp.config import settings
@@ -43,12 +44,19 @@ from rag_mvp.engine import (
     _aparse_file,
     _build_parser,
     _invalidate_course_rag_cache_for,
+    _invalidate_personal_rag_cache,
     delete_material_course_async,
     delete_material_course_sync,
+    delete_material_personal_async,
+    delete_material_personal_sync,
     ingest_parsed_material_into_course_async,
     ingest_parsed_material_into_course_sync,
+    ingest_parsed_material_into_personal_async,
+    ingest_parsed_material_into_personal_sync,
     ingest_text_into_course_async,
     ingest_text_into_course_sync,
+    ingest_text_into_personal_async,
+    ingest_text_into_personal_sync,
     parse_file,
 
 )
@@ -61,7 +69,7 @@ def _s3_client():
         use_ssl = os.environ.get("MINIO_USE_SSL", "true").lower() == "true"
         endpoint = ("https://" if use_ssl else "http://") + endpoint
     # Bypass any system HTTP proxy (e.g. Clash on 7890) for local MinIO connections.
-    session = boto3.session.Session()
+    session = boto3.Session()
     return session.client(
         "s3",
         endpoint_url=endpoint,
@@ -470,23 +478,29 @@ def update_material_status(
     expect_status_in: tuple[str, ...] | None = None,
 ) -> bool:
     """Return True if a row was updated (for idempotency)."""
-    sets = ["status = %s", "updated_at = NOW()"]
+    set_clauses: list[sql.Composable] = [sql.SQL("status = %s"), sql.SQL("updated_at = NOW()")]
     args: list[Any] = [status]
     if status_message is not None:
-        sets.append("status_message = %s")
+        set_clauses.append(sql.SQL("status_message = %s"))
         args.append(status_message)
     if indexed_chunk_count is not None:
-        sets.append("indexed_chunk_count = %s")
+        set_clauses.append(sql.SQL("indexed_chunk_count = %s"))
         args.append(indexed_chunk_count)
     args.append(material_id)
-    where = "id = %s::uuid AND is_deleted = false"
+    where_clauses: list[sql.Composable] = [
+        sql.SQL("id = %s::uuid"),
+        sql.SQL("is_deleted = false"),
+    ]
     if expect_status_in:
-        placeholders = ", ".join(["%s"] * len(expect_status_in))
-        where += f" AND status IN ({placeholders})"
+        placeholders = sql.SQL(", ").join([sql.SQL("%s")] * len(expect_status_in))
+        where_clauses.append(sql.SQL("status IN ({})").format(placeholders))
         args.extend(expect_status_in)
-    sql = f'UPDATE materials SET {", ".join(sets)} WHERE {where}'
+    query = sql.SQL("UPDATE materials SET {} WHERE {}").format(
+        sql.SQL(", ").join(set_clauses),
+        sql.SQL(" AND ").join(where_clauses),
+    )
     with conn.cursor() as cur:
-        cur.execute(sql, args)
+        cur.execute(query, args)
         return (cur.rowcount or 0) > 0
 
 
@@ -1260,6 +1274,29 @@ def process_repair_preview(conn: psycopg.Connection, material_id: str) -> None:
         shutil.rmtree(work_parent, ignore_errors=True)
 
 
+def _save_media_transcript(
+    conn: psycopg.Connection,
+    table: str,
+    material_id: str,
+    transcript: str,
+    summary: str,
+) -> None:
+    """Persist raw transcript and LLM summary to the given materials table."""
+    if table not in {"materials", "personal_materials"}:
+        raise ValueError(f"Unsupported table name for transcript persistence: {table}")
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                """
+            UPDATE {table}
+            SET transcript_text = %s, video_summary = %s, updated_at = NOW()
+            WHERE id = %s::uuid AND is_deleted = false
+            """
+            ).format(table=sql.Identifier(table)),
+            (transcript, summary, material_id),
+        )
+
+
 def process_transcribe_and_index(
     conn: psycopg.Connection,
     material_id: str,
@@ -1308,7 +1345,6 @@ def process_transcribe_and_index(
     original_filename = claimed.get("original_filename")
 
     work_parent = Path(tempfile.mkdtemp(prefix="edu_vid_"))
-    parsed_committed = False
 
     try:
         suffix = Path(minio_path).suffix or ".mp4"
@@ -1357,10 +1393,10 @@ def process_transcribe_and_index(
             ingest_text = transcript_text
 
         with conn.transaction():
+            _save_media_transcript(conn, "materials", material_id, transcript_text, ingest_text)
             update_material_status(
                 conn, material_id, "PARSED", None, expect_status_in=("PARSING",)
             )
-        parsed_committed = True
 
         with conn.transaction():
             update_material_status(
@@ -1402,3 +1438,633 @@ def process_transcribe_and_index(
             update_material_status(conn, material_id, "FAILED", str(exc)[:2000])
     finally:
         shutil.rmtree(work_parent, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Personal KB processing (mirrors course processing against personal_materials table)
+# ---------------------------------------------------------------------------
+
+def update_personal_material_status(
+    conn: psycopg.Connection,
+    material_id: str,
+    status: str,
+    status_message: str | None = None,
+    indexed_chunk_count: int | None = None,
+    *,
+    expect_status_in: tuple[str, ...] | None = None,
+) -> bool:
+    set_clauses: list[sql.Composable] = [sql.SQL("status = %s"), sql.SQL("updated_at = NOW()")] 
+    args: list[Any] = [status]
+    if status_message is not None:
+        set_clauses.append(sql.SQL("status_message = %s"))
+        args.append(status_message)
+    if indexed_chunk_count is not None:
+        set_clauses.append(sql.SQL("indexed_chunk_count = %s"))
+        args.append(indexed_chunk_count)
+    args.append(material_id)
+    where_clauses: list[sql.Composable] = [
+        sql.SQL("id = %s::uuid"),
+        sql.SQL("is_deleted = false"),
+    ]
+    if expect_status_in:
+        placeholders = sql.SQL(", ").join([sql.SQL("%s")] * len(expect_status_in))
+        where_clauses.append(sql.SQL("status IN ({})").format(placeholders))
+        args.extend(expect_status_in)
+    query = sql.SQL("UPDATE personal_materials SET {} WHERE {}").format(
+        sql.SQL(", ").join(set_clauses),
+        sql.SQL(" AND ").join(where_clauses),
+    )
+    with conn.cursor() as cur:
+        cur.execute(query, args)
+        return (cur.rowcount or 0) > 0
+
+
+def _claim_personal_material_for_parse(
+    conn: psycopg.Connection, material_id: str
+) -> dict[str, Any] | None:
+    stale = _material_stale_seconds()
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE personal_materials m
+                SET status = 'PARSING', updated_at = NOW()
+                FROM (
+                    SELECT id FROM personal_materials
+                    WHERE id = %s::uuid AND is_deleted = false
+                      AND NOT (
+                        LOWER(file_type) IN ('ppt', 'pptx', 'doc', 'docx')
+                        AND preview_pdf_status = 'PENDING'
+                      )
+                      AND (
+                        status = 'UPLOADED'
+                        OR (
+                          status IN ('PARSING', 'INDEXING', 'PARSED')
+                          AND updated_at < NOW() - (%s * INTERVAL '1 second')
+                        )
+                      )
+                    FOR UPDATE SKIP LOCKED
+                ) s
+                WHERE m.id = s.id
+                RETURNING m.user_id::text, m.minio_path, m.file_type, m.original_filename
+                """,
+                (material_id, stale),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "user_id": row[0],
+                    "minio_path": row[1],
+                    "file_type": row[2],
+                    "original_filename": row[3],
+                }
+    logger.info("personal_parse: material {} not claimable", material_id)
+    return None
+
+
+def _claim_personal_material_for_index_retry(
+    conn: psycopg.Connection, material_id: str
+) -> dict[str, Any] | None:
+    """Atomically move FAILED personal material to INDEXING for index-only retry."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE personal_materials m
+                SET status = 'INDEXING', updated_at = NOW(), status_message = NULL
+                FROM (
+                    SELECT id FROM personal_materials
+                    WHERE id = %s::uuid AND is_deleted = false AND status = 'FAILED'
+                    FOR UPDATE SKIP LOCKED
+                ) s
+                WHERE m.id = s.id
+                RETURNING m.user_id::text, m.original_filename,
+                          m.minio_path::text, m.file_type::text
+                """,
+                (material_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "user_id": row[0],
+                    "original_filename": row[1],
+                    "minio_path": row[2],
+                    "file_type": row[3],
+                }
+    return None
+
+
+def _ingest_personal_parsed_dispatch(
+    user_id: str,
+    material_id: str,
+    local_file: Path,
+    original_filename: str | None,
+    text_only: bool,
+    skip_kg: bool,
+) -> int:
+    async def _worker_coro() -> int:
+        try:
+            return await ingest_parsed_material_into_personal_async(
+                user_id, material_id, local_file,
+                original_filename=original_filename,
+                text_only=text_only,
+                skip_entity_extraction=skip_kg,
+            )
+        finally:
+            _invalidate_personal_rag_cache(user_id)
+
+    if is_worker_async_loop_started():
+        return run_worker_coroutine(_worker_coro(), timeout=None)
+    return ingest_parsed_material_into_personal_sync(
+        user_id, material_id, local_file,
+        original_filename=original_filename,
+        text_only=text_only,
+        skip_entity_extraction=skip_kg,
+    )
+
+
+def _ingest_personal_text_dispatch(
+    user_id: str,
+    material_id: str,
+    text: str,
+    original_filename: str | None,
+    skip_kg: bool,
+) -> int:
+    async def _worker_coro() -> int:
+        return await ingest_text_into_personal_async(
+            user_id, material_id, text,
+            original_filename=original_filename,
+            skip_entity_extraction=skip_kg,
+        )
+
+    if is_worker_async_loop_started():
+        return run_worker_coroutine(_worker_coro(), timeout=None)
+    return ingest_text_into_personal_sync(
+        user_id, material_id, text,
+        original_filename=original_filename,
+        skip_entity_extraction=skip_kg,
+    )
+
+
+def _delete_personal_material_rag_dispatch(user_id: str, material_id: str) -> None:
+    async def _worker_coro() -> None:
+        try:
+            await delete_material_personal_async(user_id, material_id)
+        finally:
+            _invalidate_personal_rag_cache(user_id)
+
+    if is_worker_async_loop_started():
+        run_worker_coroutine(_worker_coro(), timeout=None)
+    else:
+        delete_material_personal_sync(user_id, material_id)
+
+
+def _run_personal_material_download_parse_and_ingest(
+    conn: psycopg.Connection,
+    material_id: str,
+    user_id: str,
+    minio_path: str,
+    file_type: str,
+    original_filename: str | None,
+    text_only: bool,
+    skip_kg: bool,
+    r: "redis.Redis | None" = None,
+) -> None:
+    """MinIO → parse → personal LightRAG. Row must already be PARSING."""
+    work_parent = Path(tempfile.mkdtemp(prefix="edu_pmat_"))
+    suffix = Path(minio_path).suffix or ".bin"
+    local_file = work_parent / f"{material_id}{suffix}"
+    parsed_committed = False
+
+    try:
+        download_object_to_path(minio_path, local_file)
+
+        if r is not None:
+            _raise_if_cancelled(r, material_id, "pre-parse")
+
+        preview_key = _preview_pdf_minio_key(minio_path)
+        if local_file.suffix.lower() in _OFFICE_SUFFIXES:
+            if _object_exists(preview_key):
+                pdf_file = work_parent / f"{material_id}.pdf"
+                download_object_to_path(preview_key, pdf_file)
+                local_file = pdf_file
+            else:
+                try:
+                    pdf_file = _convert_to_pdf(local_file, work_parent / "pdf_out")
+                    _upload_preview_pdf_with_verify(pdf_file, preview_key)
+                    with conn.transaction():
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """UPDATE personal_materials SET preview_pdf_status = 'READY',
+                                   updated_at = NOW() WHERE id = %s::uuid""",
+                                (material_id,),
+                            )
+                except Exception:
+                    with conn.transaction():
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """UPDATE personal_materials SET preview_pdf_status = 'FAILED',
+                                   updated_at = NOW() WHERE id = %s::uuid""",
+                                (material_id,),
+                            )
+                    raise
+                local_file = pdf_file
+
+        _parse_file_dispatch(local_file)
+
+        if r is not None:
+            _raise_if_cancelled(r, material_id, "pre-ingest")
+
+        with conn.transaction():
+            update_personal_material_status(
+                conn, material_id, "PARSED", None, expect_status_in=("PARSING",)
+            )
+        parsed_committed = True
+
+        with conn.transaction():
+            update_personal_material_status(
+                conn, material_id, "INDEXING", None, expect_status_in=("PARSED",)
+            )
+
+        n = _ingest_personal_parsed_dispatch(
+            user_id, material_id, local_file,
+            str(original_filename) if original_filename else None,
+            text_only, skip_kg,
+        )
+
+        with conn.transaction():
+            ok = update_personal_material_status(
+                conn, material_id, "READY", None,
+                indexed_chunk_count=n, expect_status_in=("INDEXING",),
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"Personal material {material_id} lost INDEXING state before READY commit"
+                )
+
+        stem_dir = settings.output_dir / material_id
+        if stem_dir.exists():
+            shutil.rmtree(stem_dir, ignore_errors=True)
+
+        logger.success("Indexed personal material {} ({} chunks)", material_id, n)
+    except MaterialCancelledError:
+        logger.info("Personal material {} processing cancelled", material_id)
+        shutil.rmtree(settings.output_dir / material_id, ignore_errors=True)
+    except Exception as exc:
+        logger.exception("Personal material processing failed")
+        if not parsed_committed:
+            shutil.rmtree(settings.output_dir / material_id, ignore_errors=True)
+        with conn.transaction():
+            update_personal_material_status(conn, material_id, "FAILED", str(exc)[:2000])
+    finally:
+        shutil.rmtree(work_parent, ignore_errors=True)
+
+
+def process_personal_parse_and_index(
+    conn: psycopg.Connection,
+    material_id: str,
+    *,
+    text_only: bool = True,
+    skip_kg: bool = True,
+    r: "redis.Redis | None" = None,
+) -> None:
+    if r is not None and _is_cancel_requested(r, material_id):
+        logger.info("personal_parse_and_index: cancel signal before claim for {}", material_id)
+        return
+
+    claimed = _claim_personal_material_for_parse(conn, material_id)
+    if not claimed:
+        return
+
+    _run_personal_material_download_parse_and_ingest(
+        conn, material_id,
+        claimed["user_id"],
+        claimed["minio_path"],
+        claimed["file_type"],
+        claimed.get("original_filename"),
+        text_only, skip_kg, r=r,
+    )
+
+
+def process_personal_delete_material(conn: psycopg.Connection, material_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT user_id::text, is_deleted FROM personal_materials WHERE id = %s::uuid",
+            (material_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        logger.error("personal_delete: material {} not found", material_id)
+        return
+    user_id, is_deleted = row[0], row[1]
+    if not is_deleted:
+        raise RuntimeError(
+            f"personal_delete: material {material_id} expected is_deleted=true"
+        )
+    _delete_personal_material_rag_dispatch(user_id, material_id)
+    logger.info("Deleted personal LightRAG document for material {}", material_id)
+
+
+def process_personal_transcribe_and_index(
+    conn: psycopg.Connection,
+    material_id: str,
+    *,
+    text_only: bool = True,
+    skip_kg: bool = True,
+    r: "redis.Redis | None" = None,
+) -> None:
+    """Transcribe a personal video/audio file and ingest into the user's personal KB."""
+    from rag_mvp.video_transcribe import transcribe_media_to_txt_file
+    from rag_mvp.video_transcript_summary import (
+        build_structured_summary_from_transcript_text,
+        parse_timestamped_transcript,
+    )
+
+    if r is not None and _is_cancel_requested(r, material_id):
+        logger.info("personal_transcribe: cancel signal before claim for {}", material_id)
+        return
+
+    claimed = _claim_personal_material_for_parse(conn, material_id)
+    if not claimed:
+        return
+
+    user_id = claimed["user_id"]
+    minio_path = claimed["minio_path"]
+    original_filename = claimed.get("original_filename")
+
+    work_parent = Path(tempfile.mkdtemp(prefix="edu_pvid_"))
+
+    try:
+        suffix = Path(minio_path).suffix or ".mp4"
+        local_file = work_parent / f"{material_id}{suffix}"
+        download_object_to_path(minio_path, local_file)
+
+        if r is not None:
+            _raise_if_cancelled(r, material_id, "pre-transcribe")
+
+        txt_path = transcribe_media_to_txt_file(local_file, transcript_dir=work_parent)
+        raw_transcript = txt_path.read_text(encoding="utf-8")
+
+        segments = parse_timestamped_transcript(raw_transcript)
+        if segments:
+            try:
+                _, _json_path, summary_md_path = build_structured_summary_from_transcript_text(
+                    raw_transcript,
+                    txt_path.stem,
+                    work_parent,
+                )
+                ingest_text = summary_md_path.read_text(encoding="utf-8")
+            except Exception as summ_exc:
+                logger.warning(
+                    "Structured summary failed for personal material {} (falling back to raw transcript): {}",
+                    material_id,
+                    summ_exc,
+                )
+                ingest_text = raw_transcript
+        else:
+            ingest_text = raw_transcript
+
+        if r is not None:
+            _raise_if_cancelled(r, material_id, "pre-ingest")
+
+        with conn.transaction():
+            _save_media_transcript(conn, "personal_materials", material_id, raw_transcript, ingest_text)
+            update_personal_material_status(
+                conn, material_id, "PARSED", None, expect_status_in=("PARSING",)
+            )
+
+        with conn.transaction():
+            update_personal_material_status(
+                conn, material_id, "INDEXING", None, expect_status_in=("PARSED",)
+            )
+
+        n = _ingest_personal_text_dispatch(
+            user_id, material_id, ingest_text,
+            str(original_filename) if original_filename else None, skip_kg,
+        )
+
+        with conn.transaction():
+            ok = update_personal_material_status(
+                conn, material_id, "READY", None,
+                indexed_chunk_count=n, expect_status_in=("INDEXING",),
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"Personal material {material_id} lost INDEXING state before READY commit"
+                )
+
+        logger.success("personal_transcribe_and_index: material {} ({} chunks)", material_id, n)
+    except MaterialCancelledError:
+        logger.info("Personal material {} transcription cancelled", material_id)
+    except Exception as exc:
+        logger.exception("personal_transcribe_and_index failed for material {}", material_id)
+        with conn.transaction():
+            update_personal_material_status(conn, material_id, "FAILED", str(exc)[:2000])
+    finally:
+        shutil.rmtree(work_parent, ignore_errors=True)
+
+
+def _enqueue_personal_parse_and_index_task(
+    material_id: str, *, text_only: bool, skip_kg: bool = True
+) -> None:
+    """Chain personal Phase 2 after Office preview PDF is ready."""
+    redis_url = os.environ.get("REDIS_URL", "").strip()
+    if not redis_url:
+        raise RuntimeError("REDIS_URL is not set; cannot enqueue personal_parse_and_index")
+    r = redis.from_url(redis_url, decode_responses=True)
+    r.xadd(
+        _rag_task_stream_name(),
+        {
+            "task_id": str(uuid4()),
+            "material_id": material_id,
+            "operation": "personal_parse_and_index",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text_only": "true" if text_only else "false",
+            "skip_kg": "true" if skip_kg else "false",
+        },
+    )
+
+
+def process_personal_convert_preview(
+    conn: psycopg.Connection,
+    material_id: str,
+    *,
+    text_only: bool = True,
+    skip_kg: bool = True,
+) -> None:
+    """Phase 1 for personal Office uploads: LibreOffice → preview.pdf → READY; then personal_parse_and_index."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT LOWER(file_type::text), status::text, preview_pdf_status::text, minio_path::text, user_id::text
+            FROM personal_materials WHERE id = %s::uuid AND is_deleted = false
+            """,
+            (material_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        logger.error("personal_convert_preview: material {} not found", material_id)
+        return
+    ft_lower, status, preview_st, minio_path, _ = row[0], row[1], row[2], row[3], row[4]
+
+    if ft_lower not in _OFFICE_FT_LOWER:
+        logger.info(
+            "personal_convert_preview: material {} is not office ({}); enqueue personal_parse_and_index",
+            material_id, ft_lower,
+        )
+        try:
+            _enqueue_personal_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+        except Exception:
+            logger.exception(
+                "personal_convert_preview: personal_parse_and_index enqueue failed for {}",
+                material_id,
+            )
+            raise
+        return
+
+    preview_key = _preview_pdf_minio_key(minio_path)
+
+    if status == "UPLOADED" and preview_st == "READY":
+        if _object_exists(preview_key):
+            logger.info(
+                "personal_convert_preview: material {} already READY; chain personal_parse_and_index",
+                material_id,
+            )
+            try:
+                _enqueue_personal_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+            except Exception:
+                logger.exception(
+                    "personal_convert_preview: chain enqueue failed for {}",
+                    material_id,
+                )
+                raise
+            return
+        with conn.transaction():
+            update_personal_material_status(conn, material_id, "UPLOADED", "PREVIEW_OBJECT_MISSING_REBUILD")
+
+    if status != "UPLOADED":
+        logger.info(
+            "personal_convert_preview: skip material {} (status={})",
+            material_id, status,
+        )
+        return
+
+    work_parent = Path(tempfile.mkdtemp(prefix="edu_pconv_"))
+    try:
+        suffix = Path(minio_path).suffix or ".docx"
+        local_src = work_parent / f"{material_id}{suffix}"
+        download_object_to_path(minio_path, local_src)
+
+        pdf_out = work_parent / f"{material_id}.pdf"
+        import subprocess
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(work_parent), str(local_src)],
+            capture_output=True, timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"libreoffice failed (rc={result.returncode}): {result.stderr.decode(errors='replace')[:500]}"
+            )
+
+        if not pdf_out.exists():
+            stem = local_src.stem
+            candidates = list(work_parent.glob(f"{stem}*.pdf"))
+            if not candidates:
+                raise RuntimeError("libreoffice produced no PDF output")
+            pdf_out = candidates[0]
+
+        _upload_preview_pdf_with_verify(pdf_out, preview_key)
+
+        with conn.transaction():
+            update_personal_material_status(conn, material_id, "UPLOADED", None)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE personal_materials SET preview_pdf_status = 'READY' WHERE id = %s::uuid",
+                    (material_id,),
+                )
+
+        logger.success(
+            "personal_convert_preview: material {} preview ready; chaining personal_parse_and_index",
+            material_id,
+        )
+        _enqueue_personal_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+    except Exception as exc:
+        logger.exception("personal_convert_preview failed for material {}", material_id)
+        with conn.transaction():
+            update_personal_material_status(conn, material_id, "FAILED", str(exc)[:2000])
+    finally:
+        shutil.rmtree(work_parent, ignore_errors=True)
+
+
+def process_personal_index_only(
+    conn: psycopg.Connection,
+    material_id: str,
+    *,
+    text_only: bool = True,
+    skip_kg: bool = True,
+) -> None:
+    """Re-ingest personal material from local parse cache, or full MinIO→parse→ingest fallback."""
+    claimed = _claim_personal_material_for_index_retry(conn, material_id)
+    if not claimed:
+        logger.info("personal_index_only: material {} not claimed (not FAILED or locked)", material_id)
+        return
+
+    user_id = claimed["user_id"]
+    original_filename = claimed.get("original_filename")
+    minio_path = claimed["minio_path"]
+    file_type = claimed["file_type"]
+
+    if not _parse_output_has_content_list(material_id):
+        logger.info(
+            "personal_index_only: full reparse fallback for material {} (no local *_content_list.json)",
+            material_id,
+        )
+        with conn.transaction():
+            ok = update_personal_material_status(
+                conn, material_id, "PARSING", None, expect_status_in=("INDEXING",),
+            )
+        if not ok:
+            logger.error(
+                "personal_index_only: could not move material {} from INDEXING to PARSING for fallback",
+                material_id,
+            )
+            with conn.transaction():
+                update_personal_material_status(
+                    conn, material_id, "FAILED", "RETRY_STATE_LOST", expect_status_in=("INDEXING",),
+                )
+            return
+        _run_personal_material_download_parse_and_ingest(
+            conn, material_id, user_id, minio_path, file_type,
+            str(original_filename) if original_filename else None,
+            text_only, skip_kg,
+        )
+        return
+
+    source_placeholder = Path(f"{material_id}.pdf")
+    try:
+        _delete_personal_material_rag_dispatch(user_id, material_id)
+        n = _ingest_personal_parsed_dispatch(
+            user_id, material_id, source_placeholder,
+            str(original_filename) if original_filename else None,
+            text_only, skip_kg,
+        )
+        with conn.transaction():
+            ok = update_personal_material_status(
+                conn, material_id, "READY", None,
+                indexed_chunk_count=n, expect_status_in=("INDEXING",),
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"Personal material {material_id} lost INDEXING state before READY commit"
+                    " (personal_index_only)",
+                )
+        stem_dir = settings.output_dir / material_id
+        if stem_dir.exists():
+            shutil.rmtree(stem_dir, ignore_errors=True)
+        logger.success("Re-indexed personal material {} ({} chunks)", material_id, n)
+    except Exception as exc:
+        logger.exception("personal_index_only failed for material {}", material_id)
+        with conn.transaction():
+            update_personal_material_status(
+                conn, material_id, "FAILED", str(exc)[:2000], expect_status_in=("INDEXING",),
+            )

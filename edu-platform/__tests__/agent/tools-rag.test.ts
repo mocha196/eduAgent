@@ -1,12 +1,30 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { knowledgeQueryTool, generateQuizTool, buildMindmapTool } from "@/lib/agent/tools/rag";
 import type { TurnContext, ToolResult } from "@/lib/agent/types";
+
+// Mock LLM layer so _decomposeQuery / _rewriteQuery never make real API calls.
+vi.mock("@/lib/agent/llm-registry", () => ({
+  getLLMClient: vi.fn().mockReturnValue({}),
+  getRoleConfig: vi.fn().mockReturnValue({ apiKey: "sk-test", baseURL: "http://test", model: "test-model" }),
+  getExtraBody: vi.fn().mockReturnValue(undefined),
+}));
+vi.mock("@/lib/agent/subagent", () => ({
+  runSubAgent: vi.fn().mockResolvedValue({ success: false, summary: "" }),
+}));
+
+import { knowledgeQueryTool, buildMindmapTool } from "@/lib/agent/tools/rag";
 
 const ctx: TurnContext = {
   userId: "u-1",
   sessionId: "s-1",
   accessibleCourseIds: ["c-1", "c-2"],
   courseId: "c-1",
+};
+
+/** 无课程上下文（个人知识库场景） */
+const ctxNoCourse: TurnContext = {
+  userId: "u-2",
+  sessionId: "s-2",
+  accessibleCourseIds: [],
 };
 
 function asToolResult(value: string | ToolResult): ToolResult {
@@ -101,22 +119,6 @@ describe("RAG tools", () => {
     expect(payload.top_k).toBe(20);
   });
 
-  it("业务规则：generate_quiz 在无课程上下文时应拒绝执行", async () => {
-    // given
-    const noCourseCtx: TurnContext = {
-      userId: "u-1",
-      sessionId: "s-1",
-      accessibleCourseIds: [],
-      courseId: null,
-    };
-
-    // when
-    const result = asString(await generateQuizTool.execute({ count: 3 }, noCourseCtx));
-
-    // then
-    expect(result).toContain("需要绑定课程");
-  });
-
   it("业务规则：build_mindmap 成功时应返回摘要而非超长 HTML 正文", async () => {
     // given
     const fetchMock = vi.fn().mockResolvedValue({
@@ -135,5 +137,67 @@ describe("RAG tools", () => {
     const parsed = JSON.parse(result) as { markdown: string; html_length: number };
     expect(parsed.markdown).toContain("# 导图");
     expect(parsed.html_length).toBeGreaterThan(100);
+  });
+
+  // ---- 个人知识库（personal KB）业务规则 -------------------------------------
+
+  it("业务规则：sources=personal 在无课程上下文时应正常发起查询", async () => {
+    // given
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        hits: [
+          {
+            chunk_id: "pchunk-1",
+            text: "个人笔记：分布式系统核心概念。",
+            origin: "personal",
+            material_title: "我的笔记",
+          },
+        ],
+        warnings: [],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    // when
+    const result = asToolResult(
+      await knowledgeQueryTool.execute({ question: "什么是分布式系统", sources: "personal" }, ctxNoCourse),
+    );
+
+    // then
+    expect(result.content).toContain("来源：我的笔记");
+    expect(result.content).toContain("分布式系统核心概念");
+    const [, req] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const payload = JSON.parse(String(req.body)) as Record<string, unknown>;
+    expect(payload.source).toBe("personal");
+    expect(payload.course_id).toBeNull();
+    expect(payload.user_id).toBe("u-2");
+  });
+
+  it("业务规则：sources=course 在无课程上下文时应返回业务错误", async () => {
+    // given
+
+    // when
+    const result = asToolResult(
+      await knowledgeQueryTool.execute({ question: "课程内容", sources: "course" }, ctxNoCourse),
+    );
+
+    // then
+    expect(result.content).toContain("当前会话未绑定课程");
+  });
+
+  it("业务规则：sources=enrolled_courses 在有课程上下文时应返回业务错误", async () => {
+    // given
+
+    // when
+    const result = asToolResult(
+      await knowledgeQueryTool.execute(
+        { question: "相关课程有哪些", sources: "enrolled_courses" },
+        ctx,
+      ),
+    );
+
+    // then
+    expect(result.content).toContain("禁止使用 sources=enrolled_courses");
   });
 });

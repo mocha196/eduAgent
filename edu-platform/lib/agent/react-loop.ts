@@ -13,6 +13,8 @@ import type { PromptBuilder } from "./prompt-builder";
 import type { SkillEntry } from "./skills-loader";
 import type { LearnerProfile } from "./memory/types";
 import { ContextManager } from "./context-manager";
+import { createTurnTrace, flushLangfuse } from "./tracing/langfuse-tracer";
+import type { LangfuseTraceClient, LangfuseSpanClient, LangfuseGenerationClient } from "langfuse";
 
 // ---- B3 SSE helpers ---------------------------------------------------------
 
@@ -22,7 +24,13 @@ type B3Event =
   | { type: "text"; content: string }
   | ({ type: "citation" } & ToolCitation)
   | { type: "tool_call"; name: string; tool_call_id?: string }
-  | { type: "tool_result"; name: string; success?: boolean; duration_ms?: number }
+  | {
+      type: "tool_result";
+      name: string;
+      success?: boolean;
+      duration_ms?: number;
+      output?: string;
+    }
   | { type: "done"; tokens?: number | null; exec_time_ms?: number | null; error?: string }
   | { type: "trace"; event: string; payload?: Record<string, unknown> }
   | {
@@ -53,6 +61,8 @@ export type ReactLoopOptions = {
   memoryBlock: string;
   /** Prior conversation history (from SessionStore, excludes new user message) */
   history: Message[];
+  /** When set, only these tool names are exposed to the LLM (used for eval/benchmark). */
+  allowedTools?: string[];
 };
 
 type PendingToolCall = { id: string; name: string; args: string };
@@ -144,6 +154,29 @@ async function _runLoop(
   const client = getLLMClient("chat");
   const chatExtraBody = getRoleExtraBody("chat");
 
+  // ── Langfuse trace ────────────────────────────────────────────────────────
+  let trace: LangfuseTraceClient | null = null;
+  let loopSpan: LangfuseSpanClient | null = null;
+  let finalAssistantText = "";
+  if (ctx.traceId) {
+    trace = createTurnTrace({
+      traceId: ctx.traceId,
+      userId: ctx.userId,
+      sessionId: ctx.sessionId,
+      input: opts.userMessage,
+      metadata: {
+        ...(ctx.courseId ? { courseId: ctx.courseId } : {}),
+        ...(ctx.lessonId ? { lessonId: ctx.lessonId } : {}),
+        model: config.model,
+        maxIterations: config.maxIterations,
+      },
+    });
+    try {
+      loopSpan = trace?.span({ name: "react_loop", input: { historyMessages: opts.history.length } }) ?? null;
+    } catch { /* noop */ }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   // Build system prompt
   const systemPrompt = promptBuilder.buildSystemPrompt(
     config.systemPrompt,
@@ -164,7 +197,9 @@ async function _runLoop(
     { role: "user", content: _buildUserContent(opts) },
   ];
 
-  const schemas = toolRegistry.getSchemas();
+  const schemas = opts.allowedTools
+    ? toolRegistry.getSchemas().filter((s) => opts.allowedTools!.includes(s.function.name))
+    : toolRegistry.getSchemas();
   let totalTokens: number | null = null;
   let streamError: string | undefined;
 
@@ -176,9 +211,21 @@ async function _runLoop(
   }
 
   try {
+    let gotFinalAnswer = false;
     for (let iter = 0; iter < config.maxIterations; iter++) {
       const pendingTcs = new Map<number, PendingToolCall>();
       let assistantText = "";
+      let iterUsage: { input?: number; output?: number; total?: number } | undefined;
+
+      // Langfuse generation for this LLM call
+      let llmGen: LangfuseGenerationClient | null = null;
+      try {
+        llmGen = loopSpan?.generation({
+          name: `llm_call_${iter}`,
+          model: config.model,
+          input: _truncateMsgsForLangfuse(loopMsgs),
+        }) ?? null;
+      } catch { /* noop */ }
 
       // Stream LLM response
       const stream = await client.chat.completions.create({
@@ -210,15 +257,33 @@ async function _runLoop(
             if (tc.id && !p.id) p.id = tc.id;
           }
         }
-        if (chunk.usage?.total_tokens) {
-          totalTokens = chunk.usage.total_tokens;
+        if (chunk.usage) {
+          iterUsage = {
+            input: chunk.usage.prompt_tokens ?? undefined,
+            output: chunk.usage.completion_tokens ?? undefined,
+            total: chunk.usage.total_tokens ?? undefined,
+          };
+          if (chunk.usage.total_tokens) totalTokens = chunk.usage.total_tokens;
         }
       }
 
       const toolCallsList = [...pendingTcs.values()].filter((t) => t.name);
 
+      // End Langfuse generation
+      try {
+        llmGen?.end({
+          output:
+            toolCallsList.length > 0
+              ? { content: assistantText || null, tool_calls: toolCallsList.map((tc) => ({ id: tc.id, name: tc.name })) }
+              : assistantText,
+          usage: iterUsage ? { ...iterUsage, unit: "TOKENS" as const } : undefined,
+        });
+      } catch { /* noop */ }
+
       if (toolCallsList.length === 0) {
         // Final answer — exit loop
+        finalAssistantText = assistantText;
+        gotFinalAnswer = true;
         break;
       }
 
@@ -244,18 +309,23 @@ async function _runLoop(
         let citations: ToolCitation[] = [];
         let success = true;
 
+        // Parse args early so they're available for tracing and tool execution
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.args) as Record<string, unknown>;
+        } catch { /* empty args */ }
+
+        // Langfuse tool span
+        let toolSpan: LangfuseSpanClient | null = null;
+        try {
+          toolSpan = loopSpan?.span({ name: `tool:${tc.name}`, input: args }) ?? null;
+        } catch { /* noop */ }
+
         const tool = toolRegistry.get(tc.name);
         if (!tool) {
           toolContent = JSON.stringify({ error: `Tool "${tc.name}" not found in registry` });
           success = false;
         } else {
-          let args: Record<string, unknown> = {};
-          try {
-            args = JSON.parse(tc.args) as Record<string, unknown>;
-          } catch {
-            // empty args
-          }
-
           // ---- Approval gate ------------------------------------------------
           const needsApproval =
             tool.requiresApproval === true &&
@@ -304,8 +374,24 @@ async function _runLoop(
 
         const durationMs = Date.now() - toolStart;
 
+        // End Langfuse tool span
+        try {
+          toolSpan?.end({
+            output: toolContent.length > 2000 ? toolContent.slice(0, 2000) + "…" : toolContent,
+            metadata: { success, durationMs, category: tool?.category },
+            level: success ? ("DEFAULT" as const) : ("WARNING" as const),
+          });
+        } catch { /* noop */ }
+
         await writer.write(
-          sseData({ type: "tool_result", name: tc.name, success, duration_ms: durationMs }),
+          sseData({
+            type: "tool_result",
+            name: tc.name,
+            success,
+            duration_ms: durationMs,
+            output:
+              toolContent.length > 500 ? `${toolContent.slice(0, 500)}...` : toolContent,
+          }),
         );
 
         // Emit citations
@@ -327,12 +413,25 @@ async function _runLoop(
         );
       }
     }
+
+    if (!gotFinalAnswer && !streamError) {
+      streamError = "MAX_ITERATIONS_REACHED_NO_FINAL_ANSWER";
+    } else if (gotFinalAnswer && !finalAssistantText.trim() && !streamError) {
+      streamError = "EMPTY_FINAL_ANSWER";
+    }
   } catch (err) {
     streamError = err instanceof Error ? err.message : String(err);
     console.error("[ReActLoop] error during loop:", err);
   }
 
   const execMs = Date.now() - startMs;
+
+  // Close Langfuse observations
+  try {
+    loopSpan?.end({ output: { totalTokens, execTimeMs: execMs, error: streamError ?? null } });
+    if (finalAssistantText) trace?.update({ output: finalAssistantText });
+  } catch { /* noop */ }
+
   await writer.write(
     sseData({ type: "done", tokens: totalTokens, exec_time_ms: execMs, error: streamError }),
   );
@@ -349,9 +448,22 @@ async function _runLoop(
   }
 
   await writer.close();
+
+  // Flush pending Langfuse events (fire-and-forget after stream closes)
+  void flushLangfuse();
 }
 
 // ---- Helpers ----------------------------------------------------------------
+
+/** Truncate message content for Langfuse to avoid large payloads. */
+function _truncateMsgsForLangfuse(msgs: OpenAI.Chat.ChatCompletionMessageParam[]): unknown {
+  return msgs.map((m) => {
+    if (typeof m.content === "string" && m.content.length > 1500) {
+      return { ...m, content: m.content.slice(0, 1500) + "…" };
+    }
+    return m;
+  });
+}
 
 function _toOpenAIParam(m: Message): OpenAI.Chat.ChatCompletionMessageParam {
   if (m.role === "tool") {

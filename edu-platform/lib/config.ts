@@ -43,6 +43,28 @@ export function getMaterialStaleSec(): number {
   return readInt("RAG_MATERIAL_STALE_SEC", 1800);
 }
 
+// ── Langfuse ─────────────────────────────────────────────────────────────────
+
+export type LangfuseConfig = {
+  publicKey: string;
+  secretKey: string;
+  /** Default: https://cloud.langfuse.com */
+  baseUrl: string;
+};
+
+/**
+ * Returns Langfuse credentials when both keys are set, otherwise null.
+ * Used by lib/agent/tracing/langfuse-tracer.ts — never throws.
+ */
+export function getLangfuseConfig(): LangfuseConfig | null {
+  const publicKey = process.env.LANGFUSE_PUBLIC_KEY?.trim();
+  const secretKey = process.env.LANGFUSE_SECRET_KEY?.trim();
+  if (!publicKey || !secretKey) return null;
+  const baseUrl =
+    process.env.LANGFUSE_BASE_URL?.trim() || "https://cloud.langfuse.com";
+  return { publicKey, secretKey, baseUrl };
+}
+
 /**
  * How many trusted reverse proxies sit in front of Next (for client IP).
  * 0 = do not trust X-Forwarded-For for client identity; prefer X-Real-IP from your gateway.
@@ -129,4 +151,38 @@ export function getMinioConfig(): MinioConfig {
     bucket,
     useSsl,
   };
+}
+
+// ── Tencent COS ────────────────────────────────────────────────────────────
+
+export type CosConfig = {
+  secretId: string;
+  secretKey: string;
+  region: string;
+  bucket: string;
+};
+
+/**
+ * Returns true when all four COS env vars are set.
+ * Call this before `getCosConfig()` to avoid throwing in MinIO-only deployments.
+ */
+export function isCosEnabled(): boolean {
+  return !!(
+    process.env.COS_SECRET_ID?.trim() &&
+    process.env.COS_SECRET_KEY?.trim() &&
+    process.env.COS_REGION?.trim() &&
+    process.env.COS_BUCKET?.trim()
+  );
+}
+
+/** Tencent COS credentials — throws if any required var is missing. */
+export function getCosConfig(): CosConfig {
+  const secretId = process.env.COS_SECRET_ID?.trim();
+  const secretKey = process.env.COS_SECRET_KEY?.trim();
+  const region = process.env.COS_REGION?.trim();
+  const bucket = process.env.COS_BUCKET?.trim();
+  if (!secretId || !secretKey || !region || !bucket) {
+    throw new Error("COS_SECRET_ID, COS_SECRET_KEY, COS_REGION, COS_BUCKET must be set");
+  }
+  return { secretId, secretKey, region, bucket };
 }

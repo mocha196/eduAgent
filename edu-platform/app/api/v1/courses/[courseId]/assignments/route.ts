@@ -4,7 +4,11 @@ import { jsonOk, jsonError } from "@/lib/http/json-response";
 import { ApiError } from "@/lib/http/api-error";
 import { requireAuthenticated } from "@/lib/admin";
 import { getAuthFromRequest } from "@/lib/request-auth";
-import { listAssignments, triggerAssignmentGeneration } from "@/lib/services/assignmentService";
+import {
+  listAssignments,
+  listPublishedAssignments,
+  triggerAssignmentGeneration,
+} from "@/lib/services/assignmentService";
 import type { GenerateAssignmentBody } from "@/lib/dto/assignment.dto";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +19,10 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   try {
     const auth = requireAuthenticated(await getAuthFromRequest(_req));
     const { courseId } = await ctx.params;
+    if (auth.role === UserRole.STUDENT) {
+      const assignments = await listPublishedAssignments(auth.sub, auth.role, courseId);
+      return jsonOk({ assignments });
+    }
     const assignments = await listAssignments(auth.sub, auth.role as UserRole, courseId);
     return jsonOk({ assignments });
   } catch (e) {

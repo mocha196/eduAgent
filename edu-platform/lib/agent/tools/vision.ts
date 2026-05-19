@@ -8,6 +8,56 @@ import OpenAI from "openai";
 import { getLLMClient, getVisionModel } from "../llm-registry";
 import type { Tool, TurnContext } from "../types";
 
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase();
+  if (!h) return true;
+  if (h === "localhost" || h === "::1" || h.endsWith(".local")) return true;
+  if (!h.includes(".")) return true;
+  if (/^127\./.test(h)) return true;
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+  return false;
+}
+
+function normalizeVisionUrl(raw: string): string {
+  return encodeURI(raw.trim());
+}
+
+async function toInlineDataUrl(url: string): Promise<string | null> {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return null;
+  const contentType = (res.headers.get("content-type") ?? "image/png")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  if (!contentType.startsWith("image/")) return null;
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return `data:${contentType};base64,${bytes.toString("base64")}`;
+}
+
+async function buildVisionToolImageUrl(raw: string): Promise<string | null> {
+  const value = raw.trim();
+  if (!value) return null;
+  if (value.startsWith("data:image/")) return value;
+
+  try {
+    const normalized = normalizeVisionUrl(value);
+    const parsed = new URL(normalized);
+    const isHttp = parsed.protocol === "http:" || parsed.protocol === "https:";
+    if (!isHttp) return null;
+    if (isPrivateOrLocalHostname(parsed.hostname)) {
+      const inline = await toInlineDataUrl(normalized);
+      if (inline) return inline;
+      return null; // Cannot pass private/local URL to external vision model
+    }
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
 export const analyzeImageTool: Tool = {
   name: "analyzeImage",
   description:
@@ -47,9 +97,16 @@ export const analyzeImageTool: Tool = {
       const client = getLLMClient("vision");
       const model = getVisionModel();
 
+      const normalizedUrls = (
+        await Promise.all(imageUrls.map((url) => buildVisionToolImageUrl(url)))
+      ).filter((u): u is string => !!u);
+      if (normalizedUrls.length === 0) {
+        return JSON.stringify({ error: "未找到可用的图片 URL" });
+      }
+
       const contentParts: OpenAI.Chat.ChatCompletionContentPart[] = [
         { type: "text", text: question },
-        ...imageUrls.map((url) => ({
+        ...normalizedUrls.map((url) => ({
           type: "image_url" as const,
           image_url: { url },
         })),

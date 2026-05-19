@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { useTheme } from "next-themes";
-import type { DockviewIDisposable } from "dockview";
+import type { DockviewIDisposable, IDockviewPanel } from "dockview";
 import {
   DockviewReact,
   themeDark,
@@ -119,9 +119,13 @@ function MaterialPreviewPanel() {
 }
 
 function ChatPanel(props: IDockviewPanelProps<{ sessionId?: string | null }>) {
-  const { courseId } = useCourseChatCtx();
+  const { courseId, activeMaterialId } = useCourseChatCtx();
   return (
-    <ChatComponent courseId={courseId} hydrateSessionId={props.params?.sessionId ?? null} />
+    <ChatComponent
+      courseId={courseId}
+      hydrateSessionId={props.params?.sessionId ?? null}
+      activeMaterialId={activeMaterialId}
+    />
   );
 }
 
@@ -131,15 +135,56 @@ const dockviewComponents = {
   chat: ChatPanel,
 };
 
-type Props = { courseId: string };
+export type ClosedPanelInfo = {
+  id: string;
+  title: string;
+  component: string;
+  params?: Record<string, unknown>;
+};
 
-export default function CourseChatDockview({ courseId }: Props) {
+type Props = {
+  courseId: string;
+  onClosedPanelsChange?: (panels: ClosedPanelInfo[]) => void;
+  restorePanelFnRef?: React.MutableRefObject<((info: ClosedPanelInfo) => void) | null>;
+};
+
+export default function CourseChatDockview({ courseId, onClosedPanelsChange, restorePanelFnRef }: Props) {
   const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(
     null,
   );
   const [citation, setCitation] = useState<CitationPreview | null>(null);
   const [citationTextPanel, setCitationTextPanel] = useState<CitationPreview | null>(null);
   const { resolvedTheme } = useTheme();
+
+  // Closed-panels tracking
+  const [, setClosedPanels] = useState<ClosedPanelInfo[]>([]);
+  const closedPanelsRef = useRef<ClosedPanelInfo[]>([]);
+  const onClosedPanelsChangeCbRef = useRef(onClosedPanelsChange);
+  onClosedPanelsChangeCbRef.current = onClosedPanelsChange;
+
+  const setClosedPanelsAndNotify = useCallback((panels: ClosedPanelInfo[]) => {
+    closedPanelsRef.current = panels;
+    setClosedPanels(panels);
+    onClosedPanelsChangeCbRef.current?.(panels);
+  }, []);
+
+  const restorePanel = useCallback((info: ClosedPanelInfo) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const refPanel = api.panels[api.panels.length - 1];
+    api.addPanel({
+      id: info.id,
+      component: info.component,
+      title: info.title,
+      params: info.params,
+      position: refPanel ? { referencePanel: refPanel.id, direction: "within" } : undefined,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (restorePanelFnRef) restorePanelFnRef.current = restorePanel;
+    return () => { if (restorePanelFnRef) restorePanelFnRef.current = null; };
+  }, [restorePanelFnRef, restorePanel]);
 
   // Holds the agentSessionId of the default (oldest) course chat session.
   // Updated after async fetch; used to inject into the default "chat" panel and re-injected after layout reset.
@@ -182,6 +227,7 @@ export default function CourseChatDockview({ courseId }: Props) {
     } catch {
       /* ignore */
     }
+    setClosedPanelsAndNotify([]);
     resettingLayoutRef.current = true;
     try {
       api.clear();
@@ -194,7 +240,7 @@ export default function CourseChatDockview({ courseId }: Props) {
     } finally {
       resettingLayoutRef.current = false;
     }
-  }, [courseId]);
+  }, [courseId, setClosedPanelsAndNotify]);
 
   const handleAddChatWindow = useCallback(async () => {
     const api = apiRef.current;
@@ -372,20 +418,40 @@ export default function CourseChatDockview({ courseId }: Props) {
       };
 
       const layoutChangeSub = api.onDidLayoutChange(schedulePersist);
-      const removePanelSub = api.onDidRemovePanel(() => {
+      const removePanelSub = api.onDidRemovePanel((panel: IDockviewPanel) => {
         if (resettingLayoutRef.current) return;
+        const component = panel.id === "materialList" ? "materialList"
+          : panel.id === "materialPreview" ? "materialPreview"
+          : "chat";
+        const info: ClosedPanelInfo = {
+          id: panel.id,
+          title: panel.title ?? panel.id,
+          component,
+          params: panel.params as Record<string, unknown> | undefined,
+        };
+        const prev = closedPanelsRef.current;
+        if (!prev.some(p => p.id === info.id)) {
+          setClosedPanelsAndNotify([...prev, info]);
+        }
         if (api.panels.length === 0) {
           resetDockviewToDefault(api);
         }
+      });
+      const addPanelSub = api.onDidAddPanel((panel: IDockviewPanel) => {
+        if (resettingLayoutRef.current) return;
+        const prev = closedPanelsRef.current;
+        const next = prev.filter(p => p.id !== panel.id);
+        if (next.length !== prev.length) setClosedPanelsAndNotify(next);
       });
       layoutDisposableRef.current = {
         dispose() {
           layoutChangeSub.dispose();
           removePanelSub.dispose();
+          addPanelSub.dispose();
         },
       };
     },
-    [courseId, resetDockviewToDefault],
+    [courseId, resetDockviewToDefault, setClosedPanelsAndNotify],
   );
 
   return (

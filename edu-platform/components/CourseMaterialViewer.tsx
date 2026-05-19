@@ -5,8 +5,10 @@ import { FileText, Hash, Loader2, AlertCircle, Download, ChevronLeft, ChevronRig
 import ReactMarkdown from "react-markdown";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { isOfficeMaterialFileType } from "@/lib/material-office";
 import { captureScrollViewportToPngFile, EDU_CHAT_ADD_ATTACHMENT_EVENT } from "@/lib/captureElementToPngFile";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import {
   markdownRehypePlugins,
   markdownRemarkPlugins,
@@ -22,6 +24,8 @@ type MaterialDetail = {
   indexed_chunk_count: number;
   created_at: string;
   status_message: string | null;
+  transcript: string | null;
+  video_summary: string | null;
 };
 
 type Props = {
@@ -30,6 +34,8 @@ type Props = {
   materialId: string | null;
   chunkId?: string;
   sourceLabel?: string;
+  /** Base path for material API calls, e.g. "/api/v1/me/materials". Defaults to "/api/v1/materials". */
+  apiBase?: string;
 };
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v", "wmv"]);
@@ -42,12 +48,14 @@ export default function CourseMaterialViewer({
   materialId,
   chunkId,
   sourceLabel,
+  apiBase = "/api/v1/materials",
 }: Props) {
   const [material, setMaterial] = useState<MaterialDetail | null>(null);
   const [chunkError, setChunkError] = useState<string | null>(null);
   const [textBody, setTextBody] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
+  const [videoDataLoaded, setVideoDataLoaded] = useState(false);
   const [pdfViewportReady, setPdfViewportReady] = useState(false);
   const [pdfLoadError, setPdfLoadError] = useState<string | null>(null);
 
@@ -72,7 +80,7 @@ export default function CourseMaterialViewer({
     }
     setLoading(true);
     try {
-      const mRes = await fetch(`/api/v1/materials/${materialId}`, {
+      const mRes = await fetch(`${apiBase}/${materialId}`, {
         credentials: "include",
       });
       if (mRes.ok) {
@@ -86,6 +94,10 @@ export default function CourseMaterialViewer({
   }, [materialId]);
 
   useEffect(() => {
+    setVideoDataLoaded(false);
+  }, [materialId]);
+
+  useEffect(() => {
     void loadMaterial();
   }, [loadMaterial]);
 
@@ -95,11 +107,18 @@ export default function CourseMaterialViewer({
     office &&
     material.preview_pdf_status === "PENDING";
 
+  // Poll while a video/audio file is still being transcribed (no transcript yet)
+  const pollTranscribe =
+    !!material &&
+    (isVideoType(material.file_type) || isAudioType(material.file_type)) &&
+    !["FAILED"].includes(material.status) &&
+    !(material.transcript || material.video_summary);
+
   useEffect(() => {
-    if (!pollPreview) return;
+    if (!pollPreview && !pollTranscribe) return;
     const t = setInterval(() => void loadMaterial(), 2500);
     return () => clearInterval(t);
-  }, [pollPreview, loadMaterial]);
+  }, [pollPreview, pollTranscribe, loadMaterial]);
 
   useEffect(() => {
     if (!materialId || !material) {
@@ -113,7 +132,7 @@ export default function CourseMaterialViewer({
     }
     let cancelled = false;
     void (async () => {
-      const res = await fetch(`/api/v1/materials/${materialId}/content`, {
+      const res = await fetch(`${apiBase}/${materialId}/content`, {
         credentials: "include",
       });
       if (!res.ok || cancelled) return;
@@ -170,7 +189,7 @@ export default function CourseMaterialViewer({
         pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs?v=legacy-5.7.284";
         setPdfLoadProgress(0);
         const loadingTask = pdfjsLib.getDocument({
-          url: `/api/v1/materials/${materialId}/content`,
+          url: `${apiBase}/${materialId}/content`,
           withCredentials: true,
           rangeChunkSize: 65536,
           disableStream: false,
@@ -280,6 +299,11 @@ export default function CourseMaterialViewer({
   const isVideo = isVideoType(ft);
   const isAudio = isAudioType(ft);
 
+  const hasMediaContent =
+    (isVideo || isAudio) &&
+    material.status === "READY" &&
+    !!(material.transcript || material.video_summary);
+
   // Screenshot availability per type
   const canScreenshot =
     !captureBusy &&
@@ -288,7 +312,7 @@ export default function CourseMaterialViewer({
     (
       textPreviewReady ||
       (showPdfCanvas && pdfViewportReady) ||
-      isVideo ||
+      (isVideo && videoDataLoaded) ||
       previewFailed
     ) &&
     !isAudio &&
@@ -368,36 +392,48 @@ export default function CourseMaterialViewer({
           </p>
         )}
         <div className="flex gap-2 items-stretch">
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            disabled={!canScreenshot}
-            title={isAudio ? "音频无法截屏" : "截屏当前预览并添加到问答附件"}
-            onClick={() => void handleScreenshotToChat()}
-            aria-label="截屏当前预览并添加到问答附件"
-          >
-            {captureBusy ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden
-              >
-                <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
-                <circle cx="12" cy="13" r="3" />
-              </svg>
-            )}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex shrink-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7"
+                  disabled={!canScreenshot}
+                  onClick={() => void handleScreenshotToChat()}
+                  aria-label="上传资料页面作为消息附件"
+                >
+                  {captureBusy ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+                      <circle cx="12" cy="13" r="3" />
+                    </svg>
+                  )}
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {isAudio
+                ? "音频无法截屏"
+                : isVideo && !videoDataLoaded
+                  ? "请先播放或拖动进度条以加载视频帧"
+                  : "上传资料页面作为消息附件"}
+            </TooltipContent>
+          </Tooltip>
           <Button
             variant="outline"
             size="sm"
@@ -405,7 +441,7 @@ export default function CourseMaterialViewer({
             asChild
           >
             <a
-              href={`/api/v1/materials/${materialId}/content?variant=original`}
+              href={`${apiBase}/${materialId}/content?variant=original`}
               download={material.filename}
             >
               <Download size={12} className="mr-1 shrink-0" />
@@ -418,7 +454,7 @@ export default function CourseMaterialViewer({
       <div
         ref={showPdfCanvas || showOfficePdfIframe || isVideo || isAudio ? undefined : textScrollRef}
         className={
-          showPdfCanvas || showOfficePdfIframe
+          showPdfCanvas || showOfficePdfIframe || hasMediaContent
             ? "flex-1 min-h-0 flex flex-col overflow-hidden"
             : "flex-1 min-h-0 overflow-auto"
         }
@@ -455,7 +491,7 @@ export default function CourseMaterialViewer({
               </div>
             )}
             <iframe
-              src={`/api/v1/materials/${materialId}/content`}
+              src={`${apiBase}/${materialId}/content`}
               className="flex-1 w-full border-0"
               style={{ minHeight: 0 }}
               title={material.filename}
@@ -537,28 +573,69 @@ export default function CourseMaterialViewer({
 
         {/* Video player */}
         {isVideo && (
-          <div className="flex-1 min-h-0 flex flex-col items-center justify-center p-3 gap-2">
+          <div className={hasMediaContent ? "shrink-0 flex justify-center p-3 bg-black/5 border-b border-border" : "flex-1 min-h-0 flex flex-col items-center justify-center p-3 gap-2"}>
             <video
               ref={videoRef}
-              src={`/api/v1/materials/${materialId}/content`}
+              src={`${apiBase}/${materialId}/content`}
               controls
               crossOrigin="anonymous"
-              className="max-w-full max-h-full rounded shadow-sm"
-              style={{ maxHeight: "calc(100% - 8px)" }}
+              className="max-w-full rounded shadow-sm"
+              style={hasMediaContent ? { maxHeight: "min(50vh, 320px)" } : { maxHeight: "calc(100% - 8px)" }}
               preload="metadata"
+              onLoadedData={() => setVideoDataLoaded(true)}
             />
           </div>
         )}
 
         {/* Audio player */}
         {isAudio && (
-          <div className="flex items-center justify-center p-4">
+          <div className={hasMediaContent ? "shrink-0 px-4 py-3 border-b border-border" : "flex items-center justify-center p-4"}>
             <audio
-              src={`/api/v1/materials/${materialId}/content`}
+              src={`${apiBase}/${materialId}/content`}
               controls
               className="w-full"
               preload="metadata"
             />
+          </div>
+        )}
+
+        {/* Transcript / summary panel for video and audio */}
+        {(isVideo || isAudio) && hasMediaContent && (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <Tabs
+              defaultValue={material.video_summary ? "summary" : "transcript"}
+              className="flex flex-col flex-1 min-h-0"
+            >
+              <div className="shrink-0 px-3 pt-2 pb-1">
+                <TabsList className="h-7">
+                  {material.video_summary && (
+                    <TabsTrigger value="summary" className="h-5 px-2.5 text-[11px]">摘要</TabsTrigger>
+                  )}
+                  {material.transcript && (
+                    <TabsTrigger value="transcript" className="h-5 px-2.5 text-[11px]">转录文本</TabsTrigger>
+                  )}
+                </TabsList>
+              </div>
+              {material.video_summary && (
+                <TabsContent value="summary" className="flex-1 min-h-0 overflow-auto mt-0 px-3 pb-3">
+                  <div className="prose prose-sm dark:prose-invert max-w-none pt-1">
+                    <ReactMarkdown
+                      remarkPlugins={markdownRemarkPlugins}
+                      rehypePlugins={markdownRehypePlugins}
+                    >
+                      {normalizeMathDelimiters(material.video_summary)}
+                    </ReactMarkdown>
+                  </div>
+                </TabsContent>
+              )}
+              {material.transcript && (
+                <TabsContent value="transcript" className="flex-1 min-h-0 overflow-auto mt-0 px-3 pb-3 pt-1">
+                  <pre className="whitespace-pre-wrap text-[11px] font-mono text-muted-foreground leading-relaxed">
+                    {material.transcript}
+                  </pre>
+                </TabsContent>
+              )}
+            </Tabs>
           </div>
         )}
 

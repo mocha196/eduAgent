@@ -1,11 +1,12 @@
 import { prisma } from "@/lib/db";
 import { getRedis } from "@/lib/redis";
 import { ApiError } from "@/lib/http/api-error";
-import { assertTeacherOfCourse, assertUuid } from "@/lib/course-access";
+import { assertTeacherOfCourse, assertUuid, getCourseIfMember } from "@/lib/course-access";
 
 import { AssignmentStatus, UserRole } from "@prisma/client";
 import type {
   AssignmentDetailDto,
+  AssignmentStudentViewDto,
   AssignmentSummaryDto,
   Blueprint,
   CompleteQuestionBody,
@@ -14,6 +15,7 @@ import type {
   QualityReport,
   QuestionItem,
   RegenerateQuestionBody,
+  StudentQuestionItem,
 } from "@/lib/dto/assignment.dto";
 
 const STREAM_NAME = process.env.RAG_TASK_STREAM_NAME ?? "edu:rag:tasks:stream";
@@ -56,6 +58,8 @@ function toDetail(a: {
   createdAt: Date;
   publishedAt: Date | null;
   errorMessage: string | null;
+  teacherRequest: string | null;
+  structuredParams: unknown;
 }): AssignmentDetailDto {
   const summary = toSummary(a);
   return {
@@ -65,6 +69,8 @@ function toDetail(a: {
     questions: a.questions ? (a.questions as QuestionItem[]) : null,
     qualityReport: a.qualityReport ? (a.qualityReport as QualityReport) : null,
     publishedAt: a.publishedAt?.toISOString() ?? null,
+    teacherRequest: a.teacherRequest,
+    structuredParams: a.structuredParams ? (a.structuredParams as import("@/lib/dto/assignment.dto").StructuredGenerationParams) : null,
   };
 }
 
@@ -128,6 +134,9 @@ export async function triggerAssignmentGeneration(
       title: body.title.trim(),
       status: AssignmentStatus.GENERATING,
       deadline: body.deadline ? new Date(body.deadline) : null,
+      teacherRequest: body.teacherRequest.trim(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      structuredParams: body.structuredParams ? (body.structuredParams as any) : undefined,
     },
     select: {
       id: true,
@@ -364,4 +373,77 @@ export async function completeTeacherQuestion(
   });
 
   return { ...newQuestion, score };
+}
+
+// ── Student-facing helpers ───────────────────────────────────────────────────
+
+/** List PUBLISHED assignments visible to an enrolled student. */
+export async function listPublishedAssignments(
+  studentId: string,
+  role: UserRole,
+  courseId: string,
+): Promise<AssignmentSummaryDto[]> {
+  await getCourseIfMember(studentId, role, courseId);
+  const rows = await prisma.assignment.findMany({
+    where: { courseId, status: AssignmentStatus.PUBLISHED },
+    orderBy: { publishedAt: "desc" },
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      questions: true,
+      qualityReport: true,
+      deadline: true,
+      createdAt: true,
+      errorMessage: true,
+    },
+  });
+  return rows.map((a) => ({
+    id: a.id,
+    title: a.title,
+    status: a.status,
+    questionCount: Array.isArray(a.questions) ? (a.questions as unknown[]).length : 0,
+    qualityScore: null,
+    deadline: a.deadline?.toISOString() ?? null,
+    createdAt: a.createdAt.toISOString(),
+    errorMessage: null,
+  }));
+}
+
+/** Return a PUBLISHED assignment for a student — answers & explanations are redacted. */
+export async function getAssignmentForStudent(
+  studentId: string,
+  role: UserRole,
+  courseId: string,
+  assignmentId: string,
+): Promise<AssignmentStudentViewDto> {
+  assertUuid(assignmentId, "assignment_id");
+  await getCourseIfMember(studentId, role, courseId);
+
+  const a = await prisma.assignment.findFirst({
+    where: { id: assignmentId, courseId, status: AssignmentStatus.PUBLISHED },
+  });
+  if (!a) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
+
+  const questions = Array.isArray(a.questions)
+    ? (a.questions as unknown as QuestionItem[]).map<StudentQuestionItem>((q) => ({
+        ...q,
+        answer: null,
+        explanation: null,
+      }))
+    : null;
+
+  const totalScore = Array.isArray(a.questions)
+    ? (a.questions as unknown as QuestionItem[]).reduce((s, q) => s + (q.score ?? 0), 0)
+    : 0;
+
+  return {
+    id: a.id,
+    title: a.title,
+    description: a.description,
+    deadline: a.deadline?.toISOString() ?? null,
+    publishedAt: a.publishedAt?.toISOString() ?? null,
+    questions,
+    totalScore,
+  };
 }

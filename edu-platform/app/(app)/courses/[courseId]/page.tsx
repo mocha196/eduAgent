@@ -731,7 +731,7 @@ export default function CourseDetailPage() {
                       <p className="text-sm font-medium truncate">{a.title}</p>
                       <p className="text-xs text-muted-foreground mt-0.5">
                         {a.questionCount > 0 ? `${a.questionCount} 题` : "暂无题目"}
-                        {a.qualityScore !== null && ` · ${a.qualityScore} 分`}
+                        {a.qualityScore !== null && ` · ${(a.qualityScore * 10).toFixed(1)} 分`}
                         {a.deadline && ` · 截止 ${new Date(a.deadline).toLocaleDateString("zh-CN")}`}
                       </p>
                     </div>

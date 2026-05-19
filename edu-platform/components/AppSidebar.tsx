@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
+  Blocks,
   BookOpen,
   GraduationCap,
   MessageSquare,
@@ -14,7 +15,9 @@ import {
   TrendingUp,
   User,
   Shield,
+  Brain,
   ChevronRight,
+  Settings2,
 } from "lucide-react";
 import {
   Sidebar,
@@ -48,9 +51,18 @@ const navItems = [
     icon: MessageSquare,
     roles: ["STUDENT", "TEACHER", "ADMIN"],
   },
+  {
+    label: "个人知识库",
+    href: "/me/personal-kb",
+    icon: Brain,
+    roles: ["STUDENT", "TEACHER", "ADMIN"],
+  },
   { label: "个人中心", href: "/user", icon: User },
   { label: "学习进度", href: "/me/progress", icon: TrendingUp, roles: ["STUDENT"] },
+  { label: "长期记忆", href: "/me/memories", icon: Brain },
   { label: "隐私与数据", href: "/me/privacy", icon: Shield },
+  { label: "LLM 配置", href: "/me/llm-config", icon: Settings2 },
+  { label: "技能管理", href: "/admin/skills", icon: Blocks, roles: ["ADMIN"] },
 ];
 
 const roleLabels: Record<string, string> = {
