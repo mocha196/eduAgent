@@ -28,6 +28,14 @@ vi.mock("@/lib/redis", () => ({
   })),
 }));
 
+vi.mock("@/lib/agent/mcp-manager", () => ({
+  McpManager: {
+    getInstance: () => ({
+      getTools: vi.fn(async () => []),
+    }),
+  },
+}));
+
 import { createReActStream } from "@/lib/agent/react-loop";
 
 function makeStream(chunks: Array<Record<string, unknown>>) {
@@ -132,6 +140,10 @@ describe("createReActStream", () => {
           { choices: [{ delta: {} }], usage: { total_tokens: 12 } },
         ]),
       )
+      // reflection call (non-streaming): returns "sufficient: true"
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: '{"sufficient":true,"reasoning":"info_ok"}' } }],
+      })
       .mockResolvedValueOnce(
         makeStream([
           { choices: [{ delta: { content: "结论：TCP 通过三次握手建立连接。" } }] },

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections import Counter
 
 from tests.eval._common import (
     DATA_DIR,
@@ -29,10 +30,9 @@ from tests.eval._common import (
 
 _bootstrap()
 
-# Candidate parsed-output directories to scan (repo root + edu-platform output)
+# datasets/ folder under repo root — course materials for 计算机网络基础
 _SCAN_DIRS = [
-    REPO_ROOT / "output" / "parsed",
-    REPO_ROOT / "edu-platform" / "output" / "parsed",
+    REPO_ROOT / "datasets",
 ]
 
 
@@ -63,7 +63,7 @@ def collect_documents(max_docs: int = 0) -> list[dict]:
         if max_docs and len(docs) >= max_docs:
             break
 
-    print(f"[collect] Found {len(docs)} Markdown documents from parsed outputs.")
+    print(f"[collect] Found {len(docs)} Markdown documents from datasets/.")
     return docs
 
 
@@ -82,20 +82,38 @@ def _build_langchain_docs(raw_docs: list[dict]):
 
 
 def _build_ragas_llm():
-    """Build a Ragas-compatible LLM wrapper pointing to our DashScope endpoint."""
+    """Build a Ragas-compatible LLM using llm_factory (Instructor backend).
+
+    Instructor enforces structured output at the API level (JSON mode), so the
+    model returns a filled Pydantic instance instead of echoing back the schema.
+    """
     from rag_mvp.config import settings  # type: ignore[import-untyped]
-    from langchain_openai import ChatOpenAI  # type: ignore[import-untyped]
-    from ragas.llms import LangchainLLMWrapper  # type: ignore[import-untyped]
+    from openai import AsyncOpenAI
+    from ragas.llms import llm_factory  # type: ignore[import-untyped]
 
-    from pydantic import SecretStr
+    base_url = settings.effective_chat_base_url
+    model = settings.effective_chat_model
+    api_key = settings.effective_chat_api_key or "placeholder"
 
-    llm = ChatOpenAI(
-        model=settings.llm_model,
-        api_key=SecretStr(settings.llm_api_key or "placeholder"),
-        base_url=settings.llm_base_url,
-        temperature=0.0,
+    extra_body: dict | None = None
+    if "deepseek.com" in base_url or model.lower().startswith("deepseek"):
+        extra_body = {"thinking": {"type": "disabled"}}
+    elif "dashscope" in base_url or model.lower().startswith("qwen"):
+        extra_body = {"enable_thinking": False}
+
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+
+    factory_kwargs: dict = {"temperature": 0.0}
+    if extra_body:
+        factory_kwargs["extra_body"] = extra_body
+
+    return llm_factory(
+        model=model,
+        provider="openai",
+        client=client,
+        adapter="instructor",
+        **factory_kwargs,
     )
-    return LangchainLLMWrapper(llm)
 
 
 def _build_ragas_embeddings():
@@ -106,46 +124,145 @@ def _build_ragas_embeddings():
 
     from pydantic import SecretStr
 
-    emb = OpenAIEmbeddings(
+    emb = OpenAIEmbeddings(  # type: ignore[call-arg]
         model=settings.embedding_model,
-        api_key=SecretStr(settings.llm_api_key or "placeholder"),
-        base_url=settings.llm_base_url,
+        api_key=SecretStr(settings.embedding_api_key or settings.llm_api_key or "placeholder"),
+        base_url=settings.embedding_base_url or settings.llm_base_url,
     )
     return LangchainEmbeddingsWrapper(emb)
 
 
-def generate_testset(docs: list[dict], n: int = 200) -> list[dict]:
-    """Generate n QA pairs using Ragas TestsetGenerator.
+def _preflight_check() -> None:
+    """Verify LLM and embedding endpoints are reachable before running generation."""
+    from openai import OpenAI
+    from rag_mvp.config import settings  # type: ignore[import-untyped]
 
-    Returns a list of dicts with keys: ``question``, ``ground_truth``, ``source``.
-    """
-    from ragas.testset import TestsetGenerator  # type: ignore[import-untyped]
+    # --- LLM ---
+    print("[preflight] Testing LLM ...", end=" ", flush=True)
+    base_url = settings.effective_chat_base_url
+    model = settings.effective_chat_model
+    extra_body: dict | None = None
+    if "deepseek.com" in base_url or model.lower().startswith("deepseek"):
+        extra_body = {"thinking": {"type": "disabled"}}
+    elif "dashscope" in base_url or model.lower().startswith("qwen"):
+        extra_body = {"enable_thinking": False}
 
-    lc_docs = _build_langchain_docs(docs)
-    llm = _build_ragas_llm()
-    emb = _build_ragas_embeddings()
+    llm_client = OpenAI(
+        api_key=settings.effective_chat_api_key or "placeholder",
+        base_url=base_url,
+    )
+    resp = llm_client.chat.completions.create(  # type: ignore[call-arg]
+        model=model,
+        messages=[{"role": "user", "content": "hello"}],
+        max_tokens=16,
+        extra_body=extra_body,
+    )
+    print(f"OK  (reply: {repr((resp.choices[0].message.content or '')[:60])})")
 
-    print(f"[ragas] Generating {n} QA pairs from {len(lc_docs)} documents...")
-    generator = TestsetGenerator(llm=llm, embedding_model=emb)
-    testset = generator.generate_with_langchain_docs(lc_docs, testset_size=n)
+    # --- Embeddings ---
+    print("[preflight] Testing embeddings ...", end=" ", flush=True)
+    emb_client = OpenAI(
+        api_key=settings.embedding_api_key or settings.llm_api_key or "placeholder",
+        base_url=settings.embedding_base_url or settings.llm_base_url,
+    )
+    emb_resp = emb_client.embeddings.create(
+        model=settings.embedding_model,
+        input=["hello"],
+    )
+    dim = len(emb_resp.data[0].embedding)
+    print(f"OK  (model={settings.embedding_model}, dim={dim})")
 
-    from ragas.testset import Testset  # type: ignore[import-untyped]
-    assert isinstance(testset, Testset), f"Unexpected generate() return type: {type(testset)}"
 
+def _extract_questions(testset, id_offset: int = 0) -> list[dict]:
+    """Convert a Ragas Testset object into a list of QA dicts."""
     questions: list[dict] = []
     df = testset.to_pandas()
     for _, row in df.iterrows():
         questions.append(
             {
-                "id": str(len(questions)),
+                "id": str(id_offset + len(questions)),
                 "question": str(row.get("user_input", row.get("question", ""))),
                 "gold_answer": str(row.get("reference", row.get("ground_truth", ""))),
                 "context": str(row.get("reference_contexts", row.get("contexts", ""))),
                 "evolution_type": str(row.get("synthesizer_name", row.get("evolution_type", "simple"))),
             }
         )
+    return questions
 
-    print(f"[ragas] Generated {len(questions)} QA pairs.")
+
+def generate_testset(
+    docs: list[dict],
+    n: int = 200,
+    checkpoint_path=None,
+    batch_size: int = 20,
+) -> list[dict]:
+    """Generate n QA pairs using Ragas TestsetGenerator with incremental saves.
+
+    Generates in batches of *batch_size*. After each successful batch the results
+    are written to *checkpoint_path*, so a crash only loses at most one batch.
+    On the next run the checkpoint is reloaded and generation resumes from where
+    it left off.
+
+    The knowledge graph is built once during the first batch
+    (``generate_with_langchain_docs``); subsequent batches call
+    ``generator.generate()`` which reuses the cached graph.
+    """
+    import json
+    from pathlib import Path
+    from ragas.testset import TestsetGenerator  # type: ignore[import-untyped]
+
+    lc_docs = _build_langchain_docs(docs)
+    llm = _build_ragas_llm()
+    emb = _build_ragas_embeddings()
+
+    # Resume from checkpoint
+    questions: list[dict] = []
+    if checkpoint_path is not None:
+        cp = Path(checkpoint_path)
+        if cp.exists():
+            try:
+                questions = json.loads(cp.read_text(encoding="utf-8"))
+                print(f"[ragas] Resumed from checkpoint: {len(questions)}/{n} already done.")
+            except Exception as exc:
+                print(f"[ragas] Checkpoint unreadable, starting fresh: {exc}")
+
+    if len(questions) >= n:
+        print(f"[ragas] Checkpoint already complete ({len(questions)} >= {n}), skipping.")
+        return questions
+
+    generator = TestsetGenerator(llm=llm, embedding_model=emb)
+    kg_built = False
+    print(f"[ragas] Generating {n - len(questions)} more QA pairs from {len(lc_docs)} documents (batch={batch_size})...")
+
+    while len(questions) < n:
+        batch_n = min(batch_size, n - len(questions))
+        try:
+            if not kg_built:
+                # First batch: builds the knowledge graph then generates samples.
+                testset = generator.generate_with_langchain_docs(lc_docs, testset_size=batch_n)
+                kg_built = True
+            else:
+                # Subsequent batches: reuse the already-built knowledge graph.
+                testset = generator.generate(testset_size=batch_n)
+
+            batch_q = _extract_questions(testset, id_offset=len(questions))
+            questions.extend(batch_q)
+            print(f"[ragas] Batch done (+{len(batch_q)}). Progress: {len(questions)}/{n}")
+
+            if checkpoint_path is not None:
+                save_json(Path(checkpoint_path), questions)
+
+        except Exception as exc:
+            print(f"[warn] Batch failed ({type(exc).__name__}: {exc}), skipping.")
+            if not kg_built:
+                raise  # KG build failure is unrecoverable; propagate
+
+    type_dist = Counter(q["evolution_type"] for q in questions)
+    print("\n[ragas] Question type distribution:")
+    for qtype, count in sorted(type_dist.items(), key=lambda x: -x[1]):
+        print(f"  {qtype}: {count} ({count / len(questions) * 100:.1f}%)")
+
+    print(f"[ragas] Generated {len(questions)} QA pairs total.")
     return questions
 
 
@@ -162,22 +279,27 @@ def main(course_id: str | None = None, sample: int = 200) -> None:
             "The inference script will need --course-id when running against this dataset."
         )
 
+    # # 0. Preflight — verify API endpoints before doing any heavy work
+    # print("\n=== Step 0: Preflight API checks ===")
+    # _preflight_check()
+
     # 1. Collect documents
     print("\n=== Step 1: Collect parsed Markdown documents ===")
     docs = collect_documents()
     if not docs:
-        print("[error] No Markdown documents found. Check output/parsed/ directories.")
+        print("[error] No Markdown documents found. Check datasets/ directory.")
         sys.exit(1)
 
     # 2. Generate QA pairs
     print("\n=== Step 2: Generate QA pairs with Ragas ===")
-    questions = generate_testset(docs, n=sample)
+    out_file = DATA_DIR / "ragas_custom_questions.json"
+    questions = generate_testset(docs, n=sample, checkpoint_path=out_file)
 
-    # Attach course_id for reference
+    # Attach course_id for reference (re-save with course_id populated)
     for q in questions:
         q["course_id"] = cid or ""
 
-    save_json(DATA_DIR / "ragas_custom_questions.json", questions)
+    save_json(out_file, questions)
 
     print("\n✓ prepare_ragas_custom.py complete.")
     print(f"  Questions: {DATA_DIR / 'ragas_custom_questions.json'}")

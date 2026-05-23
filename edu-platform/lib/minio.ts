@@ -9,6 +9,7 @@ import {
   S3Client,
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { Buffer } from "node:buffer";
 import type { Readable } from "node:stream";
@@ -203,6 +204,44 @@ export async function objectExists(objectKey: string): Promise<boolean> {
     }
     throw e;
   }
+}
+
+/**
+ * Upload a Buffer directly (single PUT, max 5 GB but intended for small files).
+ * Use putObjectStream for large streaming uploads.
+ */
+export async function putObjectBuffer(params: {
+  objectKey: string;
+  body: Buffer;
+  contentType?: string;
+}): Promise<void> {
+  const c = getMinioConfig();
+  const client = getS3Client();
+  await client.send(
+    new PutObjectCommand({
+      Bucket: c.bucket,
+      Key: params.objectKey,
+      Body: params.body,
+      ContentLength: params.body.byteLength,
+      ContentType: params.contentType,
+    }),
+  );
+}
+
+/**
+ * Generate a presigned GET URL for an object in the default MinIO bucket.
+ * @param expiresIn TTL in seconds (default 900 = 15 min).
+ */
+export async function getMinioPresignedUrl(
+  objectKey: string,
+  expiresIn = 900,
+): Promise<string> {
+  const c = getMinioConfig();
+  return getSignedUrl(
+    getS3Client(),
+    new GetObjectCommand({ Bucket: c.bucket, Key: objectKey }),
+    { expiresIn },
+  );
 }
 
 export async function getObjectStream(params: {

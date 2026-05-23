@@ -16,6 +16,88 @@ license: Proprietary. LICENSE.txt has complete terms
 
 ---
 
+## Agent Usage
+
+When running inside the TS agent (not Claude Code), use the `exec_skill_script` tool instead of running shell commands directly. The tool proxies execution to the rag-service Python environment.
+
+**Prerequisites**: always call `view_skill(name="pptx")` first to read this file, then call the relevant sub-doc before executing scripts.
+
+### Read / analyze a PPTX
+
+```json
+exec_skill_script(
+  skill="pptx",
+  script="-m markitdown",
+  args=["{input_file}"],
+  input_file_url="<presigned URL of the .pptx>",
+  input_filename="presentation.pptx"
+)
+```
+
+→ Returns Markdown text of the presentation in `stdout`.
+
+### Generate thumbnail grid
+
+```json
+exec_skill_script(
+  skill="pptx",
+  script="thumbnail.py",
+  args=["{input_file}", "thumbnails"],
+  input_file_url="<presigned URL of the .pptx>",
+  input_filename="template.pptx",
+  output_filename="thumbnails.jpg"
+)
+```
+
+→ Returns `output_url` (presigned download URL for the thumbnail image, valid 15 min).
+
+### Unpack PPTX for editing
+
+```json
+exec_skill_script(
+  skill="pptx",
+  script="office/unpack.py",
+  args=["{input_file}", "unpacked/"],
+  input_file_url="<presigned URL of the .pptx>",
+  input_filename="template.pptx"
+)
+```
+
+> Note: `unpacked/` is a directory inside the rag-service temp dir; use subsequent `add_slide.py` / content editing calls within the same session workflow. For multi-step editing, use `delegate_task` to orchestrate a sub-agent.
+
+### Pack back to PPTX
+
+```json
+exec_skill_script(
+  skill="pptx",
+  script="office/pack.py",
+  args=["unpacked/", "{output_file}", "--original", "{input_file}"],
+  input_file_url="<presigned URL of the original .pptx>",
+  input_filename="template.pptx",
+  output_filename="output.pptx"
+)
+```
+
+→ Returns `output_url` (presigned download link for the finished file).
+
+### Create from scratch (pptxgenjs)
+
+Read `pptxgenjs.md` first (`view_skill(name="pptx", file="pptxgenjs.md")`), generate a `run.js` script, then:
+
+```json
+exec_skill_script(
+  skill="pptx",
+  script="run.js",
+  args=["{output_file}"],
+  output_filename="output.pptx"
+)
+```
+
+> `run.js` must be pre-written to `skills/pptx/scripts/run.js` by a prior `write_file` step (not yet implemented).  
+> Alternatively, embed the pptxgenjs logic in a one-shot `.js` file path.
+
+---
+
 ## Reading Content
 
 ```bash

@@ -47,7 +47,7 @@ function _formatHitsForLlm(hits: HitItem[]): string {
   return hits
     .map((h, i) => {
       const src = h.material_title ?? h.course_id ?? h.origin;
-      return `[${i + 1}] 来源：${src}\n${h.text.slice(0, 1500)}`;
+      return `[${i + 1}] 来源：${src}\n${h.text}`;
     })
     .join("\n\n---\n\n");
 }
@@ -58,6 +58,7 @@ function _hitsToB3Citations(hits: HitItem[]): ToolResult["citations"] {
     material_id: h.material_id ?? undefined,
     source_label: h.material_title ?? h.course_id ?? h.origin,
     chunk_text: h.text.slice(0, 300),
+    eval_text: h.text,
     image_urls: h.image_urls?.length ? h.image_urls : undefined,
   }));
 }
@@ -95,7 +96,7 @@ async function _decomposeQuery(
     `仅输出 JSON，格式：{"decompose": boolean, "sub_queries": ["子问题1", "子问题2"], "reason": "理由"}\n` +
     `sub_queries 上限 3 个；decompose=false 时 sub_queries 为空数组。`;
   try {
-    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx }, 0);
+    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx, temperature: ctx?.evalMode ? 0 : undefined }, 0);
     if (!result.success) return { decompose: false, sub_queries: [] };
     const jsonMatch = result.summary.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { decompose: false, sub_queries: [] };
@@ -121,7 +122,7 @@ async function _rewriteQuery(question: string, ctx: TurnContext): Promise<string
   const task =
     `将以下查询改写为更精确、专业、适合知识库语义检索的形式。仅输出 JSON：{"rewritten": "改写后的查询"}\n\n原始查询：${question}`;
   try {
-    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx }, 0);
+    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx, temperature: ctx?.evalMode ? 0 : undefined }, 0);
     if (!result.success) return null;
     const jsonMatch = result.summary.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
@@ -193,7 +194,7 @@ export const knowledgeQueryTool: Tool = {
     }
 
     const source = _normalizeSource(args.sources);
-    if (!source) {
+    if (!source && !ctx.evalMode) {
       return {
         content: JSON.stringify({
           error: "非法 sources（仅允许 personal、course、all、enrolled_courses 或 [course, personal]）",
@@ -201,27 +202,32 @@ export const knowledgeQueryTool: Tool = {
       };
     }
 
-    if (ctx.courseId && source === "enrolled_courses") {
-      return {
-        content: JSON.stringify({
-          error: "当前会话已绑定课程，禁止使用 sources=enrolled_courses",
-        }),
-      };
-    }
-    if (!ctx.courseId && (source === "course" || source === "all")) {
-      return {
-        content: JSON.stringify({
-          error: "当前会话未绑定课程，仅允许使用 personal 或 enrolled_courses",
-        }),
-      };
+    if (!ctx.evalMode) {
+      if (ctx.courseId && source === "enrolled_courses") {
+        return {
+          content: JSON.stringify({
+            error: "当前会话已绑定课程，禁止使用 sources=enrolled_courses",
+          }),
+        };
+      }
+      if (!ctx.courseId && (source === "course" || source === "all")) {
+        return {
+          content: JSON.stringify({
+            error: "当前会话未绑定课程，仅允许使用 personal 或 enrolled_courses",
+          }),
+        };
+      }
     }
 
+    // In eval mode, always restrict retrieval to course KB regardless of what the LLM requested.
+    const effectiveSource = ctx.evalMode ? "course" : source!;
+
     const top_k = typeof args.top_k === "number" ? Math.max(1, Math.min(20, args.top_k)) : 5;
-    const mode = typeof args.mode === "string" ? args.mode : "mix";
+    const mode = typeof args.mode === "string" ? args.mode : "hybrid";
 
     type QueryResp = { hits: HitItem[]; warnings: string[] };
     const baseBody = {
-      source,
+      source: effectiveSource,
       user_id: ctx.userId,
       accessible_course_ids: ctx.accessibleCourseIds,
       course_id: ctx.courseId ?? null,
@@ -322,39 +328,4 @@ export const knowledgeQueryTool: Tool = {
   },
 }; */
 
-// ---- build_mindmap ---------------------------------------------------------
 
-export const buildMindmapTool: Tool = {
-  name: "build_mindmap",
-  description:
-    "根据指定的 Markdown 文件或目录生成思维导图 HTML 文件。" +
-    "当用户要求生成思维导图、知识结构图、知识树时调用此工具。",
-  parameters: {
-    type: "object",
-    properties: {
-      source: {
-        type: "string",
-        description: "Markdown 文件路径或包含 Markdown 文件的目录路径",
-      },
-      refine: {
-        type: "boolean",
-        description: "是否使用 LLM 精炼（输出更丰富，但速度较慢）",
-      },
-    },
-    required: ["source"],
-  },
-  async execute(args: Record<string, unknown>): Promise<string> {
-    const ragUrl = process.env.RAG_SERVICE_URL ?? "http://localhost:8001";
-    const ragKey = process.env.RAG_SERVICE_API_KEY ?? "";
-
-    const source = typeof args.source === "string" ? args.source : "";
-    if (!source) return JSON.stringify({ error: "缺少必要参数：source" });
-
-    type MindmapResp = { markdown: string; html: string };
-    const resp = await ragPost<MindmapResp>(`${ragUrl}/rag/build-mindmap`, ragKey, {
-      source,
-      refine: args.refine ?? false,
-    });
-    return JSON.stringify({ markdown: resp.markdown.slice(0, 5000), html_length: resp.html.length });
-  },
-};

@@ -61,7 +61,31 @@ const ASSIGNMENT_STATUS_CLASSES: Record<string, string> = {
   PUBLISHED: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
   ARCHIVED: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400",
 };
-function AssignmentStatusBadge({ status }: { status: string }) {
+const SUBMISSION_STATUS_META: Record<string, { label: string; cls: string }> = {
+  SUBMITTED: { label: "待批改", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" },
+  GRADING:   { label: "待批改", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" },
+  GRADED:    { label: "待批改", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" },
+  RETURNED:  { label: "已批改", cls: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300" },
+};
+function AssignmentStatusBadge({ status, mySubmissionStatus }: { status: string; mySubmissionStatus?: string | null }) {
+  // Student view: show submission progress instead of assignment lifecycle status
+  if (mySubmissionStatus !== undefined) {
+    const meta = mySubmissionStatus ? SUBMISSION_STATUS_META[mySubmissionStatus] : null;
+    if (meta) {
+      return (
+        <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold", meta.cls)}>
+          {mySubmissionStatus === "RETURNED" ? <CheckCircle2 size={10} /> : <Clock size={10} />}
+          {meta.label}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+        <Clock size={10} />
+        未提交
+      </span>
+    );
+  }
   return (
     <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold", ASSIGNMENT_STATUS_CLASSES[status] ?? "")}>
       {status === "GENERATING" && <Loader2 size={10} className="animate-spin" />}
@@ -735,7 +759,7 @@ export default function CourseDetailPage() {
                         {a.deadline && ` · 截止 ${new Date(a.deadline).toLocaleDateString("zh-CN")}`}
                       </p>
                     </div>
-                    <AssignmentStatusBadge status={a.status} />
+                    <AssignmentStatusBadge status={a.status} mySubmissionStatus={isStudent ? (a.mySubmissionStatus ?? null) : undefined} />
                   </Link>
                 ))}
               </div>
@@ -839,16 +863,38 @@ export default function CourseDetailPage() {
                   )}
                 </section>
 
-                {/* Error-prone knowledge points (placeholder for future) */}
+                {/* Error-prone knowledge points */}
                 <section className="space-y-3">
                   <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
-                    <AlertCircle size={15} className="text-muted-foreground" />
+                    <AlertCircle size={15} className="text-destructive" />
                     易错知识点
                   </h2>
-                  <div className="flex items-center gap-3 rounded-xl border border-dashed border-border bg-muted/20 px-4 py-5">
-                    <AlertCircle size={16} className="text-muted-foreground/40 shrink-0" />
-                    <p className="text-sm text-muted-foreground">待接入作业提交功能后自动统计易错知识点</p>
-                  </div>
+                  {!analyticsData || analyticsData.error_prone_knowledge_points.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">暂无作业批改数据</p>
+                  ) : (
+                    <div className="rounded-xl border border-border bg-card divide-y divide-border overflow-hidden">
+                      {analyticsData.error_prone_knowledge_points.map((item, idx) => (
+                        <div key={idx} className="flex items-center gap-3 px-4 py-3">
+                          <span className="text-xs text-muted-foreground w-4 shrink-0 text-right">{idx + 1}</span>
+                          <div className="flex-1 min-w-0 space-y-1.5">
+                            <p className="text-sm font-medium text-foreground truncate">{item.knowledge_point}</p>
+                            <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-destructive/60 rounded-full"
+                                style={{ width: `${Math.round(item.error_rate * 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="shrink-0 text-right">
+                            <span className="text-xs font-semibold text-destructive">
+                              {Math.round(item.error_rate * 100)}%
+                            </span>
+                            <p className="text-[10px] text-muted-foreground">{item.error_count} 次错误</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </section>
               </>
             )}

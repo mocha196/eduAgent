@@ -11,7 +11,6 @@ import {
   getCourseIfMember,
   assertTeacherOfCourse,
   assertCourseOwner,
-  isCourseCollaborator,
 } from "@/lib/course-access";
 import {
   allocateUniqueCourseShareCode,
@@ -46,10 +45,7 @@ async function courseToSummaryDto(
     c.status === CourseStatus.PUBLISHED &&
     c.shareCode
   ) {
-    if (
-      c.teacherId === viewerId ||
-      (await isCourseCollaborator(c.id, viewerId))
-    ) {
+    if (c.teacherId === viewerId) {
       base.share_code = c.shareCode;
     }
   }
@@ -100,10 +96,7 @@ export async function listMyCourses(
     const rows = await prisma.course.findMany({
       where: {
         isDeleted: false,
-        OR: [
-          { teacherId: userId },
-          { collaborators: { some: { teacherId: userId } } },
-        ],
+        teacherId: userId,
       },
       orderBy: { updatedAt: "desc" },
     });
@@ -247,17 +240,13 @@ export async function joinCourse(
   };
 }
 
-export type JoinByShareCodeResult =
-  | { course_id: string; enrolled_at: string; role: "student" }
-  | { course_id: string; joined_at: string; role: "collaborator" };
-
 export async function joinCourseByShareCode(
   userId: string,
   role: UserRole,
   rawCode: string,
-): Promise<JoinByShareCodeResult> {
-  if (role === UserRole.ADMIN) {
-    throw new ApiError(403, "FORBIDDEN", "Admins cannot join courses this way");
+): Promise<{ course_id: string; enrolled_at: string; role: "student" }> {
+  if (role !== UserRole.STUDENT) {
+    throw new ApiError(403, "FORBIDDEN", "Only students can join with a share code");
   }
   const code = normalizeCourseShareCode(rawCode);
   if (!code) {
@@ -277,47 +266,21 @@ export async function joinCourseByShareCode(
       "Invalid share code or course is not open for joining",
     );
   }
-
-  if (role === UserRole.STUDENT) {
-    const existing = await prisma.courseEnrollment.findUnique({
-      where: {
-        courseId_studentId: { courseId: course.id, studentId: userId },
-      },
-    });
-    if (existing) {
-      throw new ApiError(409, "CONFLICT", "Already enrolled in this course");
-    }
-    const en = await prisma.courseEnrollment.create({
-      data: { courseId: course.id, studentId: userId },
-    });
-    return {
-      course_id: course.id,
-      enrolled_at: en.enrolledAt.toISOString(),
-      role: "student",
-    };
-  }
-
-  if (role !== UserRole.TEACHER) {
-    throw new ApiError(403, "FORBIDDEN", "Only students or teachers can join with a share code");
-  }
-  if (course.teacherId === userId) {
-    throw new ApiError(409, "CONFLICT", "Already the course owner");
-  }
-  const existingCollab = await prisma.courseCollaborator.findUnique({
+  const existing = await prisma.courseEnrollment.findUnique({
     where: {
-      courseId_teacherId: { courseId: course.id, teacherId: userId },
+      courseId_studentId: { courseId: course.id, studentId: userId },
     },
   });
-  if (existingCollab) {
-    throw new ApiError(409, "CONFLICT", "Already a collaborator on this course");
+  if (existing) {
+    throw new ApiError(409, "CONFLICT", "Already enrolled in this course");
   }
-  const row = await prisma.courseCollaborator.create({
-    data: { courseId: course.id, teacherId: userId },
+  const en = await prisma.courseEnrollment.create({
+    data: { courseId: course.id, studentId: userId },
   });
   return {
     course_id: course.id,
-    joined_at: row.createdAt.toISOString(),
-    role: "collaborator",
+    enrolled_at: en.enrolledAt.toISOString(),
+    role: "student",
   };
 }
 

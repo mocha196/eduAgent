@@ -169,6 +169,7 @@ export default function CourseLessonsPage() {
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [courseId]);
 
   useEffect(() => { void load(); }, [load]);

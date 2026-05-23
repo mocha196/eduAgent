@@ -148,29 +148,86 @@ def build_data_uri_from_image_path(path: Path | str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+# ---------------------------------------------------------------------------
+# Debug logging helper — enabled by LLM_DEBUG=true in .env
+# ---------------------------------------------------------------------------
+
+def _dbg(
+    role: str,
+    prompt: str,
+    kwargs: dict,
+    *,
+    result: str | None = None,
+    exc: BaseException | None = None,
+) -> None:
+    """Log LLM call details when ``LLM_DEBUG=true``.
+
+    Truncates prompt/result to ``LLM_DEBUG_MAX_CHARS`` (0 = unlimited).
+    Never logs API keys.
+    """
+    if not settings.llm_debug:
+        return
+    n = settings.llm_debug_max_chars
+    def _clip(s: str) -> str:
+        s = (s or "").replace("\n", "↵")
+        return s[:n] + "…" if n and len(s) > n else s
+
+    # Strip sensitive keys from kwargs before logging
+    safe_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
+
+    if exc is not None:
+        logger.debug(f"[LLM/{role}] ERROR  prompt={_clip(prompt)!r}  kwargs={safe_kwargs}  exc={exc!r}")
+    elif result is not None:
+        logger.debug(f"[LLM/{role}] OK     prompt={_clip(prompt)!r}  kwargs={safe_kwargs}  result={_clip(result)!r}")
+    else:
+        logger.debug(f"[LLM/{role}] CALL   prompt={_clip(prompt)!r}  kwargs={safe_kwargs}")
+
+
 async def llm_model_func(
     prompt: str,
     system_prompt: str | None = None,
     history_messages: list = [],
     **kwargs,
 ) -> str:
-    """Text LLM backed by qwen-plus (OpenAI-compatible, async)."""
+    """KG extraction LLM used by LightRAG for entity/relation extraction (async).
+
+    Uses LLM_KG_* settings when configured, otherwise falls back to the default
+    LLM_MODEL / LLM_API_KEY / LLM_BASE_URL.  ``LLM_EXTRA_BODY`` (e.g. DashScope
+    thinking-mode flag) is only applied when no dedicated KG model is set.
+    """
     kwargs.setdefault("max_tokens", settings.llm_max_tokens)
     kwargs.setdefault("temperature", settings.llm_temperature)
-    if settings.llm_extra_body:
+    model = settings.effective_kg_model
+    # Apply LLM_EXTRA_BODY only when falling back to the default model (no KG override).
+    # Dedicated KG providers (e.g. SiliconFlow) may not support provider-specific keys.
+    if not settings.llm_kg_model.strip() and settings.llm_extra_body:
         # Per-call explicit extra_body has higher priority than global defaults.
         kwargs.setdefault("extra_body", settings.llm_extra_body)
-    token = _llm_role.set(f"chat/{settings.llm_model}")
+    # Disable thinking mode for DeepSeek KG models (same as chat model handling).
+    kg_base_url = settings.effective_kg_base_url or ""
+    if "deepseek.com" in kg_base_url or model.lower().startswith("deepseek"):
+        kwargs.setdefault("extra_body", {"thinking": {"type": "disabled"}})
+    # Disable thinking mode for Qwen3 models on SiliconFlow (or any provider).
+    # SiliconFlow TPM=50,000; thinking tokens waste the quota with no extraction benefit.
+    if "siliconflow.cn" in kg_base_url or "qwen3" in model.lower():
+        kwargs.setdefault("extra_body", {"enable_thinking": False})
+    token = _llm_role.set(f"kg/{model}")
+    _dbg(f"kg/{model}", prompt, kwargs)
     try:
-        return await openai_complete_if_cache(
-            settings.llm_model,
+        result = await openai_complete_if_cache(
+            model,
             prompt,
             system_prompt=system_prompt,
             history_messages=history_messages,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
+            api_key=settings.effective_kg_api_key,
+            base_url=settings.effective_kg_base_url,
             **kwargs,
         )
+        _dbg(f"kg/{model}", prompt, kwargs, result=result)
+        return result
+    except Exception as exc:
+        _dbg(f"kg/{model}", prompt, kwargs, exc=exc)
+        raise
     finally:
         _llm_role.reset(token)
 
@@ -196,8 +253,9 @@ async def llm_chat_model_func(
     if "deepseek.com" in base_url or model.lower().startswith("deepseek"):
         kwargs.setdefault("extra_body", {"thinking": {"type": "disabled"}})
     token = _llm_role.set(f"chat/{model}")
+    _dbg(f"chat/{model}", prompt, kwargs)
     try:
-        return await openai_complete_if_cache(
+        result = await openai_complete_if_cache(
             model,
             prompt,
             system_prompt=system_prompt,
@@ -206,6 +264,11 @@ async def llm_chat_model_func(
             base_url=settings.effective_chat_base_url,
             **kwargs,
         )
+        _dbg(f"chat/{model}", prompt, kwargs, result=result)
+        return result
+    except Exception as exc:
+        _dbg(f"chat/{model}", prompt, kwargs, exc=exc)
+        raise
     finally:
         _llm_role.reset(token)
 
@@ -234,16 +297,23 @@ async def vision_model_func(
             api_key=settings.effective_vision_api_key,
             base_url=settings.effective_vision_base_url,
         )
-        token = _llm_role.set(f"vision/{settings.vision_model}")
+        _role = f"vision/{settings.vision_model}"
+        token = _llm_role.set(_role)
+        _dbg(_role, prompt, _safe)
         try:
             resp = await client.chat.completions.create(
                 model=settings.vision_model,
                 messages=messages,
                 **_safe,
             )
+            content = resp.choices[0].message.content or ""
+            _dbg(_role, prompt, _safe, result=content)
+            return content
+        except Exception as exc:
+            _dbg(_role, prompt, _safe, exc=exc)
+            raise
         finally:
             _llm_role.reset(token)
-        return resp.choices[0].message.content or ""
 
     if image_data is not None:
         mime = image_mime or "image/jpeg"
@@ -260,16 +330,23 @@ async def vision_model_func(
             api_key=settings.effective_vision_api_key,
             base_url=settings.effective_vision_base_url,
         )
-        token = _llm_role.set(f"vision/{settings.vision_model}")
+        _role = f"vision/{settings.vision_model}"
+        token = _llm_role.set(_role)
+        _dbg(_role, prompt, _safe)
         try:
             resp = await client.chat.completions.create(
                 model=settings.vision_model,
                 messages=msg_list,
                 **_safe,
             )
+            content = resp.choices[0].message.content or ""
+            _dbg(_role, prompt, _safe, result=content)
+            return content
+        except Exception as exc:
+            _dbg(_role, prompt, _safe, exc=exc)
+            raise
         finally:
             _llm_role.reset(token)
-        return resp.choices[0].message.content or ""
 
     return await llm_model_func(prompt, system_prompt, history_messages, **kwargs)
 

@@ -5,26 +5,6 @@
 
 import type { Tool } from "../types";
 
-// ---- SSRF guard (block private IP ranges) ----------------------------------
-
-function _isPrivateUrl(rawUrl: string): boolean {
-  try {
-    const u = new URL(rawUrl);
-    const hostname = u.hostname;
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return true;
-    const parts = hostname.split(".").map(Number);
-    if (parts.length === 4) {
-      const [a, b] = parts;
-      if (a === 10) return true;
-      if (a === 172 && b >= 16 && b <= 31) return true;
-      if (a === 192 && b === 168) return true;
-    }
-    return false;
-  } catch {
-    return true; // malformed URL → block
-  }
-}
-
 // ---- Tavily helper ---------------------------------------------------------
 
 async function _tavilySearch(

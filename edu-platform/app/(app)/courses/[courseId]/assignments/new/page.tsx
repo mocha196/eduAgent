@@ -106,6 +106,24 @@ export default function NewAssignmentPage() {
   const searchParams = useSearchParams();
   const retryFrom = searchParams.get("retryFrom");
 
+  const [userRole, setUserRole] = useState<"STUDENT" | "TEACHER" | "ADMIN" | null>(null);
+  const [roleLoading, setRoleLoading] = useState(true);
+
+  useEffect(() => {
+    void fetch("/api/v1/user", { credentials: "include" })
+      .then((r) => r.json() as Promise<{ role?: string }>)
+      .then((d) => setUserRole((d.role ?? null) as "STUDENT" | "TEACHER" | "ADMIN" | null))
+      .catch(() => setUserRole("STUDENT"))
+      .finally(() => setRoleLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (roleLoading || !courseId) return;
+    if (userRole === "STUDENT") {
+      router.replace(`/courses/${courseId}?tab=assignments`);
+    }
+  }, [courseId, roleLoading, router, userRole]);
+
   // ── Shared state ──────────────────────────────────────────────────────────
   const [mode, setMode] = useState<Mode>("nlp");
   const [title, setTitle] = useState("");
@@ -288,6 +306,20 @@ export default function NewAssignmentPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (roleLoading) {
+    return (
+      <div className="max-w-4xl mx-auto w-full px-6 py-8 space-y-3">
+        <div className="h-8 rounded-lg bg-muted animate-pulse" />
+        <div className="h-28 rounded-lg bg-muted animate-pulse" />
+        <div className="h-28 rounded-lg bg-muted animate-pulse" />
+      </div>
+    );
+  }
+
+  if (userRole === "STUDENT") {
+    return null;
   }
 
   return (

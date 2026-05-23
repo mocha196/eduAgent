@@ -84,6 +84,7 @@ def _lightrag_insertion_tuning_kwargs() -> dict[str, int]:
         "chunk_token_size": settings.chunk_token_size,
         "chunk_overlap_token_size": settings.chunk_overlap_token_size,
         "default_embedding_timeout": settings.embedding_timeout_seconds,
+        "entity_extract_max_gleaning": settings.entity_extract_max_gleaning,
     }
 
 
@@ -121,6 +122,13 @@ def build_optional_rerank_model_func() -> Any | None:
             api_key=api_key,
             base_url=base_url
             or "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+        )
+    if binding in ("siliconflow", "silicon"):
+        return partial(
+            jina_rerank,
+            model=model or "BAAI/bge-reranker-v2-m3",
+            api_key=api_key,
+            base_url=base_url or "https://api.siliconflow.cn/v1/rerank",
         )
     logger.warning("Unknown RERANK_BINDING={!r}; ignoring rerank_model_func", binding)
     return None
@@ -687,6 +695,8 @@ def _fix_image_paths(content_list: list, json_dir: Path) -> list:
 
     MinerU stores image paths relative to the directory containing the
     content_list JSON file.  insert_content_list requires absolute paths.
+    HTTP/HTTPS URLs are left unchanged here; call _download_cdn_images_async
+    before passing to raganything to resolve them to local files.
     """
     fixed = []
     for item in content_list:
@@ -694,11 +704,59 @@ def _fix_image_paths(content_list: list, json_dir: Path) -> list:
             continue
         item = dict(item)  # shallow copy; do not mutate original
         rel = item.get("img_path")
-        if rel:
+        if rel and not str(rel).startswith(("http://", "https://")):
             abs_path = (json_dir / rel).resolve()
             item["img_path"] = str(abs_path)
         fixed.append(item)
     return fixed
+
+
+async def _download_cdn_images_async(
+    content_list: list,
+    cache_dir: Path,
+) -> list:
+    """Download any CDN (http/https) img_path URLs to *cache_dir* and replace
+    them with local absolute paths so raganything can open them normally.
+
+    Items without a CDN img_path are returned unchanged.  On download failure
+    the item's img_path is cleared so raganything falls back to caption-only.
+    """
+    import hashlib as _hashlib
+    import httpx
+
+    cdn_items = [
+        (i, item)
+        for i, item in enumerate(content_list)
+        if item.get("img_path") and str(item["img_path"]).startswith(("http://", "https://"))
+    ]
+    if not cdn_items:
+        return content_list
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    result = list(content_list)
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for idx, item in cdn_items:
+            url = str(item["img_path"])
+            sha = _hashlib.sha1(url.encode()).hexdigest()[:16]
+            url_suffix = ("."+url.rsplit(".", 1)[-1].split("?")[0]) if "." in url else ".jpg"
+            local_path = cache_dir / f"cdn_{sha}{url_suffix.lower()}"
+            if not local_path.exists():
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                    local_path.write_bytes(resp.content)
+                except Exception as exc:
+                    logger.warning("CDN image download failed {}: {}", url, exc)
+                    new_item = dict(item)
+                    new_item["img_path"] = ""
+                    result[idx] = new_item
+                    continue
+            new_item = dict(item)
+            new_item["img_path"] = str(local_path)
+            result[idx] = new_item
+
+    return result
 
 
 def _filter_text_only_content(content_list: list) -> tuple[list, dict[str, int]]:
@@ -1042,6 +1100,15 @@ def _material_id_from_course_file_path(file_path: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+_IMAGE_CHUNK_PREFIXES = (
+    "Image Content",
+    "Image Path",
+    "Code Content",
+    "![",
+    "<image",
+)
+
+
 def _hits_from_aquery_chunks(chunks: list[Any], *, origin: str) -> list[dict[str, Any]]:
     hits: list[dict[str, Any]] = []
     for i, ch in enumerate(chunks):
@@ -1049,6 +1116,10 @@ def _hits_from_aquery_chunks(chunks: list[Any], *, origin: str) -> list[dict[str
             continue
         cid = str(ch.get("chunk_id") or "")
         text = str(ch.get("content") or "")
+        # Pre-filter: skip image/media metadata chunks so they don't consume top_k slots
+        text_stripped = text.strip()
+        if not text_stripped or text_stripped.startswith(_IMAGE_CHUNK_PREFIXES):
+            continue
         fp = ch.get("file_path")
         mid = _material_id_from_course_file_path(str(fp) if fp is not None else "")
         hits.append(
@@ -1109,6 +1180,97 @@ async def personal_aquery_data(
         enable_rerank=settings.query_enable_rerank and rerank_installed,
     )
     return await lr.aquery_data(question.strip(), param)
+
+
+def _get_lightrag_psycopg_dsn() -> str:
+    """Return a psycopg-compatible DSN for the LightRAG PostgreSQL database.
+
+    Strips the ``schema`` query-param which psycopg does not understand.
+    """
+    import os as _os
+    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+
+    dsn = _os.environ.get("LIGHTRAG_PG_DSN", "").strip() or _os.environ.get("DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError("LIGHTRAG_PG_DSN or DATABASE_URL is required for BM25 retrieval")
+    p = urlparse(dsn)
+    qs = [(k, v) for k, v in parse_qsl(p.query) if k != "schema"]
+    return urlunparse(p._replace(query=urlencode(qs)))
+
+
+_bm25_index_ensured: set[str] = set()
+
+
+def _ensure_bm25_index(conn: Any) -> None:
+    """Create a functional GIN tsvector index on LIGHTRAG_VDB_CHUNKS if it does not exist."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lr_vdb_chunks_fts "
+            "ON LIGHTRAG_VDB_CHUNKS USING GIN (to_tsvector('english', content))"
+        )
+    conn.commit()
+
+
+def course_bm25_hits_sync(
+    course_id: str,
+    query: str,
+    *,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Full-text (BM25-approximate) retrieval against LIGHTRAG_VDB_CHUNKS.
+
+    Uses PostgreSQL ``plainto_tsquery`` + ``ts_rank_cd`` as a BM25 approximation.
+    Results are meant to be merged with vector hits via RRF before returning to
+    the caller.
+    """
+    import psycopg
+
+    workspace = course_id_to_workspace(course_id)
+    dsn = _get_lightrag_psycopg_dsn()
+
+    sql = """
+        SELECT
+            id,
+            content,
+            file_path,
+            ts_rank_cd(
+                to_tsvector('english', content),
+                plainto_tsquery('english', %(q)s)
+            ) AS bm25_score
+        FROM LIGHTRAG_VDB_CHUNKS
+        WHERE workspace = %(ws)s
+          AND content <> ''
+          AND content !~ '^\\s*Image Content'
+          AND content !~ '^\\s*Image Path'
+          AND content !~ '^\\s*Code Content'
+          AND content !~ '^\\s*!\\['
+          AND content !~ '^\\s*<image'
+          AND to_tsvector('english', content) @@ plainto_tsquery('english', %(q)s)
+        ORDER BY bm25_score DESC
+        LIMIT %(lim)s
+    """
+
+    hits: list[dict[str, Any]] = []
+    with psycopg.connect(dsn) as conn:
+        if workspace not in _bm25_index_ensured:
+            _ensure_bm25_index(conn)
+            _bm25_index_ensured.add(workspace)
+
+        with conn.cursor() as cur:
+            cur.execute(sql, {"q": query, "ws": workspace, "lim": top_k * 3})
+            for row in cur.fetchall():
+                chunk_id, content, file_path, score = row
+                mid = _material_id_from_course_file_path(str(file_path) if file_path else "")
+                hits.append(
+                    {
+                        "chunk_id": str(chunk_id),
+                        "text": str(content) if content else "",
+                        "metadata": {"material_id": mid, "file_path": file_path},
+                        "relevance_score": float(score),
+                        "origin": "course",
+                    }
+                )
+    return hits
 
 
 def course_retrieval_hits_sync(
@@ -1220,7 +1382,12 @@ async def _ingest_parsed_async_core(
     for json_path in json_files:
         sub_stem = json_path.stem.replace("_content_list", "")
         display_stem = Path(original_filename).stem if original_filename else sub_stem
-        rag_file_path = _make_material_file_path(material_id, display_stem)
+        # For multi-part materials, use sub_stem (contains the part number) so each
+        # part gets a unique rag_file_path and therefore a unique LightRAG doc_id.
+        # Single-file materials keep the human-readable display_stem.
+        rag_file_path = _make_material_file_path(
+            material_id, sub_stem if len(json_files) > 1 else display_stem
+        )
         raw: list = json.loads(json_path.read_text(encoding="utf-8"))
         content_list = _fix_image_paths(raw, json_path.parent)
         if text_only:
@@ -1305,7 +1472,9 @@ async def _ingest_parsed_async_core(
         return len(all_mm_chunks)
 
     total = 0
+    img_cache_dir = settings.output_dir / stem / "_cdn_img_cache"
     for content_list, rag_file_path in prepared:
+        content_list = await _download_cdn_images_async(content_list, img_cache_dir)
         await rag.insert_content_list(
             content_list,
             file_path=rag_file_path,

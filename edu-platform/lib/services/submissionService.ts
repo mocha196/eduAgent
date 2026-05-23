@@ -2,10 +2,13 @@ import { after } from "next/server";
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/http/api-error";
 import { assertTeacherOfCourse, assertUuid, getCourseIfMember } from "@/lib/course-access";
-import { getLLMClient, getRoleConfig } from "@/lib/agent/llm-registry";
+import { getLLMClient, getRoleConfig, getMemoryModel } from "@/lib/agent/llm-registry";
+import { MemoryExtractor, type SubmissionMemoryContext } from "@/lib/agent/memory/memory-extractor";
+import { memoryStore } from "@/lib/agent/memory/memory-store";
 import { runWithUserLlm } from "@/lib/agent/user-llm-store";
 import { createStandaloneTrace, flushLangfuse, recordGeneration } from "@/lib/agent/tracing/langfuse-tracer";
 import { AssignmentStatus, SubmissionStatus, UserRole } from "@prisma/client";
+import { createNotification, createBulkNotifications } from "@/lib/services/notificationService";
 import type {
   GradingResultDto,
   OverrideGradesBody,
@@ -220,6 +223,29 @@ export async function submitAssignment(
     }
   });
 
+  // Notify the course teacher that a student has submitted
+  void (async () => {
+    try {
+      const course = await prisma.course.findFirst({
+        where: { id: courseId },
+        select: { teacherId: true, name: true },
+      });
+      if (course) {
+        const studentName =
+          submission.student?.realName ?? submission.student?.username ?? "学生";
+        void createNotification({
+          userId: course.teacherId,
+          type: "SUBMISSION_RECEIVED",
+          title: "学生提交了作业",
+          body: `${studentName} 提交了《${assignment.title}》的作业。`,
+          metadata: { courseId, assignmentId, submissionId: submission.id, courseName: course.name },
+        });
+      }
+    } catch {
+      // Best-effort
+    }
+  })();
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return toDetail(submission as any);
 }
@@ -279,6 +305,43 @@ export async function triggerGrading(submissionId: string): Promise<void> {
       gradedAt: new Date(),
     },
   });
+
+  // Asynchronously extract memory facts from grading result (non-blocking)
+  void (async () => {
+    try {
+      const memoryCtx: SubmissionMemoryContext = {
+        assignmentTitle: submission.assignment.title,
+        totalScore,
+        maxScore,
+        questions: questions.map((q) => {
+          const grade = questionGrades.find((g) => g.questionId === q.id);
+          const studentAnswer = answers.find((a) => a.questionId === q.id)?.answer ?? "";
+          return {
+            stem: q.question,
+            type: q.type,
+            entities: q.entities ?? [],
+            studentAnswer,
+            score: grade?.score ?? 0,
+            maxScore: q.score,
+            isCorrect: grade?.isCorrect ?? null,
+            feedback: grade?.feedback ?? "",
+            correctAnswer: q.answer,
+          };
+        }),
+      };
+      const extractor = new MemoryExtractor(getLLMClient("memory"), getMemoryModel());
+      const facts = await extractor.extractFactsFromSubmission(
+        submission.studentId,
+        submissionId,
+        memoryCtx,
+      );
+      for (const fact of facts) {
+        await memoryStore.addFact(fact);
+      }
+    } catch (err) {
+      console.error("[triggerGrading] memory extraction failed:", err);
+    }
+  })();
 }
 
 /** Student retrieves their own submission (answers visible; grading only after RETURNED). */
@@ -453,6 +516,28 @@ export async function returnSubmission(
     data: { status: SubmissionStatus.RETURNED, returnedAt: new Date() },
     include: { student: { select: { realName: true, username: true } } },
   });
+
+  // Notify the student that their grade has been returned
+  void (async () => {
+    try {
+      const assignment = await prisma.assignment.findFirst({
+        where: { id: assignmentId },
+        select: { title: true, course: { select: { name: true } } },
+      });
+      if (assignment) {
+        void createNotification({
+          userId: row.studentId,
+          type: "GRADE_RETURNED",
+          title: "成绩已返回",
+          body: `《${assignment.title}》的批改结果已发布，请查看。`,
+          metadata: { courseId, assignmentId, submissionId, courseName: assignment.course.name },
+        });
+      }
+    } catch {
+      // Best-effort
+    }
+  })();
+
   return toDetail(saved);
 }
 
@@ -466,9 +551,38 @@ export async function batchReturnSubmissions(
   assertUuid(assignmentId, "assignment_id");
   await assertTeacherOfCourse(teacherId, role, courseId);
 
+  // Collect student IDs before updating (updateMany doesn't return rows)
+  const toReturn = await prisma.assignmentSubmission.findMany({
+    where: { assignmentId, status: SubmissionStatus.GRADED },
+    select: { studentId: true },
+  });
+
   const result = await prisma.assignmentSubmission.updateMany({
     where: { assignmentId, status: SubmissionStatus.GRADED },
     data: { status: SubmissionStatus.RETURNED, returnedAt: new Date() },
   });
+
+  // Notify each student asynchronously
+  void (async () => {
+    try {
+      const assignment = await prisma.assignment.findFirst({
+        where: { id: assignmentId },
+        select: { title: true, course: { select: { name: true } } },
+      });
+      if (assignment && toReturn.length > 0) {
+        const studentIds = toReturn.map((s) => s.studentId);
+        void createBulkNotifications({
+          userIds: studentIds,
+          type: "GRADE_RETURNED",
+          title: "成绩已返回",
+          body: `《${assignment.title}》的批改结果已发布，请查看。`,
+          metadata: { courseId, assignmentId, courseName: assignment.course.name },
+        });
+      }
+    } catch {
+      // Best-effort
+    }
+  })();
+
   return { returnedCount: result.count };
 }

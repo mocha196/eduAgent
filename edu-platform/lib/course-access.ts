@@ -16,18 +16,6 @@ export function assertUuid(id: string, label = "id"): void {
   }
 }
 
-export async function isCourseCollaborator(
-  courseId: string,
-  teacherId: string,
-): Promise<boolean> {
-  const row = await prisma.courseCollaborator.findUnique({
-    where: {
-      courseId_teacherId: { courseId, teacherId },
-    },
-  });
-  return Boolean(row);
-}
-
 /** Course owner (primary teacher) only. */
 export async function assertCourseOwner(
   userId: string,
@@ -50,32 +38,16 @@ export async function assertCourseOwner(
   return course;
 }
 
-/** Course owner or collaborator (write-capable teacher). */
+/** Course owner (write-capable teacher). */
 export async function assertTeacherOfCourse(
   userId: string,
   role: UserRole,
   courseId: string,
 ): Promise<Course> {
-  assertUuid(courseId, "course_id");
-  if (role !== UserRole.TEACHER) {
-    throw new ApiError(403, "FORBIDDEN", "Teacher role required");
-  }
-  const course = await prisma.course.findFirst({
-    where: { id: courseId, isDeleted: false },
-  });
-  if (!course) {
-    throw new ApiError(404, "NOT_FOUND", "Course not found");
-  }
-  if (course.teacherId === userId) {
-    return course;
-  }
-  if (await isCourseCollaborator(courseId, userId)) {
-    return course;
-  }
-  throw new ApiError(403, "FORBIDDEN", "Not a teacher for this course");
+  return assertCourseOwner(userId, role, courseId);
 }
 
-/** Teacher (owner or collaborator), or enrolled student (active course, not deleted). */
+/** Teacher (owner), or enrolled student (active course, not deleted). */
 export async function getCourseIfMember(
   userId: string,
   role: UserRole,
@@ -90,7 +62,6 @@ export async function getCourseIfMember(
   }
   if (role === UserRole.TEACHER) {
     if (course.teacherId === userId) return course;
-    if (await isCourseCollaborator(courseId, userId)) return course;
   }
   if (role === UserRole.STUDENT) {
     const en = await prisma.courseEnrollment.findUnique({
@@ -103,7 +74,7 @@ export async function getCourseIfMember(
   throw new ApiError(403, "FORBIDDEN", "No access to this course");
 }
 
-/** For internal Agent checks: owner, collaborator, or enrolled student. */
+/** For internal Agent checks: owner or enrolled student. */
 export async function hasCourseRagAccess(
   userId: string,
   courseId: string,
@@ -115,7 +86,6 @@ export async function hasCourseRagAccess(
   });
   if (!course) return false;
   if (course.teacherId === userId) return true;
-  if (await isCourseCollaborator(courseId, userId)) return true;
   const en = await prisma.courseEnrollment.findUnique({
     where: {
       courseId_studentId: { courseId, studentId: userId },

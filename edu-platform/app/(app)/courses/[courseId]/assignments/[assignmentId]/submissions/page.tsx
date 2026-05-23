@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { ChevronLeft, FileQuestion } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -20,6 +20,10 @@ interface Stats {
 
 export default function SubmissionsDashboardPage() {
   const { courseId, assignmentId } = useParams<{ courseId: string; assignmentId: string }>();
+  const router = useRouter();
+
+  const [userRole, setUserRole] = useState<"STUDENT" | "TEACHER" | "ADMIN" | null>(null);
+  const [roleLoading, setRoleLoading] = useState(true);
 
   const [submissions, setSubmissions] = useState<SubmissionSummaryDto[]>([]);
   const [stats, setStats] = useState<Stats>({ total: 0, graded: 0, returned: 0, avgScore: null });
@@ -29,6 +33,21 @@ export default function SubmissionsDashboardPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<SubmissionDetailDto | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  useEffect(() => {
+    void fetch("/api/v1/user", { credentials: "include" })
+      .then((r) => r.json() as Promise<{ role?: string }>)
+      .then((d) => setUserRole((d.role ?? null) as "STUDENT" | "TEACHER" | "ADMIN" | null))
+      .catch(() => setUserRole("STUDENT"))
+      .finally(() => setRoleLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (roleLoading || !courseId || !assignmentId) return;
+    if (userRole === "STUDENT") {
+      router.replace(`/courses/${courseId}/assignments/${assignmentId}`);
+    }
+  }, [assignmentId, courseId, roleLoading, router, userRole]);
 
   const loadList = useCallback(async () => {
     const [listRes, aRes] = await Promise.all([
@@ -54,8 +73,9 @@ export default function SubmissionsDashboardPage() {
   }, [courseId, assignmentId]);
 
   useEffect(() => {
+    if (!userRole || userRole === "STUDENT") return;
     void loadList();
-  }, [loadList]);
+  }, [loadList, userRole]);
 
   async function loadDetail(submissionId: string) {
     setDetailLoading(true);
@@ -113,6 +133,18 @@ export default function SubmissionsDashboardPage() {
   }
 
   const questions = (assignment?.questions ?? []) as unknown as QuestionItem[];
+
+  if (roleLoading || !userRole) {
+    return (
+      <div className="mx-auto w-full max-w-7xl px-4 py-6 space-y-3">
+        {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 rounded-lg" />)}
+      </div>
+    );
+  }
+
+  if (userRole === "STUDENT") {
+    return null;
+  }
 
   return (
     <div className="mx-auto w-full max-w-7xl px-4 py-6 space-y-6">

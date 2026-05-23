@@ -61,6 +61,14 @@ export default function CoursesPage() {
         fetch("/api/v1/user", { credentials: "include" }),
       ]);
       if (cancelled) return;
+      if (userRes.ok) {
+        const u = (await userRes.json()) as UserInfo;
+        setRole(u.role ?? null);
+        if (u.role === "ADMIN") {
+          router.replace("/admin/courses");
+          return;
+        }
+      }
       if (!res.ok) {
         setErr(`加载失败 (${res.status})`);
         setCourses([]);
@@ -68,13 +76,9 @@ export default function CoursesPage() {
       }
       const data = (await res.json()) as { courses?: CourseRow[] };
       setCourses(data.courses ?? []);
-      if (userRes.ok) {
-        const u = (await userRes.json()) as UserInfo;
-        setRole(u.role ?? null);
-      }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [router]);
 
   async function joinByShareCode() {
     setJoinErr(null);
@@ -113,7 +117,7 @@ export default function CoursesPage() {
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
               {role === "TEACHER"
-                ? "管理你创建或协作的课程"
+                ? "管理你创建的课程"
                 : "浏览并加入你的课程"}
             </p>
           </div>
@@ -127,7 +131,7 @@ export default function CoursesPage() {
           )}
         </div>
 
-        {(role === "STUDENT" || role === "TEACHER") && (
+        {role === "STUDENT" && (
           <div className="rounded-xl border border-border bg-card p-4 flex flex-col sm:flex-row sm:items-end gap-3">
             <div className="flex-1 space-y-1.5 min-w-0">
               <label htmlFor="course-share-code" className="text-sm font-medium text-foreground">

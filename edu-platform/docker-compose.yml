@@ -64,6 +64,7 @@ services:
       - edu_platform_minio:/data
 
   rag-service:
+    image: ghcr.io/${GITHUB_OWNER}/edu-rag-service:latest
     build:
       context: ..
       dockerfile: edu-platform/Dockerfile.rag-service
@@ -83,42 +84,160 @@ services:
       EMBEDDING_MODE: ${EMBEDDING_MODE:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-}
+      # Internal notification webhook (Next.js → rag-service callback)
+      NEXTJS_INTERNAL_URL: ${NEXTJS_INTERNAL_URL:-http://nextjs:3000}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
 
-  cron-worker:
-    image: node:22-alpine
-    container_name: edu-platform-cron-worker
+  # ---------------------------------------------------------------------------
+  # Next.js application
+  # ---------------------------------------------------------------------------
+
+  nextjs:
+    image: ghcr.io/${GITHUB_OWNER}/edu-platform-nextjs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edu-platform-nextjs
     restart: unless-stopped
-    working_dir: /app/edu-platform
-    command: ["sh", "-c", "npm ci && npx tsx scripts/cron-worker.ts"]
-    volumes:
-      - ..:/app
-      - edu_platform_cron_node_modules:/app/edu-platform/node_modules
+    ports:
+      - "3000:3000"
     environment:
-      # Keep cron-worker container-safe defaults (service names on compose network).
-      # This avoids .env localhost values accidentally breaking in-container connections.
-      DATABASE_URL: ${CRON_WORKER_DATABASE_URL:-postgresql://edu:edu@postgres:5432/edu_platform?schema=public}
-      REDIS_URL: ${CRON_WORKER_REDIS_URL:-redis://redis:6379}
-      CRON_STREAM_NAME: ${CRON_STREAM_NAME:-edu:cron:stream}
-      CRON_STREAM_GROUP: ${CRON_STREAM_GROUP:-edu-cron-workers}
+      # Container-safe defaults (use compose service names instead of localhost)
+      DATABASE_URL: ${NEXTJS_DATABASE_URL:-postgresql://edu:edu@postgres:5432/edu_platform?schema=public}
+      REDIS_URL: ${NEXTJS_REDIS_URL:-redis://redis:6379}
+      RAG_SERVICE_URL: ${NEXTJS_RAG_SERVICE_URL:-http://rag-service:8001}
+      MINIO_ENDPOINT: ${NEXTJS_MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minio_minio_minio}
+      MINIO_BUCKET: ${MINIO_BUCKET:-edu-materials}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      # Required secrets — must be set in .env
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY}
+      # LLM providers (fall through to defaults if unset)
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_MODEL: ${LLM_MODEL:-gpt-4o}
-      RAG_SERVICE_URL: ${CRON_WORKER_RAG_SERVICE_URL:-http://rag-service:8001}
-      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_CHAT_API_KEY: ${LLM_CHAT_API_KEY:-}
+      LLM_CHAT_BASE_URL: ${LLM_CHAT_BASE_URL:-}
+      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-}
+      LLM_COMPLETION_API_KEY: ${LLM_COMPLETION_API_KEY:-}
+      LLM_COMPLETION_BASE_URL: ${LLM_COMPLETION_BASE_URL:-}
+      LLM_COMPLETION_MODEL: ${LLM_COMPLETION_MODEL:-}
+      LLM_VISION_API_KEY: ${LLM_VISION_API_KEY:-}
+      LLM_VISION_BASE_URL: ${LLM_VISION_BASE_URL:-}
+      LLM_VISION_MODEL: ${LLM_VISION_MODEL:-}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      rag-service:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # Review Scheduler — triggers daily memory review sessions per user timezone
+  # ---------------------------------------------------------------------------
+
+  review-scheduler:
+    image: ghcr.io/${GITHUB_OWNER}/edu-platform-nextjs:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edu-platform-review-scheduler
+    restart: unless-stopped
+    command: ["npx", "tsx", "scripts/review-scheduler.ts"]
+    environment:
+      NEXTJS_INTERNAL_URL: ${NEXTJS_INTERNAL_URL:-http://nextjs:3000}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      MEMORY_REVIEW_QUESTION_COUNT: ${MEMORY_REVIEW_QUESTION_COUNT:-5}
+    depends_on:
+      - nextjs
+
+  # Cloudflare Named Tunnel — exposes nextjs:3000 via a fixed public URL.
+  # Set CLOUDFLARE_TUNNEL_TOKEN in .env (obtain from Cloudflare Zero Trust dashboard).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: edu-platform-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - nextjs
+
+  # Watchtower — polls GHCR every 5 min and auto-restarts containers when new images are pushed.
+  # For public GHCR repos no auth is needed.
+  # Set GITHUB_OWNER in .env to match your GitHub username.
+  watchtower:
+    image: containrrr/watchtower
+    container_name: edu-platform-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_CLEANUP: "true"
+    command: edu-platform-nextjs edu-platform-rag-service
+
+  # ---------------------------------------------------------------------------
+  # Logging stack: Vector → Loki → Grafana
+  # ---------------------------------------------------------------------------
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: edu-platform-loki
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - edu_platform_loki_data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  vector:
+    image: timberio/vector:0.40.0-alpine
+    container_name: edu-platform-vector
+    restart: unless-stopped
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: edu-platform-grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3300:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-edu_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - edu_platform_grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      loki:
+        condition: service_healthy
 
 volumes:
   edu_platform_pgdata:
   edu_platform_redisdata:
   edu_platform_minio:
   edu_platform_neo4jdata:
-  edu_platform_cron_node_modules:
+  edu_platform_loki_data:
+  edu_platform_grafana_data:

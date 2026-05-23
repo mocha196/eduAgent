@@ -56,6 +56,31 @@ enum GradeSource {
   TEACHER
 }
 
+enum NotificationType {
+  MATERIAL_UPLOADED
+  MATERIAL_READY
+  ASSIGNMENT_GENERATED
+  ASSIGNMENT_FAILED
+  ASSIGNMENT_PUBLISHED
+  SUBMISSION_RECEIVED
+  GRADE_RETURNED
+  MEMORY_REVIEW_READY
+}
+
+enum MemoryReviewSessionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  DISMISSED
+  EXPIRED
+}
+
+enum MemoryReviewQuestionType {
+  SINGLE_CHOICE
+  FILL_BLANK
+  TRUE_FALSE
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   username     String   @unique @map("username")
@@ -74,7 +99,6 @@ model User {
 
   refreshTokens       RefreshToken[]
   teacherCourses      Course[]             @relation("TeacherCourses")
-  courseCollaborations CourseCollaborator[] @relation("CourseCollaborators")
   courseEnrollments   CourseEnrollment[]   @relation("StudentEnrollments")
   qaLogs                    QaLog[]                    @relation("QaLogStudent")
   courseChatSessions        CourseChatSession[]
@@ -85,9 +109,11 @@ model User {
   learningProfile           UserLearningProfile?
   memoryFacts               UserMemoryFact[]
   memoryConcepts            UserMemoryConcept[]
-  cronJobs                  CronJob[]
   personalMaterials         PersonalMaterial[]
   personalKbSessions        PersonalKbSession[]
+  notifications             Notification[]
+  memoryReviewPreference    UserMemoryReviewPreference?
+  memoryReviewSessions      MemoryReviewSession[]
 
   @@map("users")
 }
@@ -105,7 +131,6 @@ model Course {
   isDeleted     Boolean      @default(false) @map("is_deleted")
 
   teacher         User                   @relation("TeacherCourses", fields: [teacherId], references: [id], onDelete: Cascade)
-  collaborators   CourseCollaborator[]
   enrollments     CourseEnrollment[]
   lessons     Lesson[]
   materials   Material[]
@@ -115,20 +140,6 @@ model Course {
 
   @@index([teacherId])
   @@map("courses")
-}
-
-model CourseCollaborator {
-  id        String   @id @default(uuid()) @db.Uuid
-  courseId  String   @map("course_id") @db.Uuid
-  teacherId String   @map("teacher_id") @db.Uuid
-  createdAt DateTime @default(now()) @map("created_at")
-
-  course  Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  teacher User   @relation("CourseCollaborators", fields: [teacherId], references: [id], onDelete: Cascade)
-
-  @@unique([courseId, teacherId])
-  @@index([teacherId])
-  @@map("course_collaborators")
 }
 
 model Lesson {
@@ -175,8 +186,9 @@ model Material {
   status             MaterialStatus @default(UPLOADED) @map("status")
   statusMessage      String?        @map("status_message")
   indexedChunkCount  Int            @default(0) @map("indexed_chunk_count")
-  transcriptText     String?        @map("transcript_text") @db.Text
+  transcriptText    String?        @map("transcript_text") @db.Text
   videoSummary       String?        @map("video_summary") @db.Text
+  documentSummary    String?        @map("document_summary") @db.Text
   createdAt          DateTime       @default(now()) @map("created_at")
   updatedAt          DateTime       @updatedAt @map("updated_at")
   isDeleted          Boolean        @default(false) @map("is_deleted")
@@ -343,6 +355,9 @@ model Assignment {
   /// ReviewerAgent output: {overall_score, passed, threshold, question_reviews, failed_ids, summary}
   qualityReport Json?            @map("quality_report")
 
+  /// Current generation pipeline phase: param_extract | entity_retrieval | blueprint_gen | question_gen | reviewing | improving
+  generationPhase String?        @map("generation_phase")
+
   deadline      DateTime?        @map("deadline")
   publishedAt   DateTime?        @map("published_at")
   createdAt     DateTime         @default(now()) @map("created_at")
@@ -432,46 +447,6 @@ model UserMemoryConcept {
   @@map("user_memory_concepts")
 }
 
-/// Scheduled agent tasks (cron / interval). Triggered via Redis Stream.
-model CronJob {
-  id          String    @id @db.VarChar(64)
-  userId      String?   @map("user_id") @db.Uuid
-  prompt      String
-  /// 5-field cron expression (e.g. "0 8 * * *") or "every Xm/Xh/Xd"
-  schedule    String
-  /// "active" | "paused"
-  status      String    @default("active")
-  lastRunAt   DateTime? @map("last_run_at")
-  nextRunAt   DateTime? @map("next_run_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
-
-  user User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
-  runs CronJobRun[]
-
-  @@index([status, nextRunAt])
-  @@index([userId])
-  @@map("cron_jobs")
-}
-
-/// Individual execution records for a CronJob.
-model CronJobRun {
-  id           String    @id @default(uuid()) @db.Uuid
-  jobId        String    @map("job_id") @db.VarChar(64)
-  /// "running" | "success" | "failed"
-  status       String    @default("running")
-  output       String?
-  toolCalls    Json?     @default("[]") @map("tool_calls")
-  startedAt    DateTime  @default(now()) @map("started_at")
-  finishedAt   DateTime? @map("finished_at")
-  errorMessage String?   @map("error_message")
-
-  job CronJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-
-  @@index([jobId, startedAt(sort: Desc)])
-  @@map("cron_job_runs")
-}
-
 // ---------------------------------------------------------------------------
 // Personal Knowledge Base
 // ---------------------------------------------------------------------------
@@ -489,6 +464,7 @@ model PersonalMaterial {
   indexedChunkCount Int                      @default(0) @map("indexed_chunk_count")
   transcriptText    String?                  @map("transcript_text") @db.Text
   videoSummary      String?                  @map("video_summary") @db.Text
+  documentSummary   String?                  @map("document_summary") @db.Text
   createdAt         DateTime                 @default(now()) @map("created_at")
   updatedAt         DateTime                 @updatedAt @map("updated_at")
   isDeleted         Boolean                  @default(false) @map("is_deleted")
@@ -511,4 +487,108 @@ model PersonalKbSession {
 
   @@index([userId])
   @@map("personal_kb_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Daily Memory Review
+// ---------------------------------------------------------------------------
+
+/// Per-user preference for daily memory review scheduling.
+model UserMemoryReviewPreference {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  enabled   Boolean  @default(true)
+  /// Local time in "HH:mm" format, e.g. "09:00"
+  localTime String   @default("09:00") @map("local_time") @db.VarChar(5)
+  /// IANA timezone string, e.g. "Asia/Shanghai"
+  timezone  String   @default("Asia/Shanghai") @db.VarChar(64)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_memory_review_preferences")
+}
+
+/// One review batch per user per local calendar day.
+model MemoryReviewSession {
+  id            String                    @id @default(uuid()) @db.Uuid
+  userId        String                    @map("user_id") @db.Uuid
+  /// User's local date string "YYYY-MM-DD" — uniqueness prevents duplicate daily sessions.
+  scheduledDate String                    @map("scheduled_date") @db.VarChar(10)
+  status        MemoryReviewSessionStatus @default(PENDING)
+  questionCount Int                       @default(0) @map("question_count")
+  expiresAt     DateTime                  @map("expires_at")
+  createdAt     DateTime                  @default(now()) @map("created_at")
+  updatedAt     DateTime                  @updatedAt @map("updated_at")
+
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questions MemoryReviewQuestion[]
+
+  @@unique([userId, scheduledDate])
+  @@index([userId, status])
+  @@map("memory_review_sessions")
+}
+
+/// A single question within a daily review session.
+model MemoryReviewQuestion {
+  id          String                   @id @default(uuid()) @db.Uuid
+  sessionId   String                   @map("session_id") @db.Uuid
+  /// Optional FK to course the question is derived from
+  courseId    String?                  @map("course_id") @db.Uuid
+  /// Optional FK to the UserMemoryConcept being tested
+  conceptId   String?                  @map("concept_id") @db.Uuid
+  conceptName String                   @map("concept_name")
+  type        MemoryReviewQuestionType
+  stem        String                   @db.Text
+  /// JSON array of option strings (required for SINGLE_CHOICE and TRUE_FALSE)
+  optionsJson Json?                    @map("options_json")
+  /// Correct answer string
+  answer      String
+  explanation String                   @db.Text
+  userAnswer  String?                  @map("user_answer")
+  isCorrect   Boolean?                 @map("is_correct")
+  answeredAt  DateTime?                @map("answered_at")
+  createdAt   DateTime                 @default(now()) @map("created_at")
+
+  session MemoryReviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("memory_review_questions")
+}
+
+// ---------------------------------------------------------------------------
+// Agent Style Management
+// ---------------------------------------------------------------------------
+
+/// Admin-managed teaching style definitions injected into the Agent's system prompt.
+/// Replaces the file-based EDUCATOR/scaffolding/socratic skills for purely prompt-based styles.
+model AgentStyle {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @unique @db.VarChar(50)
+  description  String   @default("") @db.VarChar(200)
+  body         String   @db.Text
+  alwaysInject Boolean  @default(false) @map("always_inject")
+  enabled      Boolean  @default(true)
+  /// Built-in styles (seeded from md files) can be edited/disabled but not deleted.
+  isBuiltIn    Boolean  @default(false) @map("is_built_in")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("agent_styles")
+}
+
+/// Persistent in-app notifications delivered via Redis Pub/Sub + SSE.
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  type      NotificationType @map("type")
+  title     String           @map("title")
+  body      String           @map("body")
+  metadata  Json?            @map("metadata")
+  isRead    Boolean          @default(false) @map("is_read")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt(sort: Desc)])
+  @@map("notifications")
 }

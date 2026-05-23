@@ -660,6 +660,116 @@ flowchart TD
 
 ---
 
+#### 模块 4a：Agent 工具调用流程
+
+```mermaid
+flowchart TD
+    IN(["用户消息 + 上下文\n系统提示 · 压缩历史 · 记忆注入"])
+
+    IN --> LLM["LLM 推理（规划）\n流式调用 OpenAI API\n注入完整工具 Schema 列表"]
+
+    LLM --> FORK{响应类型}
+
+    FORK -- "纯文本回复\nassistantText" --> TXT["SSE type:text\n逐字流式推送至前端"]
+    TXT --> DONE_OK["SSE type:done\n{tokens, exec_time_ms}"]
+    DONE_OK --> USER(["返回用户"])
+
+    FORK -- "包含工具调用\npendingTcs ≥ 1" --> REG["工具注册表解析\ntoolRegistry.get(name)"]
+
+    REG --> EXISTS{工具已注册?}
+    EXISTS -- 否 --> NOTFOUND["构造错误结果\nerror: 'Tool not found in registry'"]
+    NOTFOUND --> FMTMSG
+
+    EXISTS -- 是 --> GATE
+
+    subgraph GATE["执行前安全校验"]
+        direction TB
+        G1["① SSRF 过滤\n_isPrivateUrl() — search.ts\n拦截 localhost · 10.x · 172.16-31.x · 192.168.x\n恶意 URL → 直接返回错误，禁止出站"]
+        G2["② 用户确认（写操作）\nrequiresApproval === true\n写入 Redis 审批记录 · TTL 90s\nSSE type:require_approval 推送前端\n轮询 500ms/次 · 超时 60s 默认拒绝"]
+        G3["③ 递归黑名单检查\nRECURSION_BLACKLIST = 'delegate_task'\ndepth > 0 → 立即返回失败\n防止子 Agent 无限嵌套委派"]
+        G1 --> G2 --> G3
+    end
+
+    G3 --> EXEC["工具执行\ntool.execute(args, ctx)"]
+
+    EXEC --> EMIT["SSE type:tool_result\n{name, success, duration_ms, output}"]
+    EXEC --> CITE["SSE type:citation\n（RAG 知识库引用块）"]
+
+    EMIT --> FMTMSG["格式化为 tool 消息\n{role: 'tool', tool_call_id, content}\n追加至 loopMsgs"]
+    CITE --> FMTMSG
+
+    FMTMSG --> ITERCHK{"iter < maxIterations\n（默认上限 8）?"}
+
+    ITERCHK -- "是 → 返回 LLM 继续推理" --> LLM
+    ITERCHK -- "否 → 已达轮次上限" --> MAXERR["SSE type:done\n{error: MAX_ITERATIONS_REACHED}"]
+    MAXERR --> USER
+```
+
+**说明：** 工具调用采用 ReAct 闭环模式，每轮迭代中 LLM 以流式方式输出推理文本或工具调用指令；多个工具调用在同一轮次内并行收集（`pendingTcs`），但逐一串行执行，每次执行结果以 `tool` 角色消息追加到上下文后再触发下一轮 LLM 推理。安全校验分三层：SSRF 过滤在网络工具内部拦截私网地址；写操作审批门控通过 Redis 暂存审批状态并以 SSE 事件通知前端等待用户交互；递归黑名单在 SubAgent 入口拒绝 `delegate_task` 的嵌套调用，防止无限递归委派。
+
+---
+
+#### 模块 4b：Agent 三层记忆机制流程
+
+```mermaid
+flowchart TD
+    %% ── 短期记忆 ──────────────────────────────────────────────────
+    SESS(["会话进行中\nReAct Loop"])
+
+    subgraph ST["① 短期记忆 · ContextManager"]
+        SW["滑动窗口\ncompress()\n保留最近 6 轮 + System 消息"]
+        SUM["LLM 摘要压缩\ncompressWithSummary()\n旧轮次 → ~200 字摘要消息对"]
+        SW -->|"估算 token 超出 32K 预算"| SUM
+    end
+
+    SESS --> ST
+    ST --> SP1[/"System Prompt 注入（短期层）\n消息历史持久化至 Redis · TTL 24h"/]
+    SP1 --> SESS
+
+    %% ── 会话结束 → 中期异步提取 ───────────────────────────────────
+    SESS -->|"会话 token ≥ 100K\nfire-and-forget 异步触发"| EXT
+
+    subgraph MID["② 中期记忆 · MemoryExtractor · extractFactsFromSession()"]
+        EXT["LLM 事实提取\n对话转录 → JSON Facts 数组"]
+        F1["concept_mastery"]
+        F2["concept_confusion"]
+        F3["preference"]
+        F4["difficulty"]
+        F5["question"]
+        F6["achievement"]
+        EXT --> F1 & F2 & F3 & F4 & F5 & F6
+    end
+
+    F1 & F2 & F3 & F4 & F5 & F6 --> DB1[("PostgreSQL\nUserMemoryFact\nappend-only")]
+
+    %% ── 长期记忆聚合 ──────────────────────────────────────────────
+    DB1 --> CON
+
+    subgraph LONG["③ 长期记忆 · MemoryConsolidator · consolidateSession()"]
+        CON["概念掌握度聚合\n遍历全量 Facts 构建 conceptMap"]
+        UPD["掌握度 delta 更新\nm ← m + Δ\nΔ = Σ(0.1 · conf_mastery) − Σ(0.05 · conf_confusion)\nm ∈ [0, 1]，新概念初值 0.5"]
+        PROF["更新 LearnerProfile\ntop_concepts（TOP 10）· total_facts"]
+        CON --> UPD --> PROF
+    end
+
+    UPD --> DB2[("PostgreSQL\nUserMemoryConcept\nupsert by userId + name")]
+    PROF --> DB3[("PostgreSQL\nUserLearningProfile")]
+
+    %% ── 下一次对话前：检索注入 ────────────────────────────────────
+    DB2 --> RET
+
+    subgraph NEXT["下一次对话前 · MemoryCoordinator + MemoryRetriever"]
+        RET["TF-IDF 关键词检索\ngetRelevantConcepts(userId, hint, top-6)"]
+    end
+
+    RET --> SP5[/"System Prompt 注入（第五层）\n## 已知掌握情况（近期记忆）\n检索相关概念掌握度\n—— 概念 A（掌握度 0.82）\n—— 概念 B（掌握度 0.45）…\n（最多注入 1200 字符）"/]
+    SP5 -->|"下一次对话开始"| SESS
+```
+
+**说明：** 三层记忆以异步、非阻塞方式运行，不影响响应延迟。短期记忆通过滑动窗口与 LLM 摘要压缩维持上下文连贯性；中期事实提取仅在会话 token 达到 100K 阈值时触发，由 LLM 从对话转录中提取六类结构化学习事实；长期掌握度聚合采用 delta 累加策略（正向增益系数 0.1，混淆惩罚系数 0.05），逐轮单调逼近真实掌握水平。下次对话前，`MemoryRetriever` 以 TF-IDF 关键词匹配从 `UserMemoryConcept` 中检索最相关的 6 个概念，经 `MemoryCoordinator` 格式化后注入 `PromptBuilder` 第五层。
+
+---
+
 #### 模块 5：AI 作业生成模块处理流程
 
 ```mermaid

@@ -15,7 +15,8 @@ export type RagQueueTask = {
     | "personal_parse_and_index"
     | "personal_delete_material"
     | "personal_convert_preview"
-    | "personal_transcribe_and_index";
+    | "personal_transcribe_and_index"
+    | "personal_index_only";
   created_at: string;
   text_only?: boolean;
   /** When true (default), skip LLM entity/relation extraction at ingest (chunks + embeddings only). */

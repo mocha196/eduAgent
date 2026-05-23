@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, Callable, Awaitable
 
 import httpx
 from pypdf import PdfReader, PdfWriter
@@ -40,6 +40,27 @@ _MAX_BATCH_FILES = 200
 
 class MineruCloudError(RuntimeError):
     """Raised when the MinerU Cloud API returns an error or times out."""
+
+
+_RETRYABLE_EXCEPTIONS = (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 2.0  # seconds
+
+
+async def _with_retry(label: str, coro_fn: Callable[[], Awaitable[Any]]) -> Any:
+    """Run *coro_fn* up to _MAX_RETRIES times, backing off on transient network errors."""
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return await coro_fn()
+        except _RETRYABLE_EXCEPTIONS as exc:
+            if attempt == _MAX_RETRIES:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning(
+                "MinerU Cloud: {} 网络错误 (第 {}/{} 次)，{:.0f}s 后重试: {}",
+                label, attempt, _MAX_RETRIES, delay, exc,
+            )
+            await asyncio.sleep(delay)
 
 
 @dataclass(frozen=True)
@@ -189,12 +210,16 @@ async def _upload_file(
 ) -> None:
     """Step 2: PUT raw file bytes to pre-signed OSS URL (no extra headers)."""
     data = file_path.read_bytes()
-    # Strip Content-Type — OSS pre-signed URL must not have it
-    resp = await client.put(upload_url, content=data, headers={})
-    if resp.status_code not in (200, 201):
-        raise MineruCloudError(
-            f"文件上传失败: HTTP {resp.status_code} {resp.text[:200]}"
-        )
+
+    async def _do_upload() -> None:
+        # Strip Content-Type — OSS pre-signed URL must not have it
+        resp = await client.put(upload_url, content=data, headers={})
+        if resp.status_code not in (200, 201):
+            raise MineruCloudError(
+                f"文件上传失败: HTTP {resp.status_code} {resp.text[:200]}"
+            )
+
+    await _with_retry(f"上传 {file_path.name}", _do_upload)
 
 
 async def _upload_files(
@@ -274,12 +299,15 @@ async def _download_and_extract(
     out_dir: Path,
 ) -> None:
     """Step 4-5: download ZIP and extract to out_dir."""
-    resp = await client.get(zip_url, follow_redirects=True)
-    resp.raise_for_status()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        zf.extractall(out_dir)
-    logger.debug("MinerU Cloud ZIP extracted to {}", out_dir)
+    async def _do_download() -> None:
+        resp = await client.get(zip_url, follow_redirects=True)
+        resp.raise_for_status()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            zf.extractall(out_dir)
+        logger.debug("MinerU Cloud ZIP extracted to {}", out_dir)
+
+    await _with_retry("下载解析结果 ZIP", _do_download)
 
 
 # ---------------------------------------------------------------------------

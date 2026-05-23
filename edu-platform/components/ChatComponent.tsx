@@ -5,7 +5,7 @@ import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
+
 import {
   Send,
   Bot,
@@ -20,6 +20,9 @@ import {
   RefreshCw,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -28,6 +31,8 @@ import {
   type ChatMessage,
   type MessageTimelineItem,
   type UseChatStreamConfig,
+  type ExecutionPayload,
+  type Citation,
 } from "@/lib/hooks/useChatStream";
 import { toolEmoji } from "@/lib/chatToolEmoji";
 import { EDU_CHAT_ADD_ATTACHMENT_EVENT } from "@/lib/captureElementToPngFile";
@@ -36,6 +41,7 @@ import {
   markdownRemarkPlugins,
   normalizeMathDelimiters,
 } from "@/lib/markdownMath";
+import { markdownComponents } from "@/lib/markdownComponents";
 
 type UserMe = {
   qa_collection_enabled?: boolean;
@@ -49,6 +55,8 @@ export type ChatComponentProps =
       hydrateSessionId?: string | null;
       /** ID of the material the user is currently previewing in the dockview. */
       activeMaterialId?: string | null;
+      /** Capture the current page as a File for implicit page context on send. */
+      captureCurrentPage?: () => Promise<File | null>;
       emptyHint?: string;
     }
   | {
@@ -84,6 +92,7 @@ function buildStreamConfig(props: ChatComponentProps): UseChatStreamConfig {
     courseId: props.courseId,
     hydrateSessionId: props.hydrateSessionId ?? null,
     activeMaterialId: props.activeMaterialId ?? null,
+    captureCurrentPage: props.captureCurrentPage,
   };
 }
 
@@ -110,6 +119,84 @@ function useCopyFeedback() {
     timerRef.current = setTimeout(() => setCopiedId(null), 2000);
   };
   return { copiedId, trigger };
+}
+
+const CITATION_INLINE_MAX = 3;
+
+/** Horizontally-scrollable citation button bar with a pinned expand button. */
+function CitationScrollBar({
+  citations,
+  onCitationClick,
+  onExpandAll,
+}: {
+  citations: Citation[];
+  onCitationClick: (c: Citation, ci: number) => void;
+  onExpandAll: () => void;
+}) {
+  const scrollEl = useRef<HTMLDivElement>(null);
+  const drag = useRef({ active: false, startX: 0, scrollLeft: 0, moved: false });
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const el = scrollEl.current;
+    if (!el) return;
+    drag.current = { active: true, startX: e.clientX, scrollLeft: el.scrollLeft, moved: false };
+    el.setPointerCapture(e.pointerId);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag.current.active) return;
+    const el = scrollEl.current;
+    if (!el) return;
+    const dx = e.clientX - drag.current.startX;
+    if (Math.abs(dx) > 4) drag.current.moved = true;
+    el.scrollLeft = drag.current.scrollLeft - dx;
+  };
+
+  const handlePointerUp = () => { drag.current.active = false; };
+
+  const handleClickCapture = (e: React.MouseEvent) => {
+    if (drag.current.moved) {
+      e.stopPropagation();
+      drag.current.moved = false;
+    }
+  };
+
+  return (
+    <div className="mt-1.5 flex items-center gap-1 min-w-0 w-full">
+      <div
+        ref={scrollEl}
+        className="flex flex-nowrap items-center gap-1.5 overflow-x-auto flex-1 min-w-0 [&::-webkit-scrollbar]:hidden cursor-grab active:cursor-grabbing select-none"
+        style={{ scrollbarWidth: "none" }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+        onClickCapture={handleClickCapture}
+      >
+        {citations.map((c, ci) => (
+          <button
+            key={ci}
+            type="button"
+            onClick={() => onCitationClick(c, ci)}
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-primary/25 bg-primary/8 px-2.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15 transition-colors"
+          >
+            <span className="font-mono font-bold opacity-60">[{ci + 1}]</span>
+            <span className="max-w-[4em] truncate">{c.source_label ?? `引用 ${ci + 1}`}</span>
+          </button>
+        ))}
+      </div>
+      {citations.length > CITATION_INLINE_MAX && (
+        <button
+          type="button"
+          onClick={onExpandAll}
+          className="shrink-0 inline-flex items-center rounded-full border border-muted-foreground/30 bg-muted/40 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted/70 transition-colors"
+        >
+          ···
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function ChatComponent(props: ChatComponentProps) {
@@ -196,12 +283,7 @@ export default function ChatComponent(props: ChatComponentProps) {
 
   useEffect(() => {
     if (scrollRef.current) {
-      const scrollElement = scrollRef.current.querySelector(
-        "[data-radix-scroll-area-viewport]",
-      );
-      if (scrollElement) {
-        scrollElement.scrollTop = scrollElement.scrollHeight;
-      }
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [msgs, streaming, toolActivity, streamTimeline]);
 
@@ -243,7 +325,7 @@ export default function ChatComponent(props: ChatComponentProps) {
 
   return (
     <div className="flex flex-col h-full bg-background relative">
-      <ScrollArea ref={scrollRef} className="flex-1 w-full px-4 md:px-8 pt-6 pb-32">
+      <div ref={scrollRef} className="flex-1 min-h-0 w-full px-4 md:px-8 pt-6 pb-4 overflow-y-auto overflow-x-hidden">
         <div className="w-full max-w-none space-y-8 flex flex-col">
           {msgs.length === 0 && !streaming && !busy && (
             <div className="h-[50vh] flex flex-col items-center justify-center text-muted-foreground opacity-50">
@@ -291,7 +373,20 @@ export default function ChatComponent(props: ChatComponentProps) {
 
                   {msg.role === "assistant" && (msg.toolActivity?.length ?? 0) > 0 && !msg.timeline?.length && (
                     <ul className="m-0 mb-1.5 flex list-none flex-col gap-1.5 p-0 text-sm text-muted-foreground">
-                      {msg.toolActivity!.map((row, ri) => (
+                      {msg.toolActivity!.map((row, ri) => {
+                        if (row.execution) {
+                          const fakeItem: Extract<MessageTimelineItem, { kind: "tool" }> & { execution: ExecutionPayload } = {
+                            kind: "tool",
+                            clientKey: row.clientKey ?? `${msg.clientId}-tc-${ri}`,
+                            name: row.name,
+                            status: "done",
+                            success: row.success,
+                            durationMs: row.durationMs,
+                            execution: row.execution,
+                          };
+                          return <ExecutionTerminalBlock key={fakeItem.clientKey} item={fakeItem} />;
+                        }
+                        return (
                         <li
                           key={row.clientKey ?? `${msg.clientId}-tc-${ri}`}
                           className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-1.5"
@@ -313,7 +408,8 @@ export default function ChatComponent(props: ChatComponentProps) {
                             )}
                           </span>
                         </li>
-                      ))}
+                        );
+                      })}
                     </ul>
                   )}
 
@@ -356,7 +452,7 @@ export default function ChatComponent(props: ChatComponentProps) {
                         className={cn(
                           "px-4 py-3",
                           msg.role === "assistant" &&
-                            "prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0",
+                            "prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0 [&_.katex-display]:overflow-x-auto",
                         )}
                       >
                         {msg.role === "user" ? (
@@ -367,6 +463,7 @@ export default function ChatComponent(props: ChatComponentProps) {
                           <ReactMarkdown
                             remarkPlugins={markdownRemarkPlugins}
                             rehypePlugins={markdownRehypePlugins}
+                            components={markdownComponents}
                           >
                             {normalizeMathDelimiters(msg.text)}
                           </ReactMarkdown>
@@ -461,32 +558,35 @@ export default function ChatComponent(props: ChatComponentProps) {
                   </div>
                   {/* Historical citations (loaded from DB) — after reply text */}
                   {msg.role === "assistant" && (msg.citations?.length ?? 0) > 0 && (
-                    <div className="mt-1.5 flex flex-col gap-2">
-                      <div className="flex flex-wrap gap-1.5">
-                        {msg.citations!.map((c, ci) => (
-                          <button
-                            key={ci}
-                            type="button"
-                            onClick={() => {
-                              window.dispatchEvent(
-                                new CustomEvent("edu:open-material-preview", {
-                                  detail: {
-                                    materialId: c.material_id,
-                                    chunkId: c.chunk_id,
-                                    sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
-                                    chunkText: c.chunk_text,
-                                  },
-                                }),
-                              );
-                            }}
-                            className="inline-flex items-center gap-1 rounded-full border border-primary/25 bg-primary/8 px-2.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15 transition-colors"
-                          >
-                            <span className="font-mono font-bold opacity-60">[{ci + 1}]</span>
-                            <span className="max-w-[140px] truncate">{c.source_label ?? `引用 ${ci + 1}`}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                    <CitationScrollBar
+                      citations={msg.citations!}
+                      onCitationClick={(c, ci) => {
+                        window.dispatchEvent(
+                          new CustomEvent("edu:open-material-preview", {
+                            detail: {
+                              materialId: c.material_id,
+                              chunkId: c.chunk_id,
+                              sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                              chunkText: c.chunk_text,
+                              image_urls: c.image_urls,
+                            },
+                          }),
+                        );
+                      }}
+                      onExpandAll={() => {
+                        window.dispatchEvent(
+                          new CustomEvent("edu:open-citation-list", {
+                            detail: msg.citations!.map((c, ci) => ({
+                              materialId: c.material_id,
+                              chunkId: c.chunk_id,
+                              sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                              chunkText: c.chunk_text,
+                              image_urls: c.image_urls,
+                            })),
+                          }),
+                        );
+                      }}
+                    />
                   )}
                 </div>
               </div>
@@ -499,7 +599,7 @@ export default function ChatComponent(props: ChatComponentProps) {
               {streamTimeline.length > 0 ? (
                 <div className="flex w-full justify-start">
                   <div className="flex min-w-0 w-full flex-col items-start">
-                    <div className="rounded-none px-4 py-3 bg-transparent text-foreground prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0">
+                    <div className="rounded-none px-4 py-3 bg-transparent text-foreground prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0 [&_.katex-display]:overflow-x-auto">
                       <AssistantTimeline items={streamTimeline} isLive={true} />
                     </div>
                     {streaming.length > 0 && (
@@ -543,34 +643,35 @@ export default function ChatComponent(props: ChatComponentProps) {
             <div className="flex w-full justify-start pl-0">
               <div className="space-y-1.5">
                 {citations.length > 0 && (
-                  <div className="flex flex-col gap-2">
-                    <div className="flex flex-wrap gap-1.5">
-                      {citations.map((c, ci) => (
-                        <button
-                          key={ci}
-                          type="button"
-                          onClick={() => {
-                            window.dispatchEvent(
-                              new CustomEvent("edu:open-material-preview", {
-                                detail: {
-                                  materialId: c.material_id,
-                                  chunkId: c.chunk_id,
-                                  sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
-                                  chunkText: c.chunk_text,
-                                },
-                              }),
-                            );
-                          }}
-                          className="inline-flex items-center gap-1 rounded-full border border-primary/25 bg-primary/8 px-2.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15 transition-colors"
-                        >
-                          <span className="font-mono font-bold opacity-60">[{ci + 1}]</span>
-                          <span className="max-w-[140px] truncate">
-                            {c.source_label ?? `引用 ${ci + 1}`}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <CitationScrollBar
+                    citations={citations}
+                    onCitationClick={(c, ci) => {
+                      window.dispatchEvent(
+                        new CustomEvent("edu:open-material-preview", {
+                          detail: {
+                            materialId: c.material_id,
+                            chunkId: c.chunk_id,
+                            sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                            chunkText: c.chunk_text,
+                            image_urls: c.image_urls,
+                          },
+                        }),
+                      );
+                    }}
+                    onExpandAll={() => {
+                      window.dispatchEvent(
+                        new CustomEvent("edu:open-citation-list", {
+                          detail: citations.map((c, ci) => ({
+                            materialId: c.material_id,
+                            chunkId: c.chunk_id,
+                            sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                            chunkText: c.chunk_text,
+                            image_urls: c.image_urls,
+                          })),
+                        }),
+                      );
+                    }}
+                  />
                 )}
                 {lastMeta?.type === "done" && !lastMeta.error && lastMeta.exec_time_ms && (
                   <p className="text-[10px] text-muted-foreground/60">{lastMeta.exec_time_ms} ms</p>
@@ -588,9 +689,9 @@ export default function ChatComponent(props: ChatComponentProps) {
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
-      <div className="absolute bottom-4 left-0 right-0 w-full px-4 md:px-8 bg-gradient-to-t from-background via-background to-transparent pt-6">
+      <div className="shrink-0 w-full px-4 md:px-8 bg-gradient-to-t from-background via-background to-transparent pt-4 pb-4">
         {/* ---- Tool Approval Card ---- */}
         {pendingApproval && (
           <div className="mb-3 rounded-xl border border-amber-300/70 bg-amber-50/80 dark:border-amber-700/60 dark:bg-amber-950/40 px-4 py-3 shadow-sm">
@@ -615,6 +716,16 @@ export default function ChatComponent(props: ChatComponentProps) {
                     </summary>
                     <pre className="mt-1.5 overflow-auto rounded bg-amber-100/60 dark:bg-amber-900/40 p-2 text-[11px] leading-relaxed text-foreground/80">
                       {JSON.stringify(pendingApproval.argsPreview, null, 2)}
+                    </pre>
+                  </details>
+                )}
+                {pendingApproval.fullCode && (
+                  <details className="mt-2" open>
+                    <summary className="cursor-pointer text-xs text-amber-700/70 dark:text-amber-400/70 select-none hover:text-amber-900 dark:hover:text-amber-200">
+                      代码预览
+                    </summary>
+                    <pre className="mt-1.5 overflow-auto max-h-64 rounded bg-zinc-950/80 dark:bg-zinc-950/60 p-2 text-[11px] leading-relaxed text-zinc-200 font-mono">
+                      {pendingApproval.fullCode}
                     </pre>
                   </details>
                 )}
@@ -679,7 +790,7 @@ export default function ChatComponent(props: ChatComponentProps) {
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md"
+                accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.py,.js,.ts,.mjs"
                 className="hidden"
                 onChange={handleFileChange}
               />
@@ -769,6 +880,94 @@ export default function ChatComponent(props: ChatComponentProps) {
 }
 
 /**
+ * Collapsible terminal output block shown after run_script executes.
+ * Mirrors the "Executed" block style from Cursor/ChatGPT.
+ */
+function ExecutionTerminalBlock({
+  item,
+}: {
+  item: Extract<MessageTimelineItem, { kind: "tool" }> & { execution: ExecutionPayload };
+}) {
+  const { execution, durationMs, success } = item;
+  const [open, setOpen] = useState(execution.return_code !== 0);
+  const [copied, setCopied] = useState(false);
+
+  const fullOutput = [
+    execution.stdout,
+    execution.stderr,
+  ].filter(Boolean).join("\n");
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(fullOutput);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* noop */ }
+  };
+
+  return (
+    <div className="my-1.5 rounded-md border border-border/60 bg-muted/30 overflow-hidden not-prose text-xs font-mono">
+      {/* Header row */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/60 transition-colors text-left"
+        aria-expanded={open}
+      >
+        <Terminal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <span className="text-foreground/90">Executed</span>
+        <span className="text-muted-foreground truncate flex-1">·&nbsp;{execution.command}</span>
+        <span
+          className={cn(
+            "shrink-0 tabular-nums",
+            execution.return_code !== 0 ? "text-destructive" : "text-emerald-600 dark:text-emerald-400",
+          )}
+        >
+          exit&nbsp;{execution.return_code}
+        </span>
+        {typeof durationMs === "number" && (
+          <span className="shrink-0 text-muted-foreground opacity-70">{(durationMs / 1000).toFixed(1)}s</span>
+        )}
+        {open ? (
+          <ChevronUp className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        )}
+      </button>
+
+      {/* Collapsible content */}
+      {open && (
+        <div className="border-t border-border/40 bg-zinc-950/80 dark:bg-zinc-950/60">
+          <div className="flex items-center justify-between px-2.5 py-1 border-b border-border/20">
+            <span className="text-muted-foreground/60 text-[10px]">$ {execution.command}</span>
+            <button
+              type="button"
+              onClick={() => void handleCopy()}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded hover:bg-muted/40"
+              aria-label="复制全部输出"
+            >
+              {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+              <span>{copied ? "已复制" : "复制"}</span>
+            </button>
+          </div>
+          <pre className="overflow-auto max-h-80 px-2.5 py-2 text-[11px] leading-relaxed whitespace-pre-wrap break-words">
+            {execution.stdout && (
+              <span className="text-zinc-200">{execution.stdout}</span>
+            )}
+            {execution.stderr && (
+              <span className="text-red-400">{execution.stderr}</span>
+            )}
+            {!execution.stdout && !execution.stderr && (
+              <span className="text-muted-foreground italic">(无输出)</span>
+            )}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Renders an interleaved timeline of text chunks and tool call cards.
  * Used for both live streaming (isLive=true) and historical messages (isLive=false).
  */
@@ -808,6 +1007,14 @@ function AssistantTimeline({
           );
         }
         // Tool item
+        if (item.execution) {
+          return (
+            <ExecutionTerminalBlock
+              key={item.clientKey}
+              item={item as Extract<MessageTimelineItem, { kind: "tool" }> & { execution: ExecutionPayload }}
+            />
+          );
+        }
         return (
           <div
             key={item.clientKey}

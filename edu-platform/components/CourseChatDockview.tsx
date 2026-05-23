@@ -21,7 +21,7 @@ import {
 } from "dockview";
 import "dockview/dist/styles/dockview.css";
 import { cn } from "@/lib/utils";
-import { X, FileText } from "lucide-react";
+import { X, FileText, List } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import Image from "next/image";
@@ -33,6 +33,7 @@ import {
   markdownRemarkPlugins,
   normalizeMathDelimiters,
 } from "@/lib/markdownMath";
+import { markdownComponents } from "@/lib/markdownComponents";
 
 type CitationPreview = {
   materialId: string;
@@ -47,6 +48,10 @@ type CourseChatCtx = {
   activeMaterialId: string | null;
   onPickMaterial: (id: string) => void;
   citation: CitationPreview | null;
+  /** Capture the currently viewed material page as a File. Returns null when no capturable material is active. */
+  captureCurrentPage: () => Promise<File | null>;
+  /** Called by MaterialPreviewPanel to register/unregister the current capture function. */
+  setPageCaptureFn: (fn: (() => Promise<File | null>) | null) => void;
 };
 
 const CourseChatCtx = createContext<CourseChatCtx | null>(null);
@@ -107,24 +112,26 @@ function MaterialListPanel() {
 }
 
 function MaterialPreviewPanel() {
-  const { courseId, activeMaterialId, citation } = useCourseChatCtx();
+  const { courseId, activeMaterialId, citation, setPageCaptureFn } = useCourseChatCtx();
   return (
     <CourseMaterialViewer
       courseId={courseId}
       materialId={activeMaterialId}
       chunkId={citation?.chunkId}
       sourceLabel={citation?.sourceLabel}
+      onCaptureFnChange={setPageCaptureFn}
     />
   );
 }
 
 function ChatPanel(props: IDockviewPanelProps<{ sessionId?: string | null }>) {
-  const { courseId, activeMaterialId } = useCourseChatCtx();
+  const { courseId, activeMaterialId, captureCurrentPage } = useCourseChatCtx();
   return (
     <ChatComponent
       courseId={courseId}
       hydrateSessionId={props.params?.sessionId ?? null}
       activeMaterialId={activeMaterialId}
+      captureCurrentPage={captureCurrentPage}
     />
   );
 }
@@ -154,6 +161,7 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
   );
   const [citation, setCitation] = useState<CitationPreview | null>(null);
   const [citationTextPanel, setCitationTextPanel] = useState<CitationPreview | null>(null);
+  const [citationListPanel, setCitationListPanel] = useState<CitationPreview[] | null>(null);
   const { resolvedTheme } = useTheme();
 
   // Closed-panels tracking
@@ -299,6 +307,18 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
 
   useEffect(() => {
     const h = (ev: Event) => {
+      const ce = ev as CustomEvent<CitationPreview[]>;
+      if (Array.isArray(ce.detail) && ce.detail.length > 0) {
+        setCitationListPanel(ce.detail);
+        setCitationTextPanel(null);
+      }
+    };
+    window.addEventListener("edu:open-citation-list", h as EventListener);
+    return () => window.removeEventListener("edu:open-citation-list", h as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const h = (ev: Event) => {
       const ce = ev as CustomEvent<{ courseId?: string }>;
       if (ce.detail?.courseId !== courseId) return;
       const api = apiRef.current;
@@ -320,14 +340,24 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
     setCitation(null);
   }, []);
 
+  // Ref holding the capture function registered by the active MaterialPreviewPanel.
+  // Updated by CourseMaterialViewer via onCaptureFnChange; read by ChatPanel before sending.
+  const pageCaptureFnRef = useRef<(() => Promise<File | null>) | null>(null);
+
+  const setPageCaptureFn = useCallback((fn: (() => Promise<File | null>) | null) => {
+    pageCaptureFnRef.current = fn;
+  }, []);
+
   const ctxValue = useMemo<CourseChatCtx>(
     () => ({
       courseId,
       activeMaterialId,
       onPickMaterial,
       citation,
+      captureCurrentPage: async () => pageCaptureFnRef.current?.() ?? null,
+      setPageCaptureFn,
     }),
-    [courseId, activeMaterialId, onPickMaterial, citation],
+    [courseId, activeMaterialId, onPickMaterial, citation, setPageCaptureFn],
   );
 
   const dockTheme = resolvedTheme === "dark" ? themeDark : themeLight;
@@ -466,6 +496,64 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
             onReady={onReady}
           />
 
+          {/* Citation list panel — slides in from right, lists all citations */}
+          <aside
+            className={cn(
+              "flex flex-col border-l border-border bg-background transition-[width,opacity] duration-200 ease-out shrink-0 overflow-hidden",
+              citationListPanel
+                ? "w-60 min-w-[200px] opacity-100"
+                : "w-0 min-w-0 opacity-0",
+            )}
+          >
+            {citationListPanel && (
+              <>
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 bg-muted/30">
+                  <List size={13} className="text-muted-foreground shrink-0" />
+                  <span className="text-xs font-medium text-muted-foreground flex-1">
+                    {citationListPanel.length} 个引用块
+                  </span>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7 shrink-0"
+                    aria-label="关闭引用列表"
+                    onClick={() => setCitationListPanel(null)}
+                  >
+                    <X size={15} />
+                  </Button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  <div className="flex flex-col divide-y divide-border">
+                    {citationListPanel.map((c, ci) => (
+                      <button
+                        key={ci}
+                        type="button"
+                        onClick={() => {
+                          setCitation(c);
+                          setSelectedMaterialId(c.materialId);
+                          setCitationTextPanel(c);
+                        }}
+                        className="flex flex-col items-start gap-1 px-3 py-2.5 text-left hover:bg-muted/40 transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-[10px] font-bold text-primary/60">[{ci + 1}]</span>
+                          <span className="text-[11px] font-medium text-foreground truncate max-w-[160px]">
+                            {c.sourceLabel ?? `引用 ${ci + 1}`}
+                          </span>
+                        </div>
+                        {c.chunkText && (
+                          <p className="text-[10px] text-muted-foreground leading-relaxed line-clamp-2">
+                            {c.chunkText.slice(0, 80)}
+                          </p>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </aside>
+
           {/* Citation text panel — slides in from right alongside dockview */}
           <aside
             className={cn(
@@ -502,6 +590,7 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
                         <ReactMarkdown
                           remarkPlugins={markdownRemarkPlugins}
                           rehypePlugins={markdownRehypePlugins}
+                          components={markdownComponents}
                         >
                           {normalizeMathDelimiters(citationTextPanel.chunkText)}
                         </ReactMarkdown>

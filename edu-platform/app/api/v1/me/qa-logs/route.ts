@@ -15,7 +15,7 @@ export async function DELETE(req: NextRequest) {
   try {
     const auth = requireAuthenticated(await getAuthFromRequest(req));
     const now = new Date();
-    const [r, _qc] = await prisma.$transaction([
+    const [r] = await prisma.$transaction([
       prisma.qaLog.updateMany({
         where: { studentId: auth.sub, deletedAt: null },
         data: { deletedAt: now },

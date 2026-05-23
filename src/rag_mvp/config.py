@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     llm_chat_base_url: str = ""     # LLM_CHAT_BASE_URL; empty → use llm_base_url
     llm_chat_model: str = ""        # LLM_CHAT_MODEL; empty → use llm_model
 
+    # KG extraction model — used by LightRAG for entity/relation extraction during ingest.
+    # Falls back to default LLM settings when unset.
+    llm_kg_api_key: str = ""        # LLM_KG_API_KEY; empty → use llm_api_key
+    llm_kg_base_url: str = ""       # LLM_KG_BASE_URL; empty → use llm_base_url
+    llm_kg_model: str = ""          # LLM_KG_MODEL; empty → use llm_model
+
     # Vision model — separate provider/endpoint (e.g. SiliconFlow Qwen-VL).
     # Falls back to default LLM settings when unset.
     vision_api_key: str = ""        # VISION_API_KEY; empty → use llm_api_key
@@ -55,6 +61,10 @@ class Settings(BaseSettings):
     """LightRAG text chunk size in tokens (env CHUNK_SIZE)."""
     chunk_overlap_token_size: int = Field(default=100, validation_alias="CHUNK_OVERLAP_SIZE")
     """Overlap between consecutive chunks (env CHUNK_OVERLAP_SIZE)."""
+    entity_extract_max_gleaning: int = Field(default=1, validation_alias="ENTITY_EXTRACT_MAX_GLEANING")
+    """LightRAG entity-extraction gleaning passes (default 1 = one extra refinement pass).
+    Set to 0 to skip gleaning entirely — halves the number of KG-extraction LLM calls.
+    Recommended for rate-limited free-tier providers (e.g. SiliconFlow TPM=50K)."""
     embedding_timeout_seconds: int = Field(default=120, validation_alias="EMBEDDING_TIMEOUT")
     """LightRAG default_embedding_timeout (seconds). Worker execution cap scales with this inside lightrag.utils."""
 
@@ -116,9 +126,26 @@ class Settings(BaseSettings):
         """Base URL for vision LLM (falls back to default llm_base_url)."""
         return self.vision_base_url.strip() or self.llm_base_url
 
+    @property
+    def effective_kg_api_key(self) -> str:
+        """API key for KG extraction LLM (falls back to default llm_api_key)."""
+        return self.llm_kg_api_key.strip() or self.llm_api_key
+
+    @property
+    def effective_kg_base_url(self) -> str:
+        """Base URL for KG extraction LLM (falls back to default llm_base_url)."""
+        return self.llm_kg_base_url.strip() or self.llm_base_url
+
+    @property
+    def effective_kg_model(self) -> str:
+        """Model name for KG extraction LLM (falls back to default llm_model)."""
+        return self.llm_kg_model.strip() or self.llm_model
+
     # LLM generation
     llm_max_tokens: int = 4096
     llm_temperature: float = 0.1
+    llm_debug: bool = False  # LLM_DEBUG=true → log each call's prompt / response / error
+    llm_debug_max_chars: int = 400  # LLM_DEBUG_MAX_CHARS — truncate prompt/result in debug log (0 = no limit)
     llm_extra_body: dict = Field(
         default_factory=dict,
         validation_alias="LLM_EXTRA_BODY",
@@ -155,6 +182,16 @@ class Settings(BaseSettings):
     # Comma or newline-separated list of correct domain terms (e.g. "harness engineering,Kubernetes").
     # When non-empty, appended to the system prompt so the LLM can fix Whisper mis-recognitions.
     video_summary_domain_terms: str = ""
+
+    # Document structured summary (non-video; generated during parse_and_index pipeline)
+    document_summary_enabled: bool = Field(default=True, validation_alias="DOCUMENT_SUMMARY_ENABLED")
+    """Generate a Map-Reduce summary for non-video materials during ingestion (env DOCUMENT_SUMMARY_ENABLED)."""
+    document_summary_chunk_tokens: int = Field(default=4000, validation_alias="DOCUMENT_SUMMARY_CHUNK_TOKENS")
+    """Tokens per summarisation chunk (independent of CHUNK_SIZE; env DOCUMENT_SUMMARY_CHUNK_TOKENS)."""
+    document_summary_max_chunks: int = Field(default=100, validation_alias="DOCUMENT_SUMMARY_MAX_CHUNKS")
+    """Cap on map-phase chunks (~600 pages at 4000 tok/chunk; env DOCUMENT_SUMMARY_MAX_CHUNKS)."""
+    document_summary_two_level_threshold: int = Field(default=40, validation_alias="DOCUMENT_SUMMARY_TWO_LEVEL_THRESHOLD")
+    """Use two-level Map-Reduce when chunk count exceeds this value (env DOCUMENT_SUMMARY_TWO_LEVEL_THRESHOLD)."""
 
     # MinerU
     mineru_backend: str = "pipeline"

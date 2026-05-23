@@ -11,6 +11,7 @@ import redis
 from dotenv import load_dotenv
 from loguru import logger
 
+from rag_mvp.logging_setup import configure_logging
 from rag_mvp.db import connect_sync
 from rag_mvp.material_processor import (
     process_convert_preview,
@@ -205,6 +206,7 @@ def main() -> None:
     _root = os.path.abspath(os.path.join(_here, "..", ".."))
     load_dotenv(os.path.join(_root, ".env"))
     load_dotenv(os.path.join(_root, "edu-platform", ".env"))
+    configure_logging("rag-worker")
     redis_url = os.environ.get("REDIS_URL", "").strip()
     if not redis_url:
         logger.error("REDIS_URL is required")

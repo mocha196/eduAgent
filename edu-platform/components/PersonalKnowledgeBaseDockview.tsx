@@ -130,7 +130,7 @@ export default function PersonalKnowledgeBaseDockview({ onClosedPanelsChange, re
   const resettingLayoutRef = useRef(false);
 
   // Closed-panels tracking
-  const [closedPanels, setClosedPanels] = useState<ClosedPanelInfo[]>([]);
+  const [, setClosedPanels] = useState<ClosedPanelInfo[]>([]);
   const closedPanelsRef = useRef<ClosedPanelInfo[]>([]);
   const onClosedPanelsChangeCbRef = useRef(onClosedPanelsChange);
   onClosedPanelsChangeCbRef.current = onClosedPanelsChange;

@@ -1,8 +1,12 @@
 import { prisma } from "@/lib/db";
+import type { ExecutionPayload } from "@/lib/agent/react-loop";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const px = prisma as any;
 import { ApiError } from "@/lib/http/api-error";
+import { logger } from "@/lib/logger";
+
+const chatLog = logger.child({ component: "chatService" });
 import { randomUUID } from "crypto";
 import OpenAI from "openai";
 import { getLLMClient, getTitleModel, getVisionModel, getChatModel, getRoleExtraBody, getMemoryModel } from "@/lib/agent/llm-registry";
@@ -19,6 +23,7 @@ import {
 } from "@/lib/agent/setup";
 import { promptBuilder } from "@/lib/agent/prompt-builder";
 import { memoryStore } from "@/lib/agent/memory/memory-store";
+import { loadEnabledStyles } from "@/lib/services/agentStyleService";
 import { toolRegistry } from "@/lib/agent/tools/index";
 
 type ToolCallRecord = {
@@ -26,6 +31,7 @@ type ToolCallRecord = {
   status: "done";
   success?: boolean;
   durationMs?: number;
+  execution?: ExecutionPayload;
 };
 
 type PersistedCitation = {
@@ -56,6 +62,8 @@ export type B3SseEvent =
       name: string;
       success?: boolean;
       duration_ms?: number;
+      output?: string;
+      execution?: ExecutionPayload;
     }
   | {
       type: "done";
@@ -70,7 +78,17 @@ export type B3SseEvent =
       turn_id?: string;
       ts?: string;
       payload?: Record<string, unknown>;
-    };
+    }
+  | {
+      type: "require_approval";
+      tool_call_id: string;
+      tool_name: string;
+      args_preview: Record<string, unknown>;
+      approval_key: string;
+      reason: string;
+      full_code?: string;
+    }
+  | { type: "approval_resolved"; tool_call_id: string; approved: boolean };
 
 const enc = new TextEncoder();
 
@@ -447,6 +465,7 @@ function createB3PersistTransform(
             status: "done",
             success: ev.success as boolean | undefined,
             durationMs: ev.duration_ms as number | undefined,
+            execution: ev.execution as ExecutionPayload | undefined,
           });
         } else if (ev.type === "citation") {
           collectedCitations.push({
@@ -494,7 +513,7 @@ function createB3PersistTransform(
             opts.question,
           );
         } catch (err) {
-          console.error("[chatService] QaLog persist failed:", err);
+          chatLog.error({ err }, "QaLog persist failed");
         }
       }
       // Update session history in Redis using the snapshot captured at request-start.
@@ -508,7 +527,7 @@ function createB3PersistTransform(
         ];
         await sessionStore.set(opts.sessionId, updated);
       } catch (err) {
-        console.error("[chatService] session store update failed:", err);
+        chatLog.error({ err }, "Session store update failed");
       }
     },
   });
@@ -626,9 +645,60 @@ async function describeImageAttachments(
 
     return `[图片内容理解]\n${description}\n\n${userMessage}`;
   } catch (err) {
-    console.error("[chatService] vision pre-process failed:", err);
+    chatLog.error({ err }, "Vision pre-process failed");
     return userMessage;
   }
+}
+
+/**
+ * Fetch text/code attachment contents via presigned URLs and inject them into
+ * the user message as fenced code blocks, so the agent can read them directly.
+ * Silently skips any attachment that fails to fetch.
+ */
+async function hydrateTextAttachments(
+  attachments: AttachmentParam[] | undefined,
+  userMessage: string,
+): Promise<string> {
+  const TEXT_MIMES = new Set([
+    "text/plain",
+    "text/markdown",
+    "text/x-python",
+    "application/x-python",
+    "application/x-python-code",
+    "text/x-javascript",
+    "application/javascript",
+    "text/javascript",
+    "text/typescript",
+    "text/x-typescript",
+  ]);
+  const TEXT_ATTACH_MAX_CHARS = 8000;
+
+  const textAtts = attachments?.filter(
+    (a) => !a.mime_type.startsWith("image/") && TEXT_MIMES.has(a.mime_type),
+  ) ?? [];
+  if (textAtts.length === 0) return userMessage;
+
+  const injections: string[] = [];
+  for (const att of textAtts) {
+    try {
+      const resp = await fetch(att.presigned_url, { signal: AbortSignal.timeout(10_000) });
+      if (!resp.ok) continue;
+      let content = await resp.text();
+      let truncated = false;
+      if (content.length > TEXT_ATTACH_MAX_CHARS) {
+        content = content.slice(0, TEXT_ATTACH_MAX_CHARS);
+        truncated = true;
+      }
+      injections.push(
+        `[附件：${att.name}]\n\`\`\`\n${content}\n\`\`\`${truncated ? "\n（内容已截断，如需完整内容请使用 read_attachment 工具）" : ""}`,
+      );
+    } catch {
+      // skip silently — attachment may be unavailable or timed out
+    }
+  }
+
+  if (injections.length === 0) return userMessage;
+  return `${userMessage}\n\n${injections.join("\n\n")}`;
 }
 
 // ---- Auto-title for new sessions -----------------------------------------
@@ -729,6 +799,11 @@ export type CourseChatParams = {
   sessionId?: string | null;
   /** When true, bypass pedagogical system prompt and skills for evaluation/benchmark use. */
   evalMode?: boolean;
+  /**
+   * Implicitly captured page screenshot uploaded silently by the frontend on message send.
+   * Not shown in the chat UI; the LLM accesses it via the view_current_material_page tool.
+   */
+  currentPageImage?: { presigned_url: string; mime_type: string; name: string } | null;
 };
 
 /**
@@ -767,7 +842,7 @@ export async function courseChatSseResponse(
   if (p.materialId) {
     const mat = await prisma.material.findUnique({
       where: { id: p.materialId },
-      select: { id: true, originalFilename: true, fileType: true, videoSummary: true },
+      select: { id: true, originalFilename: true, fileType: true, videoSummary: true, documentSummary: true },
     });
     if (mat) {
       materialContext = {
@@ -775,6 +850,7 @@ export async function courseChatSseResponse(
         filename: mat.originalFilename,
         fileType: mat.fileType,
         videoSummary: mat.videoSummary ?? null,
+        documentSummary: mat.documentSummary ?? null,
       };
     }
   }
@@ -796,12 +872,19 @@ export async function courseChatSseResponse(
     .buildRetrievedMemoryBlock(p.platformStudentId, p.message)
     .catch(() => "");
 
-  const skills = p.evalMode
-    ? [] // No pedagogical skills in eval mode
-    : getSkillsLoader()
-        .load()
-        .map((s) => (s.name === "course_qa" ? { ...s, alwaysInject: true } : s));
-  const userMessage = await describeImageAttachments(p.attachments, p.message);
+  const skills = await (async () => {
+    if (p.evalMode) return []; // No pedagogical skills in eval mode
+    const fileSkills = getSkillsLoader()
+      .load()
+      .map((s) => (s.name === "course_qa" ? { ...s, alwaysInject: true } : s));
+    const dbStyles = await loadEnabledStyles();
+    const dbNames = new Set(dbStyles.map((s) => s.name));
+    return [...fileSkills.filter((s) => !dbNames.has(s.name)), ...dbStyles];
+  })();
+  const userMessage = await hydrateTextAttachments(
+    p.attachments,
+    await describeImageAttachments(p.attachments, p.message),
+  );
   const config = buildAgentConfig(
     p.attachments?.map((a) => ({
       id: a.id,
@@ -825,8 +908,10 @@ export async function courseChatSseResponse(
       lessonId: p.lessonId ?? null,
       materialId: p.materialId ?? null,
       materialContext,
+      currentPageImage: p.currentPageImage ?? null,
       traceId,
       debugTrace: p.debugTrace ?? false,
+      evalMode: p.evalMode ?? false,
     },
     coordinator,
     promptBuilder,
@@ -835,6 +920,7 @@ export async function courseChatSseResponse(
     memoryBlock,
     history: summarizedHistory,
     allowedTools: p.evalMode ? ["knowledge_query"] : undefined,
+    evalMode: p.evalMode,
   });
 
   const out = stream.pipeThrough(
@@ -964,10 +1050,18 @@ export async function qaCenterChatSseResponse(
     .buildRetrievedMemoryBlock(p.platformStudentId, p.message)
     .catch(() => "");
 
-  const skills = getSkillsLoader()
-    .load()
-    .map((s) => (s.name === "course_qa" ? { ...s, alwaysInject: true } : s));
-  const userMessage = await describeImageAttachments(p.attachments, p.message);
+  const skills = await (async () => {
+    const fileSkills = getSkillsLoader()
+      .load()
+      .map((s) => (s.name === "course_qa" ? { ...s, alwaysInject: true } : s));
+    const dbStyles = await loadEnabledStyles();
+    const dbNames = new Set(dbStyles.map((s) => s.name));
+    return [...fileSkills.filter((s) => !dbNames.has(s.name)), ...dbStyles];
+  })();
+  const userMessage = await hydrateTextAttachments(
+    p.attachments,
+    await describeImageAttachments(p.attachments, p.message),
+  );
   const config = buildAgentConfig(
     p.attachments?.map((a) => ({
       id: a.id,
@@ -1057,7 +1151,7 @@ export async function personalKbChatSseResponse(
   if (p.materialId) {
     const mat = await prisma.personalMaterial.findUnique({
       where: { id: p.materialId },
-      select: { id: true, originalFilename: true, fileType: true, videoSummary: true },
+      select: { id: true, originalFilename: true, fileType: true, videoSummary: true, documentSummary: true },
     });
     if (mat) {
       materialContext = {
@@ -1065,6 +1159,7 @@ export async function personalKbChatSseResponse(
         filename: mat.originalFilename,
         fileType: mat.fileType,
         videoSummary: mat.videoSummary ?? null,
+        documentSummary: mat.documentSummary ?? null,
       };
     }
   }
@@ -1074,12 +1169,20 @@ export async function personalKbChatSseResponse(
     .buildRetrievedMemoryBlock(p.userId, p.message)
     .catch(() => "");
 
-  // Inject personal_kb skill; keep rag_usage skill if present
-  const skills = getSkillsLoader()
-    .load()
-    .filter((s) => ["rag_usage", "concept_clarification", "scaffolding"].includes(s.name));
+  // Inject personal_kb skill; keep rag_usage skill if present; always include DB styles
+  const skills = await (async () => {
+    const fileSkills = getSkillsLoader()
+      .load()
+      .filter((s) => ["rag_usage", "concept_clarification", "scaffolding"].includes(s.name));
+    const dbStyles = await loadEnabledStyles();
+    const dbNames = new Set(dbStyles.map((s) => s.name));
+    return [...fileSkills.filter((s) => !dbNames.has(s.name)), ...dbStyles];
+  })();
 
-  const userMessage = await describeImageAttachments(p.attachments, p.message);
+  const userMessage = await hydrateTextAttachments(
+    p.attachments,
+    await describeImageAttachments(p.attachments, p.message),
+  );
   const config = buildAgentConfig(
     p.attachments?.map((a) => ({
       id: a.id,

@@ -1,5 +1,4 @@
 import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
 import { jsonError } from "@/lib/http/json-response";
 import { ApiError } from "@/lib/http/api-error";
 import { requireAuthenticated } from "@/lib/admin";

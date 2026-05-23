@@ -8,6 +8,8 @@ const TOOL_EMOJIS: Record<string, string> = {
   hint_generator: "💡",
   score_essay: "✅",
   evaluate_code: "💻",
+  run_script: "▶️",
+  read_attachment: "📎",
   delegate_task: "🤝",
   wikipedia_search: "🌐",
   web_search: "🔎",
@@ -18,7 +20,6 @@ const TOOL_EMOJIS: Record<string, string> = {
   list_skills: "📚",
   view_skill: "👁️",
   manage_skill: "🛠️",
-  cron_job: "⏰",
 };
 
 export function toolEmoji(name: string): string {

@@ -1,5 +1,8 @@
 import { createClient, type RedisClientType } from "redis";
 import { getRedisUrl } from "@/lib/config";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "redis" });
 
 let client: RedisClientType | null = null;
 let connectPromise: Promise<RedisClientType> | null = null;
@@ -25,7 +28,7 @@ export async function getRedis(): Promise<RedisClientType> {
     c.on("error", (err) => {
       if (!hasLoggedRedisError) {
         hasLoggedRedisError = true;
-        console.error("[redis] client error", err);
+        log.error({ err }, "Redis client error");
       }
     });
     await c.connect();

@@ -55,49 +55,28 @@ describe("MemoryCoordinator", () => {
     expect(block).toBe("");
   });
 
-  it("业务规则：会话估算 token 达阈值后才触发 consolidation", () => {
+  it("业务规则：有用户消息时应触发 consolidation（即时提取）", () => {
     // given
     const retriever = { getRelevantConcepts: vi.fn() };
     const consolidator = { consolidateSession: vi.fn() };
     const coordinator = new MemoryCoordinator(retriever as never, consolidator as never);
-    const shortMessages: Message[] = [{ role: "user", content: "短消息" }];
-    const longMessages: Message[] = [
-      { role: "user", content: "x".repeat(6000) },
-      { role: "assistant", content: "y".repeat(6000) },
-    ];
-
-    // when
-    const shouldShort = coordinator.shouldRunConsolidation(shortMessages);
-    const shouldLong = coordinator.shouldRunConsolidation(longMessages);
-
-    // then
-    expect(shouldShort).toBe(false);
-    expect(shouldLong).toBe(true);
-  });
-
-  it("业务规则：提供 knownTokens 时应使用真实 token 数而非估算值", () => {
-    // given
-    const retriever = { getRelevantConcepts: vi.fn() };
-    const consolidator = { consolidateSession: vi.fn() };
-    const coordinator = new MemoryCoordinator(retriever as never, consolidator as never);
-    // 消息本身估算 token 低于阈值（内容很短）
-    const shortMessages: Message[] = [
-      { role: "user", content: "短消息" },
-      { role: "assistant", content: "短回答" },
-    ];
 
     // when / then
-    // A: knownTokens 高于 800 → 触发（即便估算值低于阈值）
-    expect(coordinator.shouldRunConsolidation(shortMessages, 1000)).toBe(true);
-    // B: knownTokens 低于 800 → 不触发（即便内容再长也用真实值）
-    const longMessages: Message[] = [
-      { role: "user", content: "x".repeat(6000) },
-      { role: "assistant", content: "y".repeat(6000) },
+    // A: 空消息 → 不触发
+    expect(coordinator.shouldRunConsolidation([])).toBe(false);
+    // B: 只有 assistant 消息（理论上不应发生，但边界安全）→ 不触发
+    const assistantOnly: Message[] = [{ role: "assistant", content: "你好" }];
+    expect(coordinator.shouldRunConsolidation(assistantOnly)).toBe(false);
+    // C: 包含 user 消息（单条）→ 触发
+    const oneUser: Message[] = [{ role: "user", content: "短消息" }];
+    expect(coordinator.shouldRunConsolidation(oneUser)).toBe(true);
+    // D: 多轮对话 → 触发
+    const multiTurn: Message[] = [
+      { role: "user", content: "TCP 拥塞控制是什么？" },
+      { role: "assistant", content: "TCP 拥塞控制是..." },
+      { role: "user", content: "慢启动算法呢？" },
     ];
-    expect(coordinator.shouldRunConsolidation(longMessages, 500)).toBe(false);
-    // C: knownTokens 为 null → 回落到估算值
-    expect(coordinator.shouldRunConsolidation(longMessages, null)).toBe(true);
-    expect(coordinator.shouldRunConsolidation(shortMessages, null)).toBe(false);
+    expect(coordinator.shouldRunConsolidation(multiTurn)).toBe(true);
   });
 
   it("业务规则：consolidation 失败不应向用户层抛错", async () => {

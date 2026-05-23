@@ -78,12 +78,25 @@ vi.mock("@/lib/agent/setup", () => ({
     ragServiceKey: "",
     maxContextTokens: 120000,
   })),
+  ContextManager: class {
+    compressWithSummary = vi.fn().mockResolvedValue({ messages: [], didSummarize: false });
+    compress = vi.fn().mockReturnValue([]);
+  },
 }));
 
 vi.mock("@/lib/agent/memory/memory-store", () => ({
   memoryStore: {
     loadProfile: loadProfileMock,
   },
+}));
+
+vi.mock("@/lib/agent/llm-registry", () => ({
+  getLLMClient: vi.fn(() => ({})),
+  getTitleModel: vi.fn(() => "gpt-test"),
+  getVisionModel: vi.fn(() => "gpt-test"),
+  getChatModel: vi.fn(() => "gpt-test"),
+  getMemoryModel: vi.fn(() => "gpt-test"),
+  getRoleExtraBody: vi.fn(() => undefined),
 }));
 
 function makeAgentStream(events: Array<Record<string, unknown>>): ReadableStream<Uint8Array> {

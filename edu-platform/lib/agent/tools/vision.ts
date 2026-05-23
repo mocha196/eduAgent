@@ -22,7 +22,14 @@ function isPrivateOrLocalHostname(hostname: string): boolean {
 }
 
 function normalizeVisionUrl(raw: string): string {
-  return encodeURI(raw.trim());
+  try {
+    // URL constructor correctly handles already-percent-encoded sequences
+    // (preserves them) and raw Unicode characters (encodes them).
+    // Avoid encodeURI which would double-encode existing %XX sequences.
+    return new URL(raw.trim()).href;
+  } catch {
+    return encodeURI(raw.trim());
+  }
 }
 
 async function toInlineDataUrl(url: string): Promise<string | null> {
@@ -37,7 +44,7 @@ async function toInlineDataUrl(url: string): Promise<string | null> {
   return `data:${contentType};base64,${bytes.toString("base64")}`;
 }
 
-async function buildVisionToolImageUrl(raw: string): Promise<string | null> {
+export async function buildVisionToolImageUrl(raw: string): Promise<string | null> {
   const value = raw.trim();
   if (!value) return null;
   if (value.startsWith("data:image/")) return value;
@@ -80,6 +87,7 @@ export const analyzeImageTool: Tool = {
     },
     required: ["image_urls", "question"],
   },
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async execute(args: Record<string, unknown>, _ctx: TurnContext): Promise<string> {
     const imageUrls = Array.isArray(args.image_urls)
       ? (args.image_urls as unknown[]).filter((u): u is string => typeof u === "string")

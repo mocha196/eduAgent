@@ -34,6 +34,8 @@ export type ToolCitation = {
   material_id?: string;
   source_label?: string;
   chunk_text?: string;
+  /** Full chunk text for evaluation (up to 1500 chars). Not shown in UI. */
+  eval_text?: string;
   image_urls?: Array<{ page_idx: number; url: string }>;
 };
 
@@ -80,6 +82,7 @@ export type MaterialContext = {
   filename: string;
   fileType: string;
   videoSummary: string | null;
+  documentSummary: string | null;
 };
 
 export type TurnContext = {
@@ -96,6 +99,20 @@ export type TurnContext = {
   materialId?: string | null;
   /** Pre-fetched material metadata for system prompt injection. Populated by chatService when materialId is present. */
   materialContext?: MaterialContext | null;
+  /**
+   * Implicit page-context image captured silently when the user sent this message.
+   * Not shown in UI. The LLM accesses it only by calling `view_current_material_page`.
+   */
+  currentPageImage?: { presigned_url: string; mime_type: string; name: string } | null;
+  /** When true, this turn is an automated eval run. Tools may use this to restrict behaviour (e.g. force sources="course"). */
+  evalMode?: boolean;
+  /** Attachment metadata passed from the frontend for the current turn. Used by read_attachment tool. */
+  attachments?: Array<{
+    id: string;
+    presigned_url: string;
+    mime_type: string;
+    name: string;
+  }>;
 };
 
 // ---- Agent config -----------------------------------------------------------

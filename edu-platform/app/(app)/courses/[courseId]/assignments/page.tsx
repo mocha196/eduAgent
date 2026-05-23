@@ -82,8 +82,25 @@ export default function AssignmentsPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const router = useRouter();
 
+  const [userRole, setUserRole] = useState<"STUDENT" | "TEACHER" | "ADMIN" | null>(null);
+  const [roleLoading, setRoleLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [assignments, setAssignments] = useState<AssignmentSummaryDto[]>([]);
+
+  useEffect(() => {
+    void fetch("/api/v1/user", { credentials: "include" })
+      .then((r) => r.json() as Promise<{ role?: string }>)
+      .then((d) => setUserRole((d.role ?? null) as "STUDENT" | "TEACHER" | "ADMIN" | null))
+      .catch(() => setUserRole("STUDENT"))
+      .finally(() => setRoleLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (roleLoading || !courseId) return;
+    if (userRole === "STUDENT") {
+      router.replace(`/courses/${courseId}?tab=assignments`);
+    }
+  }, [courseId, roleLoading, router, userRole]);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/v1/courses/${courseId}/assignments`, { credentials: "include" });
@@ -108,6 +125,20 @@ export default function AssignmentsPage() {
 
   function handleNewAssignment() {
     router.push(`/courses/${courseId}/assignments/new`);
+  }
+
+  if (roleLoading) {
+    return (
+      <div className="mx-auto w-full max-w-6xl px-4 py-6 space-y-3">
+        {[1, 2, 3].map((i) => (
+          <Skeleton key={i} className="h-16 rounded-lg" />
+        ))}
+      </div>
+    );
+  }
+
+  if (userRole === "STUDENT") {
+    return null;
   }
 
   return (

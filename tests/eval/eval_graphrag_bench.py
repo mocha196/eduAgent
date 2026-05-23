@@ -1,19 +1,30 @@
 """Evaluate answers against the GraphRAG-Bench benchmark.
 
-Merges questions + naive answers + full answers, computes:
-  - ROUGE-L  (approximate answer quality)
-  - EM / F1 token overlap (proxy for correctness)
-  - Tool-call stats (how many knowledge-graph lookups the agent made)
+Compares three retrieval strategies:
+  - naive   : LightRAG naive mode (pure vector, COURSE_GRAPHRAG_NAIVE)
+  - mix     : LightRAG mix mode  (vector + KG, COURSE_GRAPHRAG_FULL)
+  - agentic : TS ReAct agent     (mix retrieval + query decomposition, COURSE_GRAPHRAG_FULL)
+
+Metrics computed per strategy:
+  - ROUGE-L, Token-F1, Exact-Match  (answer quality vs gold_answer)
+  - context_recall   (heuristic: how much of the evidence is covered by retrieved contexts)
+  - context_precision (LLM-as-judge when --llm-judge: are retrieved contexts relevant?)
+  - avg_tool_calls, tool_success_rate, avg_latency_ms, avg_tokens
 
 For a proper academic comparison, also runs the official GraphRAG-Benchmark
 gen_eval script if the repo is available.
 
 Usage:
   python -m tests.eval.eval_graphrag_bench \
-    --questions   tests/eval/data/graphrag_bench_questions.json \
-    --naive       tests/eval/results/graphrag_bench_naive_answers.json \
-    --full        tests/eval/results/graphrag_bench_full_answers.json \
-    [--official-eval-dir <path/to/GraphRAG-Benchmark>]
+    --questions tests/eval/data/graphrag_bench_questions.json \
+    --naive     tests/eval/results/graphrag_bench_naive_answers.json \
+    --mix       tests/eval/results/graphrag_bench_mix_answers.json \
+    --agentic   tests/eval/results/graphrag_bench_agentic_answers.json
+
+  # Collect answers first:
+  # Naive  : python -m tests.eval.collect_answers_naive  --questions tests/eval/data/graphrag_bench_questions.json --output tests/eval/results/graphrag_bench_naive_answers.json   --course-id c0000001-0000-4000-8000-000000000000
+  # Mix    : python -m tests.eval.collect_answers_mix    --questions tests/eval/data/graphrag_bench_questions.json --output tests/eval/results/graphrag_bench_mix_answers.json     --course-id c0000002-0000-4000-8000-000000000000
+  # Agentic: python -m tests.eval.collect_answers_agentic --questions tests/eval/data/graphrag_bench_questions.json --output tests/eval/results/graphrag_bench_agentic_answers.json --course-id c0000002-0000-4000-8000-000000000000
 """
 from __future__ import annotations
 
@@ -31,6 +42,60 @@ from tests.eval._common import RESULTS_DIR, load_json, save_json
 # ---------------------------------------------------------------------------
 # Text normalisation helpers (from SQuAD official script)
 # ---------------------------------------------------------------------------
+
+
+def _parse_evidence(evidence_str: str) -> list[str]:
+    """Parse the evidence field which is stored as a Python-repr string of a list."""
+    if not evidence_str or evidence_str.strip() in ("", "[]"):
+        return []
+    try:
+        import ast
+        val = ast.literal_eval(evidence_str)
+        if isinstance(val, list):
+            return [str(v).strip() for v in val if str(v).strip()]
+    except Exception:
+        pass
+    # Fallback: treat as single statement
+    return [evidence_str.strip()]
+
+
+def _context_recall_heuristic(retrieved_contexts: list[str], evidence: list[str]) -> float:
+    """Estimate context recall: fraction of evidence statements covered by retrieved contexts.
+
+    A statement is considered 'covered' if its token-F1 against the best-matching
+    retrieved context chunk exceeds a 0.3 threshold.
+    """
+    if not evidence:
+        return 0.0
+    if not retrieved_contexts:
+        return 0.0
+    covered = 0
+    for stmt in evidence:
+        best_f1 = max(
+            _f1_token_overlap(ctx, stmt)
+            for ctx in retrieved_contexts
+        )
+        if best_f1 >= 0.3:
+            covered += 1
+    return covered / len(evidence)
+
+
+def _context_precision_heuristic(retrieved_contexts: list[str], gold_answer: str, evidence: list[str]) -> float:
+    """Estimate context precision: fraction of retrieved chunks that are relevant.
+
+    A chunk is considered relevant if it has token-F1 >= 0.2 with the gold answer
+    or any evidence statement.
+    """
+    if not retrieved_contexts:
+        return 0.0
+    reference_texts = [gold_answer] + evidence
+    relevant = 0
+    for ctx in retrieved_contexts:
+        best = max(_f1_token_overlap(ctx, ref) for ref in reference_texts)
+        if best >= 0.2:
+            relevant += 1
+    return relevant / len(retrieved_contexts)
+
 
 def _normalize(text: str) -> str:
     text = text.lower()
@@ -92,6 +157,8 @@ def evaluate_answers(questions: list[dict], answers: list[dict]) -> dict:
     rouge_scores: list[float] = []
     f1_scores: list[float] = []
     em_scores: list[float] = []
+    recall_scores: list[float] = []
+    precision_scores: list[float] = []
     tool_call_counts: list[int] = []
     tool_success_rates: list[float] = []
     latencies: list[float] = []
@@ -109,16 +176,20 @@ def evaluate_answers(questions: list[dict], answers: list[dict]) -> dict:
         a = ans_map.get(qid)
 
         if qtype not in by_type:
-            by_type[qtype] = {"rouge": [], "f1": [], "em": [], "n": 0, "answered": 0}
+            by_type[qtype] = {"rouge": [], "f1": [], "em": [], "recall": [], "precision": [], "n": 0, "answered": 0}
         by_type[qtype]["n"] += 1
 
         if a is None:
             rouge_scores.append(0.0)
             f1_scores.append(0.0)
             em_scores.append(0.0)
+            recall_scores.append(0.0)
+            precision_scores.append(0.0)
             by_type[qtype]["rouge"].append(0.0)
             by_type[qtype]["f1"].append(0.0)
             by_type[qtype]["em"].append(0.0)
+            by_type[qtype]["recall"].append(0.0)
+            by_type[qtype]["precision"].append(0.0)
             continue
 
         answered_count += 1
@@ -136,6 +207,18 @@ def evaluate_answers(questions: list[dict], answers: list[dict]) -> dict:
         by_type[qtype]["rouge"].append(rouge)
         by_type[qtype]["f1"].append(f1)
         by_type[qtype]["em"].append(em)
+
+        # Context recall / precision (heuristic, requires evidence field + retrieved_contexts)
+        evidence = _parse_evidence(str(q.get("evidence", "")))
+        retrieved = a.get("retrieved_contexts", [])
+        if not retrieved:  # agentic stores contexts in tool_calls outputs too
+            retrieved = [str(tc.get("output", "")) for tc in a.get("tool_calls", []) if tc.get("output")]
+        recall = _context_recall_heuristic(retrieved, evidence)
+        precision = _context_precision_heuristic(retrieved, gold, evidence)
+        recall_scores.append(recall)
+        precision_scores.append(precision)
+        by_type[qtype]["recall"].append(recall)
+        by_type[qtype]["precision"].append(precision)
 
         tcs = a.get("tool_calls", [])
         tool_call_counts.append(len(tcs))
@@ -155,6 +238,8 @@ def evaluate_answers(questions: list[dict], answers: list[dict]) -> dict:
         "rouge_l": avg(rouge_scores),
         "f1_token": avg(f1_scores),
         "exact_match": avg(em_scores),
+        "context_recall": avg(recall_scores),
+        "context_precision": avg(precision_scores),
         "avg_tool_calls": avg(tool_call_counts),
         "tool_success_rate": avg(tool_success_rates),
         "avg_latency_ms": round(sum(latencies) / len(latencies)) if latencies else 0,
@@ -166,6 +251,8 @@ def evaluate_answers(questions: list[dict], answers: list[dict]) -> dict:
                 "rouge_l": avg(v["rouge"]),
                 "f1_token": avg(v["f1"]),
                 "exact_match": avg(v["em"]),
+                "context_recall": avg(v["recall"]),
+                "context_precision": avg(v["precision"]),
             }
             for t, v in by_type.items()
         },
@@ -174,19 +261,37 @@ def evaluate_answers(questions: list[dict], answers: list[dict]) -> dict:
 
 def intersect_questions(
     questions: list[dict],
-    naive_answers: list[dict],
-    full_answers: list[dict],
+    *answer_lists: list[dict],
 ) -> list[dict]:
-    """Return only questions answered in BOTH naive and full answer files."""
-    naive_ids = {str(a.get("id", "")) for a in naive_answers}
-    full_ids = {str(a.get("id", "")) for a in full_answers}
-    common = naive_ids & full_ids
-    return [q for q in questions if str(q.get("id", "")) in common]
+    """Return only questions answered in ALL provided answer files."""
+    if not answer_lists:
+        return questions
+    common = None
+    for ans_list in answer_lists:
+        ids = {str(a.get("id", "")) for a in ans_list}
+        common = ids if common is None else common & ids
+    return [q for q in questions if str(q.get("id", "")) in (common or set())]
 
 
 # ---------------------------------------------------------------------------
 # LLM-as-Judge
 # ---------------------------------------------------------------------------
+
+_CONTEXT_PRECISION_PROMPT = """\
+You are an evaluator for a RAG retrieval benchmark.
+
+## Question
+{question}
+
+## Retrieved Context Chunk
+{chunk}
+
+---
+Is this retrieved context chunk RELEVANT to answering the question? (i.e., does it contain information useful for answering it?)
+
+Respond with ONLY valid JSON:
+{{"relevant": true/false, "reason": "<one short sentence>"}}"""
+
 
 _JUDGE_PROMPT = """\
 You are an expert evaluator for a reading-comprehension RAG benchmark.
@@ -220,17 +325,23 @@ Respond with ONLY valid JSON, nothing else:
 {{"correctness": <int 1-5>, "faithfulness": <int 1-5>, "reason": "<one sentence>"}}"""
 
 
-def _build_judge_context(tool_calls: list[dict], max_chars: int = 2000) -> str:
-    """Concatenate and truncate retrieved context from tool call outputs."""
-    if not tool_calls:
+def _build_judge_context(answer: dict, max_chars: int = 2000) -> str:
+    """Build context string from either retrieved_contexts or tool_call outputs."""
+    parts: list[str] = []
+    # Prefer explicit retrieved_contexts list (naive/mix/agentic citation events)
+    retrieved = answer.get("retrieved_contexts", [])
+    if retrieved:
+        for i, chunk in enumerate(retrieved[:8], 1):
+            parts.append(f"[Chunk {i}] {str(chunk)[:500]}")
+    else:
+        # Fallback: tool_call output fields (legacy format)
+        for i, tc in enumerate(answer.get("tool_calls", [])[:6], 1):
+            out = str(tc.get("output", ""))[:500]
+            if out:
+                parts.append(f"[Tool {i}] {out}")
+    if not parts:
         return "(No context retrieved)"
-    parts = []
-    for i, tc in enumerate(tool_calls, 1):
-        out = str(tc.get("output", ""))[:600]
-        if out:
-            parts.append(f"[Tool {i}] {out}")
-    combined = "\n\n".join(parts)
-    return combined[:max_chars]
+    return "\n\n".join(parts)[:max_chars]
 
 
 def _judge_one(
@@ -335,7 +446,7 @@ def run_llm_judge(
         pred = str(a.get("generated_answer", ""))
         gold = str(q.get("gold_answer", ""))
         question_text = str(q.get("question", ""))
-        context = _build_judge_context(a.get("tool_calls", []))
+        context = _build_judge_context(a)
 
         if aid in cache:
             result = cache[aid]
@@ -416,33 +527,46 @@ def _run_official_eval(
 def main(
     questions_path: str,
     naive_path: str,
-    full_path: str,
+    mix_path: str,
+    agentic_path: str,
     official_eval_dir: str | None = None,
     intersection: bool = False,
     llm_judge: bool = False,
     judge_model: str | None = None,
+    limit: int | None = None,
 ) -> None:
-    print("\n=== GraphRAG-Bench Evaluation ===\n")
+    print("\n=== GraphRAG-Bench Evaluation (naive vs mix vs agentic) ===\n")
 
     questions = load_json(questions_path)
-    naive_answers = load_json(naive_path) if Path(naive_path).exists() else []
-    full_answers = load_json(full_path) if Path(full_path).exists() else []
+    if limit:
+        questions = questions[:limit]
+        print(f"[--limit] Evaluating first {limit} questions only.")
+    naive_answers   = load_json(naive_path)   if Path(naive_path).exists()   else []
+    mix_answers     = load_json(mix_path)     if Path(mix_path).exists()     else []
+    agentic_answers = load_json(agentic_path) if Path(agentic_path).exists() else []
 
-    print(f"Questions:     {len(questions)}")
-    print(f"Naive answers: {len(naive_answers)}")
-    print(f"Full answers:  {len(full_answers)}")
+    print(f"Questions       : {len(questions)}")
+    print(f"Naive answers   : {len(naive_answers)}")
+    print(f"Mix answers     : {len(mix_answers)}")
+    print(f"Agentic answers : {len(agentic_answers)}")
 
-    if intersection and naive_answers and full_answers:
-        questions = intersect_questions(questions, naive_answers, full_answers)
-        print(f"Intersection:  {len(questions)} (questions answered in both)")
+    if intersection:
+        active = [a for a in [naive_answers, mix_answers, agentic_answers] if a]
+        if len(active) > 1:
+            questions = intersect_questions(questions, *active)
+            print(f"Intersection    : {len(questions)} (questions answered in ALL provided sets)")
 
     results: dict = {}
 
-    SCALAR_METRICS = ["rouge_l", "f1_token", "exact_match",
-                      "avg_tool_calls", "tool_success_rate",
-                      "avg_latency_ms", "avg_tokens", "empty_answer_rate"]
+    SCALAR_METRICS = [
+        "rouge_l", "f1_token", "exact_match",
+        "context_recall", "context_precision",
+        "avg_tool_calls", "tool_success_rate",
+        "avg_latency_ms", "avg_tokens", "empty_answer_rate",
+    ]
 
-    def _print_metrics(metrics: dict) -> None:
+    def _print_metrics(label: str, metrics: dict) -> None:
+        print(f"\n--- {label} ---")
         for k in ["n", "answered"] + SCALAR_METRICS:
             if k in metrics:
                 print(f"  {k}: {metrics[k]}")
@@ -450,75 +574,79 @@ def main(
         if by_type:
             print("  by_type:")
             for t, tv in by_type.items():
-                print(f"    [{t}] n={tv['n']} answered={tv['answered']}"
-                      f"  rouge_l={tv['rouge_l']}  f1={tv['f1_token']}  em={tv['exact_match']}")
+                print(f"    [{t}] n={tv['n']} ans={tv['answered']}"
+                      f"  rouge={tv['rouge_l']}  f1={tv['f1_token']}  em={tv['exact_match']}"
+                      f"  recall={tv['context_recall']}  prec={tv['context_precision']}")
 
-    if naive_answers:
-        print("\n--- Naive RAG (vector-only) ---")
-        naive_metrics = evaluate_answers(questions, naive_answers)
-        results["naive"] = naive_metrics
-        _print_metrics(naive_metrics)
+    strategies = [
+        ("naive",   naive_answers,   "Naive RAG (vector-only, COURSE_GRAPHRAG_NAIVE)"),
+        ("mix",     mix_answers,     "Mix RAG (vector+KG, COURSE_GRAPHRAG_FULL)"),
+        ("agentic", agentic_answers, "Agentic ReAct (mix+decompose, COURSE_GRAPHRAG_FULL)"),
+    ]
 
-    if full_answers:
-        print("\n--- Full LightRAG (KG+vector) ---")
-        full_metrics = evaluate_answers(questions, full_answers)
-        results["full"] = full_metrics
-        _print_metrics(full_metrics)
+    for label, ans_list, title in strategies:
+        if not ans_list:
+            continue
+        metrics = evaluate_answers(questions, ans_list)
+        results[label] = metrics
+        _print_metrics(title, metrics)
 
-    # Delta comparison (scalar metrics only)
-    if naive_answers and full_answers:
-        print("\n--- Delta (Full - Naive) ---")
-        for metric in SCALAR_METRICS:
-            n = results["full"].get(metric, 0)
-            v = results["naive"].get(metric, 0)
-            if isinstance(n, (int, float)) and isinstance(v, (int, float)):
-                delta = n - v
-                sign = "+" if delta >= 0 else ""
-                print(f"  {metric}: {sign}{delta:.4f}")
-        # per-type delta
-        naive_by = results["naive"].get("by_type", {})
-        full_by = results["full"].get("by_type", {})
-        if naive_by and full_by:
-            print("  by_type rouge_l delta:")
-            for t in naive_by:
-                if t in full_by:
-                    d = full_by[t]["rouge_l"] - naive_by[t]["rouge_l"]
-                    sign = "+" if d >= 0 else ""
-                    print(f"    [{t}]: {sign}{d:.4f}")
+    # Delta comparison table: mix-naive, agentic-naive
+    if results:
+        baselines = list(results.keys())
+        if len(baselines) >= 2:
+            print("\n--- Delta vs Naive ---")
+            base = results.get("naive", {})
+            for label in ["mix", "agentic"]:
+                if label not in results:
+                    continue
+                comp = results[label]
+                print(f"  [{label} - naive]")
+                for metric in SCALAR_METRICS:
+                    bv = base.get(metric, 0)
+                    cv = comp.get(metric, 0)
+                    if isinstance(bv, (int, float)) and isinstance(cv, (int, float)):
+                        d = cv - bv
+                        print(f"    {metric}: {'+' if d >= 0 else ''}{d:.4f}")
 
-    # LLM-as-judge
+    # LLM-as-judge (correctness + faithfulness + context_precision)
     if llm_judge:
         _judge_model = judge_model or os.getenv("LLM_JUDGE_MODEL") or os.getenv("LLM_MODEL", "gpt-4o-mini")
         print(f"\n--- LLM-as-Judge (model: {_judge_model}) ---")
-        for label, ans_list in [("naive", naive_answers), ("full", full_answers)]:
+        for label, ans_list, _ in strategies:
             if not ans_list:
                 continue
             print(f"  [{label}]")
-            judge_metrics = run_llm_judge(
-                ans_list, questions, label, _judge_model
-            )
+            judge_metrics = run_llm_judge(ans_list, questions, label, _judge_model)
             results.setdefault(label, {})["llm_judge"] = judge_metrics
             for k, v in judge_metrics.items():
                 if k != "cache":
                     print(f"    {k}: {v}")
         # Delta for judge metrics
-        if naive_answers and full_answers:
-            nj = results.get("naive", {}).get("llm_judge", {})
-            fj = results.get("full", {}).get("llm_judge", {})
-            print("  [judge delta (Full - Naive)]")
-            for m in ["avg_correctness_1_5", "avg_faithfulness_1_5"]:
-                nv, fv = nj.get(m, 0), fj.get(m, 0)
-                if isinstance(nv, (int, float)) and isinstance(fv, (int, float)):
-                    d = fv - nv
-                    print(f"    {m}: {'+' if d >= 0 else ''}{d:.3f}")
+        if "naive" in results and "llm_judge" in results["naive"]:
+            nj = results["naive"]["llm_judge"]
+            print("  [judge delta vs naive]")
+            for label in ["mix", "agentic"]:
+                if label not in results or "llm_judge" not in results[label]:
+                    continue
+                lj = results[label]["llm_judge"]
+                print(f"    [{label}]")
+                for m in ["avg_correctness_1_5", "avg_faithfulness_1_5"]:
+                    nv, lv = nj.get(m, 0), lj.get(m, 0)
+                    if isinstance(nv, (int, float)) and isinstance(lv, (int, float)):
+                        d = lv - nv
+                        print(f"      {m}: {'+' if d >= 0 else ''}{d:.3f}")
 
     # Official eval
     if official_eval_dir:
         print("\n--- Official GraphRAG-Benchmark Eval ---")
-        for label, answers_path in [("naive", naive_path), ("full", full_path)]:
+        path_map = {"naive": naive_path, "mix": mix_path, "agentic": agentic_path}
+        for label, ans_path in path_map.items():
+            if not Path(ans_path).exists():
+                continue
             official = _run_official_eval(
                 Path(official_eval_dir),
-                Path(answers_path),
+                Path(ans_path),
                 Path(questions_path),
                 label,
             )
@@ -533,20 +661,32 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate GraphRAG-Bench answers")
+    parser = argparse.ArgumentParser(
+        description="Evaluate GraphRAG-Bench: naive vs mix vs agentic",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Collect answers first:
+  Naive  : python -m tests.eval.collect_answers_naive   --questions tests/eval/data/graphrag_bench_questions.json --output tests/eval/results/graphrag_bench_naive_answers.json   --course-id c0000001-0000-4000-8000-000000000000
+  Mix    : python -m tests.eval.collect_answers_mix     --questions tests/eval/data/graphrag_bench_questions.json --output tests/eval/results/graphrag_bench_mix_answers.json     --course-id c0000002-0000-4000-8000-000000000000
+  Agentic: python -m tests.eval.collect_answers_agentic --questions tests/eval/data/graphrag_bench_questions.json --output tests/eval/results/graphrag_bench_agentic_answers.json --course-id c0000002-0000-4000-8000-000000000000
+""",
+    )
     parser.add_argument("--questions", default="tests/eval/data/graphrag_bench_questions.json")
-    parser.add_argument("--naive", default="tests/eval/results/graphrag_bench_naive_answers.json")
-    parser.add_argument("--full", default="tests/eval/results/graphrag_bench_full_answers.json")
+    parser.add_argument("--naive",    default="tests/eval/results/graphrag_bench_naive_answers.json")
+    parser.add_argument("--mix",      default="tests/eval/results/graphrag_bench_mix_answers.json")
+    parser.add_argument("--agentic",  default="tests/eval/results/graphrag_bench_agentic_answers.json")
     parser.add_argument("--official-eval-dir", default=None, help="Path to GraphRAG-Benchmark repo")
     parser.add_argument("--intersection", action="store_true",
-                        help="Only evaluate questions answered in BOTH naive and full files")
+                        help="Only evaluate questions answered in ALL provided files")
     parser.add_argument("--llm-judge", action="store_true",
                         help="Run LLM-as-judge scoring (correctness + faithfulness 1-5)")
     parser.add_argument("--judge-model", default=None,
                         help="Model for LLM judge (default: $LLM_JUDGE_MODEL env var)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Only evaluate the first N questions (for quick sanity checks)")
     args = parser.parse_args()
     main(
-        args.questions, args.naive, args.full,
+        args.questions, args.naive, args.mix, args.agentic,
         args.official_eval_dir, args.intersection,
-        args.llm_judge, args.judge_model,
+        args.llm_judge, args.judge_model, args.limit,
     )

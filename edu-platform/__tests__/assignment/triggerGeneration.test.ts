@@ -44,6 +44,11 @@ vi.mock("@/lib/redis", () => ({
   getRedis: getRedisMock,
 }));
 
+vi.mock("@/lib/services/notificationService", () => ({
+  createNotification: vi.fn().mockResolvedValue(undefined),
+  createBulkNotifications: vi.fn().mockResolvedValue(undefined),
+}));
+
 const ASSIGNMENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const COURSE_ID = "11111111-2222-3333-4444-555555555555";
 const TEACHER_ID = "teacher-uuid-001";

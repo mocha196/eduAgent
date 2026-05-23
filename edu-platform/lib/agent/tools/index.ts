@@ -4,19 +4,21 @@
 
 export { toolRegistry } from "./registry";
 import { toolRegistry } from "./registry";
-import { knowledgeQueryTool, /* generateQuizTool, */ buildMindmapTool } from "./rag";
+import { knowledgeQueryTool /* generateQuizTool */ } from "./rag";
 import { hintGeneratorTool, scoreEssayTool, evaluateCodeTool } from "./eval";
 import { rememberFactTool, searchMemoryTool } from "./memory";
 import { webSearchTool, wikipediaSearchTool } from "./search";
 import { listSkillsTool, viewSkillTool } from "./skills";
 import { parseDocumentTool } from "./ocr";
 import { analyzeImageTool } from "./vision";
-import { getCourseInfoTool, listCourseMaterialsTool, getMaterialSummaryTool } from "./course";
+import { getCourseInfoTool, listCourseMaterialsTool, getMaterialSummaryTool, viewCurrentMaterialPageTool } from "./course";
+import { execSkillScriptTool } from "./exec";
+import { runScriptTool } from "./runscript";
+import { readAttachmentTool } from "./read-attachment";
 
 // RAG tools
 toolRegistry.register(knowledgeQueryTool);
 // toolRegistry.register(generateQuizTool);
-toolRegistry.register(buildMindmapTool);
 
 // Eval tools
 toolRegistry.register(hintGeneratorTool);
@@ -45,12 +47,22 @@ toolRegistry.register(analyzeImageTool);
 toolRegistry.register(getCourseInfoTool);
 toolRegistry.register(listCourseMaterialsTool);
 toolRegistry.register(getMaterialSummaryTool);
+toolRegistry.register(viewCurrentMaterialPageTool);
+
+// Anthropic skills mechanism — script execution proxy (delegates to rag-service)
+toolRegistry.register(execSkillScriptTool);
+
+// Arbitrary code execution — requires explicit user approval before running
+toolRegistry.register(runScriptTool);
+
+// Read text/code attachment content by ID (up to 32 KB)
+toolRegistry.register(readAttachmentTool);
 
 // delegation tool — imported after other tools to avoid circular import issue
 import { delegateTaskTool } from "./delegation";
 toolRegistry.register(delegateTaskTool);
 
-export { knowledgeQueryTool, /* generateQuizTool, */ buildMindmapTool };
+export { knowledgeQueryTool /* generateQuizTool */ };
 export { hintGeneratorTool, scoreEssayTool, evaluateCodeTool };
 export { rememberFactTool, searchMemoryTool };
 export { webSearchTool, wikipediaSearchTool };
@@ -59,3 +71,4 @@ export { parseDocumentTool };
 export { delegateTaskTool };
 export { analyzeImageTool };
 export { getCourseInfoTool, listCourseMaterialsTool, getMaterialSummaryTool };
+export { execSkillScriptTool };

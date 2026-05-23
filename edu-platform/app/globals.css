@@ -5,7 +5,7 @@
 @layer base {
   :root {
     /* Azure Campus — Light Mode */
-    --background: oklch(0.985 0.010 250);
+    --background: oklch(1 0 0);
     --foreground: oklch(0.220 0.030 255);
     --card: oklch(0.995 0.005 250);
     --card-foreground: oklch(0.220 0.030 255);

@@ -27,6 +27,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       trim_history_to?: number;
       eval_mode?: boolean;
       attachments?: { id: string; key: string; presigned_url: string; mime_type: string; name: string }[];
+      current_page_image?: { presigned_url: string; mime_type: string; name: string };
     };
     const message = typeof body.message === "string" ? body.message.trim() : "";
     if (!message && (!Array.isArray(body.attachments) || body.attachments.length === 0)) {
@@ -72,6 +73,20 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       assertUuid(body.session_id, "session_id");
       sessionId = body.session_id.trim();
     }
+    // Validate optional implicit page image (must be an image/* mime type).
+    const rawPageImg = body.current_page_image;
+    const currentPageImage =
+      rawPageImg &&
+      typeof rawPageImg.presigned_url === "string" &&
+      rawPageImg.presigned_url.startsWith("http") &&
+      typeof rawPageImg.mime_type === "string" &&
+      rawPageImg.mime_type.startsWith("image/")
+        ? {
+            presigned_url: rawPageImg.presigned_url,
+            mime_type: rawPageImg.mime_type,
+            name: typeof rawPageImg.name === "string" ? rawPageImg.name : "page.png",
+          }
+        : undefined;
     return await courseChatSseResponse({
       courseId,
       platformStudentId: auth.sub,
@@ -86,6 +101,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       trimHistoryTo,
       sessionId,
       evalMode: body.eval_mode === true,
+      currentPageImage,
     });
   } catch (e) {
     if (e instanceof ApiError) return jsonError(e);

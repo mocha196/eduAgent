@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     return jsonOk(result);
   } catch (e) {
     if (e instanceof ApiError) return jsonError(e);
-    return jsonError(new ApiError(500, "INTERNAL_ERROR", "Internal server error"));
+    console.error("[suggest-feedback]", e);
+    return jsonError(new ApiError(500, "INTERNAL_ERROR", "Feedback suggestion failed"));
   }
 }

@@ -102,8 +102,25 @@ export interface CompleteQuestionBody {
   questionStem: string;
   /** Optional answer hint from the teacher. */
   answerHint?: string;
+  /** For MCQ: teacher-supplied option texts [A, B, C, D]. Empty strings mean AI fills that option. */
+  prefilledOptions?: string[];
+  /** For MCQ: correct answer letter(s) selected by teacher, e.g. "A" or "A;C". For fill_blank/short_answer: expected answer text. */
+  prefilledAnswer?: string;
   /** Point value for the new question (default 5). */
   score?: number;
+}
+
+export interface SuggestQuestionBody {
+  /** Which field is requesting a ghost-text suggestion. */
+  field: "stem" | "explanation";
+  qType: QuestionType;
+  entityName: string;
+  /** Text the teacher has typed so far (the prefix to continue). */
+  prefix: string;
+  /** Current stem (for explanation field). */
+  stem?: string;
+  /** Current answer (for explanation field). */
+  answer?: string;
 }
 
 // ── Response DTOs ───────────────────────────────────────────────────────────
@@ -117,6 +134,9 @@ export interface AssignmentSummaryDto {
   deadline: string | null;
   createdAt: string;
   errorMessage: string | null;
+  generationPhase?: string | null;
+  /** Student-only: submission status for the current student. null = not submitted yet. */
+  mySubmissionStatus?: string | null;
 }
 
 export interface AssignmentDetailDto extends AssignmentSummaryDto {

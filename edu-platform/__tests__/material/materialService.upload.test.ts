@@ -5,6 +5,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { uploadMaterialStream } from "@/lib/services/materialService";
 
 const {
   createMaterialMock,
@@ -51,6 +52,11 @@ vi.mock("@/lib/queue/ragTask", () => ({
   enqueueRagTask: enqueueRagTaskMock,
 }));
 
+vi.mock("@/lib/services/notificationService", () => ({
+  createNotification: vi.fn().mockResolvedValue(undefined),
+  createBulkNotifications: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe("uploadMaterialStream", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -67,8 +73,6 @@ describe("uploadMaterialStream", () => {
   });
 
   it("preserves skip_kg on initial office convert_preview task", async () => {
-    const { uploadMaterialStream } = await import("@/lib/services/materialService");
-
     await uploadMaterialStream({
       teacherUserId: "teacher-1",
       role: UserRole.TEACHER,

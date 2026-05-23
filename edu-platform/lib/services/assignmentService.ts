@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { getRedis } from "@/lib/redis";
 import { ApiError } from "@/lib/http/api-error";
 import { assertTeacherOfCourse, assertUuid, getCourseIfMember } from "@/lib/course-access";
+import { createNotification, createBulkNotifications } from "@/lib/services/notificationService";
 
 import { AssignmentStatus, UserRole } from "@prisma/client";
 import type {
@@ -31,6 +32,7 @@ function toSummary(a: {
   deadline: Date | null;
   createdAt: Date;
   errorMessage: string | null;
+  generationPhase?: string | null;
 }): AssignmentSummaryDto {
   const qs = Array.isArray(a.questions) ? (a.questions as QuestionItem[]) : null;
   const qr = a.qualityReport ? (a.qualityReport as QualityReport) : null;
@@ -43,6 +45,7 @@ function toSummary(a: {
     deadline: a.deadline?.toISOString() ?? null,
     createdAt: a.createdAt.toISOString(),
     errorMessage: a.errorMessage,
+    generationPhase: a.generationPhase ?? null,
   };
 }
 
@@ -94,6 +97,7 @@ export async function listAssignments(
       deadline: true,
       createdAt: true,
       errorMessage: true,
+      generationPhase: true,
     },
   });
   return rows.map(toSummary);
@@ -147,6 +151,7 @@ export async function triggerAssignmentGeneration(
       deadline: true,
       createdAt: true,
       errorMessage: true,
+      generationPhase: true,
     },
   });
 
@@ -229,6 +234,38 @@ export async function publishAssignment(
       publishedAt: new Date(),
     },
   });
+
+  // Best-effort: notify teacher + enrolled students asynchronously.
+  void (async () => {
+    try {
+      const course = await prisma.course.findFirst({
+        where: { id: courseId },
+        select: { name: true, enrollments: { select: { studentId: true } } },
+      });
+      if (!course) return;
+      const studentIds = course.enrollments.map((e) => e.studentId);
+      const meta = { courseId, assignmentId, courseName: course.name };
+      void createNotification({
+        userId: teacherId,
+        type: "ASSIGNMENT_PUBLISHED",
+        title: "作业已发布",
+        body: `《${updated.title}》已成功发布。`,
+        metadata: meta,
+      });
+      if (studentIds.length > 0) {
+        void createBulkNotifications({
+          userIds: studentIds,
+          type: "ASSIGNMENT_PUBLISHED",
+          title: "新作业已发布",
+          body: `《${course.name}》有新作业《${updated.title}》，请尽快完成。`,
+          metadata: meta,
+        });
+      }
+    } catch {
+      // Non-fatal
+    }
+  })();
+
   return toDetail(updated);
 }
 
@@ -284,6 +321,27 @@ export async function regenerateQuestion(
   return newQuestion;
 }
 
+/**
+ * Merges teacher-supplied hints into a single answer_hint string for the RAG service.
+ * Pre-filled options and correct answer are appended so the LLM can use them
+ * when it only needs to generate explanation (not re-derive the answer).
+ */
+function buildAnswerHint(body: Pick<CompleteQuestionBody, "answerHint" | "prefilledOptions" | "prefilledAnswer">): string {
+  const parts: string[] = [];
+  if (body.answerHint?.trim()) parts.push(body.answerHint.trim());
+  const LABELS = ["A", "B", "C", "D"];
+  if (body.prefilledOptions?.some((o) => o.trim())) {
+    const optStr = body.prefilledOptions
+      .map((o, i) => `${LABELS[i] ?? i + 1}. ${o}`)
+      .join("  ");
+    parts.push(`选项：${optStr}`);
+  }
+  if (body.prefilledAnswer?.trim()) {
+    parts.push(`正确答案：${body.prefilledAnswer.trim()}`);
+  }
+  return parts.join("\n");
+}
+
 /** Preview-only: call AI to complete a teacher question without writing to DB. */
 export async function previewTeacherQuestion(
   teacherId: string,
@@ -308,7 +366,7 @@ export async function previewTeacherQuestion(
       course_id: courseId,
       entity_names: body.entityNames,
       question_stem: body.questionStem,
-      answer_hint: body.answerHint ?? "",
+      answer_hint: buildAnswerHint(body),
       q_type: body.qType,
       objective: body.objective,
       q_id: 0, // temporary, not saved
@@ -350,7 +408,7 @@ export async function completeTeacherQuestion(
       course_id: courseId,
       entity_names: body.entityNames,
       question_stem: body.questionStem,
-      answer_hint: body.answerHint ?? "",
+      answer_hint: buildAnswerHint(body),
       q_type: body.qType,
       objective: body.objective,
       q_id: newQId,
@@ -398,6 +456,14 @@ export async function listPublishedAssignments(
       errorMessage: true,
     },
   });
+
+  // Fetch this student's submission statuses in one query
+  const submissions = await prisma.assignmentSubmission.findMany({
+    where: { assignmentId: { in: rows.map((r) => r.id) }, studentId },
+    select: { assignmentId: true, status: true },
+  });
+  const submissionStatusMap = new Map(submissions.map((s) => [s.assignmentId, s.status as string]));
+
   return rows.map((a) => ({
     id: a.id,
     title: a.title,
@@ -407,6 +473,7 @@ export async function listPublishedAssignments(
     deadline: a.deadline?.toISOString() ?? null,
     createdAt: a.createdAt.toISOString(),
     errorMessage: null,
+    mySubmissionStatus: submissionStatusMap.get(a.id) ?? null,
   }));
 }
 

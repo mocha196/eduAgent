@@ -3,7 +3,7 @@
  * All call the RAG service /rag/eval endpoint.
  */
 
-import type { Tool, TurnContext } from "../types";
+import type { Tool } from "../types";
 
 async function evalPost(
   evalType: string,

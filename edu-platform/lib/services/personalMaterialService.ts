@@ -22,6 +22,9 @@ import {
 } from "@/lib/material-office";
 import { enqueueRagTask, type RagQueueTask } from "@/lib/queue/ragTask";
 import { getRedis } from "@/lib/redis";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "personalMaterialService" });
 import type {
   PersonalMaterialCreatedDto,
   PersonalMaterialDetailDto,
@@ -39,13 +42,7 @@ async function enqueueWithRetry(task: RagQueueTask, maxAttempts = 5): Promise<vo
     } catch (e) {
       last = e;
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("[personalMaterialService] enqueue attempt failed", {
-        attempt: i + 1,
-        maxAttempts,
-        operation: task.operation,
-        material_id: task.material_id,
-        error: msg,
-      });
+      log.error({ err: msg, attempt: i + 1, maxAttempts, operation: task.operation, material_id: task.material_id }, "Enqueue attempt failed");
       await new Promise((r) => setTimeout(r, 200 * (i + 1)));
     }
   }

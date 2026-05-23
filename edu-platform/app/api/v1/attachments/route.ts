@@ -27,6 +27,18 @@ const ALLOWED_MIME_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]);
 
+/** Normalize code-file MIME types that vary across browsers to text/plain. */
+const MIME_NORMALIZE: Record<string, string> = {
+  "text/x-python": "text/plain",
+  "application/x-python": "text/plain",
+  "application/x-python-code": "text/plain",
+  "text/x-javascript": "text/plain",
+  "application/javascript": "text/plain",
+  "text/javascript": "text/plain",
+  "text/typescript": "text/plain",
+  "text/x-typescript": "text/plain",
+};
+
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
 const PRESIGN_TTL_SECONDS = 3600; // 1 hour
 
@@ -57,7 +69,8 @@ export async function POST(req: NextRequest) {
       throw new ApiError(413, "FILE_TOO_LARGE", `File exceeds 20 MB limit`);
     }
 
-    const mimeType = file.type || "application/octet-stream";
+    const rawMime = file.type || "application/octet-stream";
+    const mimeType = MIME_NORMALIZE[rawMime] ?? rawMime;
     if (!ALLOWED_MIME_TYPES.has(mimeType)) {
       throw new ApiError(415, "UNSUPPORTED_MEDIA_TYPE", `File type '${mimeType}' is not allowed`);
     }

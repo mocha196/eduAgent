@@ -10,6 +10,8 @@ const skills: SkillEntry[] = [
     version: "1.0.0",
     body: "先问后答",
     alwaysInject: true,
+    subFiles: {},
+    source: "built-in",
   },
   {
     name: "Assignment",
@@ -17,6 +19,8 @@ const skills: SkillEntry[] = [
     version: "1.0.0",
     body: "分解任务",
     alwaysInject: false,
+    subFiles: {},
+    source: "built-in",
   },
 ];
 
@@ -40,15 +44,15 @@ describe("PromptBuilder", () => {
     );
 
     // then
-    expect(prompt).toContain("当前会话：课程知识库模式");
+    expect(prompt).toContain("Current Session: Course Knowledge Base Mode");
     expect(prompt).toContain("教学策略：Socratic");
     expect(prompt).toContain("<available_skills>");
     expect(prompt).toContain("Assignment");
     expect(prompt).toContain("学习者画像");
     expect(prompt).toContain("姓名：小明");
     expect(prompt).toContain("已知掌握情况");
-    expect(prompt).toContain("安全准则");
-    expect(prompt).toContain("工具使用指南");
+    expect(prompt).toContain("Safety Guidelines");
+    expect(prompt).toContain("Tool Usage Guidelines");
   });
 
   it("业务规则：问答中心模式下应提示跨课程检索策略", () => {
@@ -70,7 +74,7 @@ describe("PromptBuilder", () => {
     );
 
     // then
-    expect(prompt).toContain("当前会话：问答中心（跨课程模式）");
+    expect(prompt).toContain("Current Session: Q&A Center");
     expect(prompt).not.toContain("已知掌握情况（近期记忆）");
     expect(prompt).not.toContain("姓名：");
   });

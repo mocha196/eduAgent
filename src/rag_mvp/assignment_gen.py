@@ -1,4 +1,4 @@
-"""Agent-driven assignment generation pipeline.
+﻿"""Agent-driven assignment generation pipeline.
 
 Pipeline:
     1. Extract params (count, type/obj/difficulty weights, topic_hint) from structured_params or NLP defaults
@@ -26,6 +26,7 @@ from loguru import logger
 from .config import settings
 from .engine import course_aquery_data
 from .llm import llm_chat_model_func
+from .material_processor import _notify_nextjs
 from .tracing import create_assignment_trace, end_span, flush, span
 from .worker_async_loop import is_worker_async_loop_started, run_worker_coroutine
 from .question_gen import (
@@ -103,6 +104,36 @@ _PLANNER_SYSTEM = """\
 7. 忽略名称疑似文档结构/元信息的实体（如"学习目标"、"课程大纲"等）
 """
 
+_NLP_PARAM_EXTRACT_SYSTEM = """\
+你是作业生成参数提取器。从教师自然语言需求中提取结构化参数。
+
+【字段说明】
+- count（整数或 null）：题目总数。支持中文数字（一/二/三…/十/二十…）及口语表达；口语“几道”不算明确。
+- knowledgePoints（字符串列表或 null）：需求里明确提到的知识点/概念，如 ["TCP协议", "三次握手"]。
+- lessonNames（字符串列表或 null）：需求里提到的章节/课时名称，如 ["第3章 运输层"]。
+- difficultyWeights（对象或 null）：键为 easy/medium/hard，值为相对权重正数（不必归一化）。
+  - 仅当需求明确提到难度偏好时填写：“偏难” → {"easy":1,"medium":2,"hard":4}；“简单为主” → {"easy":4,"medium":2,"hard":1}。
+- typeWeights（对象或 null）：键为 single_choice/multi_choice/fill_blank/short_answer，值为相对权重正数。
+  - 仅当需求明确提到题型偏好时填写：“多出选择题” → {"single_choice":3,"multi_choice":1,"fill_blank":1,"short_answer":1}。
+- objectiveWeights（对象或 null）：键为 knowledge/comprehension/application/synthesis/innovation，值为相对权重正数。
+  - 仅当需求明确提到认知层次偏好时填写：“侧重应用” → {"knowledge":1,"comprehension":1,"application":3,"synthesis":1,"innovation":0}。
+
+【规则】
+1. 只返回严格 JSON，不含任何解释文字或 markdown 代码块标记。
+2. 提取不到的字段一律填 null，不要猜测或臆造。
+3. 权重值只需体现比例关系，不必归一化，Python 侧会自动归一化。
+4. 输出格式固定为以下结构（所有 6 个键必须存在）：
+{"count": null, "knowledgePoints": null, "lessonNames": null, "difficultyWeights": null, "typeWeights": null, "objectiveWeights": null}
+"""
+
+_NLP_PARAM_EXTRACT_PROMPT_TMPL = """\
+教师需求如下，请提取结构化参数：
+
+{teacher_request}
+
+只输出 JSON，所有键必须存在，提取不到的字段填 null。
+"""
+
 _PLANNER_PROMPT_TMPL = """\
 教师需求：{teacher_request}
 
@@ -122,6 +153,96 @@ _PLANNER_PROMPT_TMPL = """\
   ]
 }}
 """
+
+
+def _safe_weight_dict(
+    raw: Any,
+    required_keys: list[str],
+) -> "dict[str, float] | None":
+    """Parse and validate a weight dict from LLM output.
+
+    Returns None if *raw* is not a dict or contains no usable positive values.
+    Missing keys are filled with 0.0 so the caller can safely normalise.
+    """
+    if not isinstance(raw, dict):
+        return None
+    result: dict[str, float] = {}
+    for k in required_keys:
+        v = raw.get(k)
+        if v is not None:
+            try:
+                result[k] = max(0.0, float(v))
+            except (TypeError, ValueError):
+                pass
+    if not result:
+        return None
+    for k in required_keys:
+        result.setdefault(k, 0.0)
+    return result
+
+
+async def _extract_nlp_params(teacher_request: str) -> "dict[str, Any]":
+    """Extract all generation params from a free-form teacher request via LLM.
+
+    Returns a dict with the same keys as StructuredGenerationParams (minus
+    lessonIds which cannot be inferred from text).  Each field is either a
+    parsed value or None, meaning "use default".
+    Never raises — falls back gracefully on any LLM/parse failure.
+    """
+    prompt = _NLP_PARAM_EXTRACT_PROMPT_TMPL.format(
+        teacher_request=teacher_request.strip()
+    )
+    payload: dict = {}
+    try:
+        raw_llm = await llm_chat_model_func(prompt, system_prompt=_NLP_PARAM_EXTRACT_SYSTEM)
+        clean = re.sub(r"```(?:json)?", "", raw_llm).strip()
+        m = re.search(r"\{.*\}", clean, re.DOTALL)
+        if not m:
+            raise ValueError("no JSON object in LLM response")
+        payload = json.loads(m.group())
+    except Exception as exc:
+        logger.warning(
+            "_extract_nlp_params: LLM/parse failed ({}); regex fallback for count",
+            exc,
+        )
+
+    # ── count ─────────────────────────────────────────────────────────
+    count: "int | None" = None
+    try:
+        raw_count = payload.get("count")
+        if raw_count is not None:
+            count = max(1, min(50, int(raw_count)))
+    except (TypeError, ValueError):
+        pass
+    if count is None:
+        # Regex fallback: handles Arabic digits when LLM fails entirely
+        cm = re.search(r"(\d+)\s*[道题条]", teacher_request)
+        if cm:
+            count = max(1, min(50, int(cm.group(1))))
+
+    # ── string-list helper ────────────────────────────────────────────
+    def _str_list(val: Any) -> "list[str] | None":
+        if not isinstance(val, list):
+            return None
+        items = [str(x).strip() for x in val if str(x).strip()]
+        return items if items else None
+
+    return {
+        "count":             count,
+        "knowledgePoints":   _str_list(payload.get("knowledgePoints")),
+        "lessonNames":       _str_list(payload.get("lessonNames")),
+        "difficultyWeights": _safe_weight_dict(
+            payload.get("difficultyWeights"), ["easy", "medium", "hard"]
+        ),
+        "typeWeights":       _safe_weight_dict(
+            payload.get("typeWeights"),
+            ["single_choice", "multi_choice", "fill_blank", "short_answer"],
+        ),
+        "objectiveWeights":  _safe_weight_dict(
+            payload.get("objectiveWeights"),
+            ["knowledge", "comprehension", "application", "synthesis", "innovation"],
+        ),
+    }
 
 
 async def _run_planner(
@@ -557,6 +678,18 @@ def _db_update(conn: Any, assignment_id: str, **fields: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_difficulty_hint(text: str) -> str | None:
+    """Extract difficulty level from natural language text (Chinese/English)."""
+    t = text.lower()
+    if any(w in t for w in ["简单", "容易", "基础", "easy", "simple"]):
+        return "easy"
+    if any(w in t for w in ["难", "困难", "复杂", "高难", "综合", "hard", "difficult"]):
+        return "hard"
+    if any(w in t for w in ["中等", "适中", "普通", "medium"]):
+        return "medium"
+    return None
+
+
 async def regenerate_one_question(
     course_id: str,
     entity_names: list[str],
@@ -573,6 +706,17 @@ async def regenerate_one_question(
     Called from the edu-agent FastAPI server (async context).
     """
     primary_entity = entity_names[0] if entity_names else ""
+
+    # If the caller provided the default difficulty, try to extract a hint from extra_requirements
+    if difficulty == "medium" and extra_requirements:
+        hint = _parse_difficulty_hint(extra_requirements)
+        if hint:
+            difficulty = hint
+            logger.debug(
+                "regenerate_one_question: difficulty inferred from extra_requirements '{}' → {}",
+                extra_requirements[:60], difficulty,
+            )
+
     # Build query: prefer entity_names, fall back to current_question excerpt or extra_requirements
     query_parts = [p for p in [primary_entity, extra_requirements] if p.strip()]
     if not query_parts and current_question:
@@ -806,6 +950,7 @@ def generate_assignment(
                 )
 
                 # ── Step 1: Extract generation params (structured or NLP defaults) ─
+                _db_update(pipe_conn, assignment_id, generation_phase="param_extract")
                 if structured_params is not None:
                     sp = structured_params
                     count = max(1, min(50, int(sp.get("count", 10))))
@@ -823,15 +968,27 @@ def generate_assignment(
                     topic_parts = lesson_names + kp
                     topic_hint = "、".join(topic_parts[:4]) if topic_parts else ""
                 else:
-                    # NLP path: extract count from request text; use defaults for weights
-                    _cm = re.search(r"(\d+)\s*[道题条]", teacher_request)
-                    count = max(1, min(50, int(_cm.group(1)))) if _cm else 10
-                    tw = DEFAULT_TYPE_WEIGHTS
-                    ow = DEFAULT_OBJECTIVE_WEIGHTS
-                    dw = {"easy": 0.2, "medium": 0.6, "hard": 0.2}
-                    topic_hint = ""
+                    # NLP path: LLM extracts all params; missing fields fall back to defaults
+                    nlp = await _extract_nlp_params(teacher_request)
+                    count = nlp["count"] or 10
+
+                    _tw_raw = nlp["typeWeights"] or DEFAULT_TYPE_WEIGHTS
+                    _tw_total = sum(_tw_raw.values()) or 1.0
+                    tw = {k: v / _tw_total for k, v in _tw_raw.items()}
+
+                    _ow_raw = nlp["objectiveWeights"] or DEFAULT_OBJECTIVE_WEIGHTS
+                    _ow_total = sum(_ow_raw.values()) or 1.0
+                    ow = {k: v / _ow_total for k, v in _ow_raw.items()}
+
+                    _dw_raw = nlp["difficultyWeights"] or {"easy": 0.2, "medium": 0.6, "hard": 0.2}
+                    _dw_total = sum(_dw_raw.values()) or 1.0
+                    dw = {k: v / _dw_total for k, v in _dw_raw.items()}
+
+                    topic_parts = (nlp["lessonNames"] or []) + (nlp["knowledgePoints"] or [])
+                    topic_hint = "、".join(topic_parts[:4]) if topic_parts else ""
 
                 # ── Step 2: Retrieve entity candidates from course RAG ─────────
+                _db_update(pipe_conn, assignment_id, generation_phase="entity_retrieval")
                 candidates = await _retrieve_candidates(course_id, topic_hint, count)
 
                 if not candidates:
@@ -848,6 +1005,7 @@ def generate_assignment(
                 slots = _make_slots(obj_fmt_pairs, difficulty_slots)
 
                 # ── Step 4: Planner — assign entities + focus per slot ─────────
+                _db_update(pipe_conn, assignment_id, generation_phase="blueprint_gen")
                 planner_candidates = candidates[:min(len(candidates), max(count * 2, 10), 40)]
                 _sp_planner = span(_trace, "planner", input={"count": count, "topic_hint": topic_hint})
                 blueprint = await _run_planner(teacher_request, planner_candidates, slots, dw)
@@ -890,6 +1048,7 @@ def generate_assignment(
                 )
 
                 # ── Step 6: Generate questions per blueprint slot ──────────────
+                _db_update(pipe_conn, assignment_id, generation_phase="question_gen")
                 sem = asyncio.Semaphore(settings.llm_max_async)
                 _sp_qgen = span(_trace, "question_generation", input={"count": len(blueprint["questions"])})
 
@@ -954,6 +1113,7 @@ def generate_assignment(
                 quality_report: dict[str, Any] = {}
                 _sp_review = span(_trace, "reviewer", input={"question_count": len(questions)})
                 for _round in range(1, MAX_ROUNDS + 1):
+                    _db_update(pipe_conn, assignment_id, generation_phase="reviewing")
                     quality_report = await _run_reviewer(questions, blueprint)
                     score = float(quality_report.get("overall_score", 0))
                     passed = quality_report.get("passed", False) or score >= PASS_SCORE
@@ -968,6 +1128,7 @@ def generate_assignment(
                             "Score {:.3f} < {:.2f}, running Fixer (round {}/{})",
                             score, PASS_SCORE, _round, MAX_ROUNDS,
                         )
+                        _db_update(pipe_conn, assignment_id, generation_phase="improving")
                         questions = await _run_fixer(questions, blueprint, quality_report, candidates)
                         # Re-number after fix
                         for seq, q in enumerate(questions, 1):
@@ -992,6 +1153,11 @@ def generate_assignment(
                     assignment_id, final_score, len(questions),
                 )
                 flush()
+                _notify_nextjs({
+                    "type": "ASSIGNMENT_GENERATED",
+                    "assignment_id": assignment_id,
+                    "course_id": course_id,
+                })
 
             except Exception as exc:
                 logger.exception(
@@ -1004,6 +1170,11 @@ def generate_assignment(
                         status="FAILED",
                         error_message=str(exc)[:500],
                     )
+                    _notify_nextjs({
+                        "type": "ASSIGNMENT_FAILED",
+                        "assignment_id": assignment_id,
+                        "course_id": course_id,
+                    })
                 except Exception:
                     logger.warning("Could not write FAILED status to DB")
                 raise
@@ -1025,3 +1196,4 @@ def generate_assignment(
             pool.submit(lambda: asyncio.run(_pipeline())).result()
     except RuntimeError:
         asyncio.run(_pipeline())
+

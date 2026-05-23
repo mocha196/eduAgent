@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { changePassword } from "@/lib/services/authService";
 
 const { mockTransaction } = vi.hoisted(() => ({
   mockTransaction: vi.fn(),
@@ -16,7 +17,6 @@ describe("changePassword", () => {
   });
 
   it("rejects when new password equals current without calling DB transaction", async () => {
-    const { changePassword } = await import("@/lib/services/authService");
     await expect(
       changePassword("00000000-0000-4000-8000-000000000001", {
         current_password: "sameValue",

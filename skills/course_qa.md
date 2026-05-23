@@ -3,7 +3,7 @@ name: course_qa
 description: 课程问答入口：检索课程 RAG 知识库直接回答事实类问题，复杂/原理/混淆问题路由至对应教学策略
 version: 1.1.0
 always_inject: false
-allowed_tools: [knowledge_query, get_course_info, list_course_materials, get_material_summary, web_search, wikipedia_search]
+allowed_tools: [knowledge_query, get_course_info, list_course_materials, get_material_summary, view_current_material_page, web_search, wikipedia_search]
 handoffs:
   - target_skill: concept_clarification
     condition: confusion_detected
@@ -25,6 +25,7 @@ handoffs:
 |------|---------|---------|
 | **课外问题** | 与任何已选课程领域无关（天气、闲聊等） | 礼貌拒绝，引导回课程内容 |
 | **当前资料问题** | "这份资料"、"当前资料"、"刚才预览"、"这个视频"、"这个文件" | 若上下文有 `materialId` → 调 `get_material_summary()` 直接回答；否则调 `list_course_materials` 让用户指定 |
+| **当前页面问题** | "这个图"、"图中"、"当前页"、"这里的公式"、"页面上" | 若系统 prompt 提示当前页有截图 → 调 `view_current_material_page()` |
 | **课程结构问题** | "有哪些课节"、"这门课有几章"、"第几课"、"资料列表" | 调 `get_course_info()` 或 `list_course_materials()` |
 | **简单事实** | "X 是什么"、"端口是多少"、定义、参数查询 | RAG 检索 → 直接回答 + 引用 |
 | **概念混淆** | "X 和 Y 有什么区别"、"我以为 X 是 Y"、"这两个一样吗" | handoff → `concept_clarification` |
@@ -38,8 +39,9 @@ handoffs:
 ### 当前资料问题（优先处理）
 
 若系统 prompt 中存在"当前预览资料"块（`## 当前预览资料`），说明用户正在预览某份资料：
-1. 对于"这份资料讲了什么"、"视频内容"、"转录文字"类问题：调用 `get_material_summary()`（省略 material_id 即默认当前资料）。
-2. 对于需要深度语义检索的问题（"这份资料里提到的 X 是什么意思"）：先调 `get_material_summary()` 了解内容，再调 `knowledge_query` 进行精确检索。
+1. 对于"这份资料讲了什么"、"视频内容"、"转录文字"、"文件内容"、"这个文档讲了什么"类问题：先查看系统 prompt 中是否已有**视频/音频摘要**或**文档摘要**；若有则直接根据摘要回答，无需再调工具。若摘要不足，再调用 `get_material_summary()`（省略 material_id 即默认当前资料）获取完整摘要和转录文本。
+2. 对于需要深度语义检索的问题（"这份资料里提到的 X 是什么意思"）：先查看系统 prompt 中的摘要，再调 `knowledge_query` 进行精确检索。若仍需更多细节，再调 `get_material_summary()`。
+3. 对于涉及当前**可见页面**的问题（"这个图"、"当前页"、"图中写的是什么"、"这里的公式"等）：若系统 prompt 提示当前页有截图可查，调用 `view_current_material_page()` 获取视觉描述后再作答。若工具提示无截图可用，建议用户点击截图按钮上传附件。
 
 若上下文中**没有**当前资料信息，用户却提到"这份资料"：
 - 先调 `list_course_materials()` 给用户展示资料列表，请用户指定。

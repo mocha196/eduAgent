@@ -17,7 +17,12 @@ const TOOL_GUIDANCE = `## Tool Usage Guidelines
 - For knowledge questions (concepts, principles, definitions, facts), always call \`knowledge_query\` first to retrieve accurate information from the knowledge base before answering.
 - When users ask about course document content, always call \`knowledge_query\` before responding.
 - When users request practice problems, quizzes, or exercises, call \`generate_quiz\` to generate questions.
-- If a tool returns empty results or fails, honestly inform the user and provide the best explanation you can.`;
+- If a tool returns empty results or fails, honestly inform the user and provide the best explanation you can.
+- When a user provides or asks to **run/execute/test** a code snippet, call \`run_script\` to actually execute it — do NOT just review it statically unless the user explicitly asks for code review only.
+- \`evaluate_code\` is for static analysis/grading only; prefer \`run_script\` when the user wants to see actual output or debug runtime errors.
+- If a user says "刚才那段代码" / "上面的代码" / "之前的代码", look for the most recent fenced code block in the conversation history — do NOT fabricate code.
+- If the user attached a code file (.py/.js/.ts), its content has already been injected into the current user message. You can call \`run_script\` directly with that code without asking the user to paste it again.
+- For large code files or if the injected content was truncated, use \`read_attachment(attachment_id=...)\` to fetch the complete file contents before executing.`;
 
 const COURSE_MODE_BLOCK = `## Current Session: Course Knowledge Base Mode
 This conversation is bound to a course knowledge base. Course materials have been uploaded and indexed.
@@ -35,7 +40,15 @@ function buildCurrentMaterialBlock(ctx: TurnContext): string {
   if (mc.videoSummary) {
     lines.push(`\n**视频/音频摘要：**\n${mc.videoSummary}`);
   }
-  lines.push(`\n如需获取完整转录文本，请调用 \`get_material_summary(material_id="${mc.materialId}")\`。`);
+  if (mc.documentSummary) {
+    lines.push(`\n**文档摘要：**\n${mc.documentSummary}`);
+  }
+  lines.push(`\n如需获取完整摘要或转录文本，请调用 \`get_material_summary(material_id="${mc.materialId}")\`。`);
+  if (ctx.currentPageImage) {
+    lines.push(
+      `\n当前预览页已有截图待查。如用户问题涉及"这个图"、"当前页"、"这里"、"图中"等，或理解当前页面内容有助于回答，请调用 \`view_current_material_page\`。`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -49,7 +62,11 @@ export class PromptBuilder {
     memoryBlock: string,
     profile: LearnerProfile | null,
     ctx: TurnContext,
+    evalMode?: boolean,
   ): string {
+    // In eval mode, skip all pedagogical/safety/tool blocks — return only the base persona.
+    if (evalMode) return basePrompt.trim();
+
     const parts: string[] = [];
 
     // 1. Base persona (always-inject skills merged in)

@@ -5,8 +5,10 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
+  Bell,
   Blocks,
   BookOpen,
+  Sparkles,
   GraduationCap,
   MessageSquare,
   LogOut,
@@ -14,6 +16,7 @@ import {
   Sun,
   TrendingUp,
   User,
+  Users,
   Shield,
   Brain,
   ChevronRight,
@@ -34,6 +37,8 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
+import { useNotifications } from "@/hooks/useNotifications";
+import { NotificationPanel } from "@/components/NotificationPanel";
 
 type UserInfo = {
   id: string;
@@ -44,7 +49,9 @@ type UserInfo = {
 };
 
 const navItems = [
-  { label: "课程空间", href: "/courses", icon: BookOpen },
+  { label: "课程管理", href: "/admin/courses", icon: BookOpen, roles: ["ADMIN"] },
+  { label: "用户管理", href: "/admin/users", icon: Users, roles: ["ADMIN"] },
+  { label: "课程空间", href: "/courses", icon: BookOpen, roles: ["STUDENT", "TEACHER"] },
   {
     label: "问答中心",
     href: "/me/qa-center",
@@ -63,6 +70,7 @@ const navItems = [
   { label: "隐私与数据", href: "/me/privacy", icon: Shield },
   { label: "LLM 配置", href: "/me/llm-config", icon: Settings2 },
   { label: "技能管理", href: "/admin/skills", icon: Blocks, roles: ["ADMIN"] },
+  { label: "风格管理", href: "/admin/styles", icon: Sparkles, roles: ["ADMIN"] },
 ];
 
 const roleLabels: Record<string, string> = {
@@ -80,6 +88,8 @@ export function AppSidebar() {
   const isCollapsed = state === "collapsed" && !isMobile;
   const [user, setUser] = useState<UserInfo | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
 
   useEffect(() => {
     void fetch("/api/v1/user", { credentials: "include" })
@@ -105,6 +115,7 @@ export function AppSidebar() {
   });
 
   return (
+    <>
     <Sidebar collapsible="icon" className="border-r border-sidebar-border">
       {/* Header */}
       <SidebarHeader className={cn("py-4", isCollapsed ? "px-2" : "px-3")}>
@@ -232,6 +243,19 @@ export function AppSidebar() {
 
           {/* Actions */}
           <div className={cn("flex gap-1.5", isCollapsed ? "flex-col items-center" : "")}>
+            {/* Notifications bell */}
+            <button
+              onClick={() => setNotifOpen(true)}
+              title="通知"
+              className="relative flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            >
+              <Bell size={15} />
+              {unreadCount > 0 && (
+                <span className="absolute right-1 top-1 flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-red-500 px-0.5 text-[9px] font-bold leading-none text-white">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
             {/* Dark mode toggle */}
             <button
               onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
@@ -257,5 +281,14 @@ export function AppSidebar() {
         </div>
       </SidebarFooter>
     </Sidebar>
+
+    <NotificationPanel
+      open={notifOpen}
+      onClose={() => setNotifOpen(false)}
+      notifications={notifications}
+      onMarkRead={markRead}
+      onMarkAllRead={markAllRead}
+    />
+  </>
   );
 }

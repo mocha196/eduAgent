@@ -17,16 +17,26 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import subprocess
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
+import boto3
+import httpx
 import uvicorn
+from boto3 import Session as Boto3Session
+from botocore.config import Config as BotocoreConfig
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from loguru import logger
 from pydantic import BaseModel, Field
+from rag_mvp.logging_setup import configure_logging
+
+load_dotenv()
+configure_logging("rag-service")
 
 # ---------------------------------------------------------------------------
 # Internal-key auth
@@ -668,6 +678,272 @@ async def rag_complete_question(
     if result is None:
         raise HTTPException(status_code=502, detail="Question completion failed — check RAG logs")
     return result
+
+
+
+# ---------------------------------------------------------------------------
+# /run-arbitrary-script  (agent run_script tool — user-approved arbitrary code)
+# ---------------------------------------------------------------------------
+
+class RunArbitraryScriptRequest(BaseModel):
+    language: str           # "python" or "javascript"
+    code: str               # source code, max 8000 chars
+    timeout_sec: int = Field(default=30, ge=5, le=60)
+
+
+class RunArbitraryScriptResponse(BaseModel):
+    stdout: str
+    stderr: str
+    return_code: int
+
+
+_LANG_CMD: dict[str, list[str]] = {
+    "python":     ["python"],
+    "javascript": ["node"],
+}
+
+_LANG_EXT: dict[str, str] = {
+    "python":     ".py",
+    "javascript": ".js",
+}
+
+
+@app.post("/run-arbitrary-script", response_model=RunArbitraryScriptResponse)
+async def run_arbitrary_script(
+    body: RunArbitraryScriptRequest,
+    _auth: None = Depends(_require_key),
+) -> RunArbitraryScriptResponse:
+    lang = body.language.strip().lower()
+    if lang not in _LANG_CMD:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {lang!r}")
+    if not body.code.strip():
+        raise HTTPException(status_code=400, detail="code must not be empty")
+    if len(body.code) > 8000:
+        raise HTTPException(status_code=400, detail="code exceeds 8000-character limit")
+
+    interpreter = _LANG_CMD[lang]
+    ext = _LANG_EXT[lang]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script_path = Path(tmpdir) / f"script{ext}"
+        script_path.write_text(body.code, encoding="utf-8")
+
+        cmd = interpreter + [str(script_path)]
+        logger.info("run_arbitrary_script: lang={} timeout={}s", lang, body.timeout_sec)
+
+        loop = asyncio.get_running_loop()
+        try:
+            proc: subprocess.CompletedProcess[str] = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=body.timeout_sec,
+                    # Restrict inherited env to avoid leaking secrets
+                    env={
+                        k: v
+                        for k, v in os.environ.items()
+                        if k in {"PATH", "PYTHONPATH", "HOME", "TEMP", "TMP", "SystemRoot",
+                                 "USERPROFILE", "LANG", "LC_ALL"}
+                    },
+                ),
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=408,
+                detail=f"Script timed out after {body.timeout_sec}s",
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Interpreter not found: {exc}",
+            ) from exc
+
+        return RunArbitraryScriptResponse(
+            stdout=proc.stdout[:50_000],
+            stderr=proc.stderr[:10_000],
+            return_code=proc.returncode,
+        )
+
+
+# ---------------------------------------------------------------------------
+# /run-skill-script  (Anthropic skills mechanism — script execution proxy)
+# ---------------------------------------------------------------------------
+
+class RunSkillScriptRequest(BaseModel):
+    skill: str
+    script: str                           # path relative to scripts/ OR "-m module_name"
+    args: list[str] = Field(default_factory=list)
+    input_file_url: str | None = None     # presigned URL → downloaded to temp dir
+    input_filename: str | None = None     # original filename hint (determines extension)
+    output_filename: str | None = None    # filename to look for after execution → uploaded to MinIO
+    user_id: str = "anonymous"
+    timeout_sec: int = Field(default=60, ge=5, le=300)
+
+
+class RunSkillScriptResponse(BaseModel):
+    stdout: str
+    stderr: str
+    return_code: int
+    output_key: str | None = None         # MinIO object key; TS side generates presigned URL
+
+
+def _skills_root() -> Path:
+    """Resolve the skills root directory.
+    Defaults to <cwd>/skills; override with SKILLS_ROOT_DIR env var."""
+    override = os.environ.get("SKILLS_ROOT_DIR", "").strip()
+    return Path(override) if override else Path(os.getcwd()) / "skills"
+
+
+def _resolve_script_cmd(skills_root: Path, skill: str, script: str) -> list[str]:
+    """Return the full command list to execute the script.
+    Handles both '-m module' and relative file paths."""
+    # Module invocation: "-m markitdown", "-m pptxgenjs", etc.
+    if script.startswith("-m "):
+        module = script[3:].strip()
+        # Allow: letters, digits, hyphens, underscores, dots
+        if not all(c.isalnum() or c in ("-", "_", ".") for c in module):
+            raise ValueError(f"Invalid module name: {module!r}")
+        return ["python", "-m", module]
+
+    # File-based script — enforce path traversal guard
+    scripts_dir = (skills_root / skill / "scripts").resolve()
+    resolved = (scripts_dir / script).resolve()
+    if not str(resolved).startswith(str(scripts_dir) + os.sep) and resolved != scripts_dir:
+        raise ValueError(f"Path traversal detected: {script!r}")
+    if not resolved.exists():
+        raise ValueError(f"Script not found: {resolved}")
+    suffix = resolved.suffix.lower()
+    if suffix == ".py":
+        return ["python", str(resolved)]
+    if suffix == ".js":
+        return ["node", str(resolved)]
+    raise ValueError(f"Unsupported extension {suffix!r}; only .py and .js are allowed.")
+
+
+def _make_skill_s3_client():
+    """Minimal boto3 S3 client using the same MinIO env vars as material_processor."""
+    endpoint = os.environ["MINIO_ENDPOINT"].strip()
+    if not endpoint.startswith("http"):
+        use_ssl = os.environ.get("MINIO_USE_SSL", "true").lower() == "true"
+        endpoint = ("https://" if use_ssl else "http://") + endpoint
+    session = Boto3Session()
+    return session.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=os.environ["MINIO_ACCESS_KEY"].strip(),
+        aws_secret_access_key=os.environ["MINIO_SECRET_KEY"].strip(),
+        region_name=os.environ.get("MINIO_REGION", "us-east-1").strip(),
+        config=BotocoreConfig(proxies={}),
+    )
+
+
+@app.post("/run-skill-script", response_model=RunSkillScriptResponse)
+async def run_skill_script(
+    body: RunSkillScriptRequest,
+    _auth: None = Depends(_require_key),
+) -> RunSkillScriptResponse:
+    # --- Validate skill name (alphanumeric + hyphens/underscores) ---
+    skill_safe = body.skill.strip()
+    if not skill_safe or not all(c.isalnum() or c in ("-", "_") for c in skill_safe):
+        raise HTTPException(status_code=400, detail=f"Invalid skill name: {skill_safe!r}")
+
+    skills_root = _skills_root()
+    skill_dir = skills_root / skill_safe
+    if not skill_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{skill_safe}' not found (expected at {skill_dir})",
+        )
+    scripts_dir = skill_dir / "scripts"
+
+    try:
+        cmd = _resolve_script_cmd(skills_root, skill_safe, body.script)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        input_file_path: Path | None = None
+
+        # --- Download input file if provided ---
+        if body.input_file_url:
+            in_name = (body.input_filename or "input").strip() or "input"
+            input_file_path = tmp_path / in_name
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                resp = await client.get(body.input_file_url)
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to download input_file_url: HTTP {resp.status_code}",
+                    )
+                input_file_path.write_bytes(resp.content)
+
+        # --- Substitute {input_file} / {output_file} placeholders in args ---
+        effective_args: list[str] = []
+        for arg in body.args:
+            if arg == "{input_file}":
+                effective_args.append(str(input_file_path) if input_file_path else arg)
+            elif arg == "{output_file}" and body.output_filename:
+                effective_args.append(str(tmp_path / body.output_filename))
+            else:
+                effective_args.append(arg)
+
+        full_cmd = cmd + effective_args
+        cwd = str(scripts_dir) if scripts_dir.exists() else str(skill_dir)
+        logger.info("run_skill_script: {} (cwd={})", " ".join(full_cmd), cwd)
+
+        # --- Execute in thread pool to avoid blocking async loop ---
+        loop = asyncio.get_running_loop()
+        try:
+            proc_result: subprocess.CompletedProcess[str] = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    full_cmd,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=body.timeout_sec,
+                ),
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=408,
+                detail=f"Script timed out after {body.timeout_sec}s",
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Interpreter not found: {exc}",
+            ) from exc
+
+        # --- Upload output file to MinIO if requested ---
+        output_key: str | None = None
+        if body.output_filename:
+            out_path = tmp_path / body.output_filename
+            if out_path.exists():
+                try:
+                    s3 = _make_skill_s3_client()
+                    bucket = os.environ["MINIO_BUCKET"].strip()
+                    output_key = (
+                        f"skill-output/{body.user_id}/{uuid.uuid4().hex}/{body.output_filename}"
+                    )
+                    await loop.run_in_executor(
+                        None,
+                        lambda: s3.upload_file(str(out_path), bucket, output_key),
+                    )
+                except Exception as exc:
+                    logger.warning("run_skill_script: MinIO upload failed — {}", exc)
+                    output_key = None
+
+        return RunSkillScriptResponse(
+            stdout=proc_result.stdout[:50_000],
+            stderr=proc_result.stderr[:10_000],
+            return_code=proc_result.returncode,
+            output_key=output_key,
+        )
 
 
 # ---------------------------------------------------------------------------

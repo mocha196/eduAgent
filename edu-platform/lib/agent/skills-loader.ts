@@ -25,6 +25,8 @@ export type SkillEntry = {
   subFiles: Record<string, string>;
   /** Source label this skill was loaded from. */
   source: string;
+  /** Absolute path to the skill's scripts/ subdirectory, if it exists. */
+  scriptsDir?: string;
 };
 
 type Frontmatter = {
@@ -92,6 +94,7 @@ export class SkillsLoader {
           }
         }
 
+        const scriptsDirPath = path.join(source.path, entry.name, "scripts");
         entries.push({
           name,
           description: meta.description ?? "",
@@ -100,6 +103,7 @@ export class SkillsLoader {
           alwaysInject: meta.always_inject ?? false,
           subFiles,
           source: source.label,
+          scriptsDir: fs.existsSync(scriptsDirPath) ? scriptsDirPath : undefined,
         });
       }
 
@@ -137,6 +141,14 @@ export class SkillsLoader {
    */
   getSubFile(skillName: string, fileName: string): string | null {
     return this.load().find((s) => s.name === skillName)?.subFiles[fileName] ?? null;
+  }
+
+  /**
+   * Returns the absolute path to the skill's scripts/ directory,
+   * or null if the skill doesn't exist or has no scripts/ subdirectory.
+   */
+  getScriptDir(skillName: string): string | null {
+    return this.load().find((s) => s.name === skillName)?.scriptsDir ?? null;
   }
 }
 

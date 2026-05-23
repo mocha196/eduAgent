@@ -45,6 +45,11 @@ vi.mock("next/server", () => ({
   after: vi.fn(),
 }));
 
+vi.mock("@/lib/services/notificationService", () => ({
+  createNotification: vi.fn().mockResolvedValue(undefined),
+  createBulkNotifications: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@/lib/agent/llm-registry", () => ({
   getLLMClient: vi.fn(() => ({})),
   getRoleConfig: vi.fn(() => ({ model: "test", apiKey: "k", baseURL: "" })),
@@ -121,7 +126,7 @@ describe("submitAssignment", () => {
       UserRole.STUDENT,
       COURSE_ID,
       ASSIGNMENT_ID,
-      { answers: [{ questionId: "q1", answer: "4" }] },
+      { answers: [{ questionId: 1, answer: "4" }] },
     );
 
     expect(result.status).toBe(SubmissionStatus.SUBMITTED);

@@ -15,7 +15,6 @@ type Progress = {
 };
 
 export default function MyProgressPage() {
-  const [userId, setUserId] = useState<string | null>(null);
   const [p, setP] = useState<Progress | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,7 +25,6 @@ export default function MyProgressPage() {
       const uRes = await fetch("/api/v1/user", { credentials: "include" });
       if (!uRes.ok) { setErr("请先登录"); setLoading(false); return; }
       const u = (await uRes.json()) as { id: string };
-      setUserId(u.id);
       const pr = await fetch(`/api/v1/students/${u.id}/learning-progress`, { credentials: "include" });
       if (!pr.ok) { setErr("无法加载学习进度（可能权限不足）"); setLoading(false); return; }
       setP((await pr.json()) as Progress);

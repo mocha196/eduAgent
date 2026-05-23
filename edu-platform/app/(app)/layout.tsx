@@ -1,5 +1,6 @@
 import { AppSidebar } from "@/components/AppSidebar";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
+import { MemoryReviewProvider } from "@/components/MemoryReviewProvider";
 
 export default function AppLayout({
   children,
@@ -17,6 +18,8 @@ export default function AppLayout({
           {children}
         </main>
       </div>
+      {/* Client component — triggers daily memory review modal */}
+      <MemoryReviewProvider />
     </SidebarProvider>
   );
 }

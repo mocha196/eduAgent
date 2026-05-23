@@ -37,6 +37,10 @@ from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
 import psycopg
 from psycopg import sql
+try:
+    import requests as _requests
+except ImportError:  # pragma: no cover
+    _requests = None  # type: ignore[assignment]
 from loguru import logger
 
 from rag_mvp.config import settings
@@ -61,6 +65,31 @@ from rag_mvp.engine import (
 
 )
 from rag_mvp.worker_async_loop import is_worker_async_loop_started, run_worker_coroutine
+
+try:
+    import requests as _requests
+except ImportError:  # pragma: no cover
+    _requests = None  # type: ignore[assignment]
+
+
+def _notify_nextjs(payload: dict) -> None:
+    """Best-effort POST to the Next.js internal notification webhook."""
+    if _requests is None:
+        logger.warning("requests not installed; skipping internal notification")
+        return
+    base = os.environ.get("NEXTJS_INTERNAL_URL", "http://localhost:3000").rstrip("/")
+    key = os.environ.get("INTERNAL_API_KEY", "")
+    try:
+        resp = _requests.post(
+            f"{base}/api/v1/internal/notifications",
+            json=payload,
+            headers={"x-internal-key": key},
+            timeout=5,
+        )
+        if not resp.ok:
+            logger.warning("Internal notification HTTP {}: {}", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("Internal notification failed (non-fatal): {}", exc)
 
 
 def _s3_client():
@@ -712,19 +741,41 @@ def _upload_material_images_to_minio(
             rel = item.get("img_path", "")
             if not rel:
                 continue
-            img_abs = (json_path.parent / rel).resolve()
-            if not img_abs.exists():
-                continue
             page_idx = int(item.get("page_idx", 0))
-            # Use SHA1 of file content as part of key for deduplication
-            sha = hashlib.sha1(img_abs.read_bytes()).hexdigest()[:12]
-            suffix = img_abs.suffix.lower() or ".jpg"
-            minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
-            try:
-                client.upload_file(str(img_abs), bucket, minio_key)
-            except Exception as exc:
-                logger.warning("Failed to upload image {} for material {}: {}", img_abs.name, material_id, exc)
-                continue
+
+            is_url = str(rel).startswith(("http://", "https://"))
+            if is_url:
+                # CDN image: download to a temp buffer and upload directly to MinIO
+                import io as _io
+                import urllib.request as _urlreq
+                try:
+                    with _urlreq.urlopen(rel, timeout=30) as resp:
+                        img_bytes = resp.read()
+                except Exception as exc:
+                    logger.warning("Failed to download CDN image {} for material {}: {}", rel, material_id, exc)
+                    continue
+                sha = hashlib.sha1(img_bytes).hexdigest()[:12]
+                url_suffix = "." + rel.rsplit(".", 1)[-1].split("?")[0] if "." in rel else ".jpg"
+                suffix = url_suffix.lower() or ".jpg"
+                minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
+                try:
+                    client.upload_fileobj(_io.BytesIO(img_bytes), bucket, minio_key)
+                except Exception as exc:
+                    logger.warning("Failed to upload CDN image {} for material {}: {}", rel, material_id, exc)
+                    continue
+            else:
+                img_abs = (json_path.parent / rel).resolve()
+                if not img_abs.exists():
+                    continue
+                sha = hashlib.sha1(img_abs.read_bytes()).hexdigest()[:12]
+                suffix = img_abs.suffix.lower() or ".jpg"
+                minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
+                try:
+                    client.upload_file(str(img_abs), bucket, minio_key)
+                except Exception as exc:
+                    logger.warning("Failed to upload image {} for material {}: {}", img_abs.name, material_id, exc)
+                    continue
+
             url = f"{endpoint}/{bucket}/{minio_key}"
             uploaded.append((page_idx, url))
 
@@ -798,6 +849,233 @@ def _record_chunk_page_mappings(
                 mappings,
             )
     logger.info("Recorded {} chunk-page mappings for material {}", len(mappings), material_id)
+
+
+# ---------------------------------------------------------------------------
+# Document summary — Map-Reduce (non-video materials)
+# ---------------------------------------------------------------------------
+
+def _extract_text_from_content_list(material_id: str) -> str:
+    """Concatenate all text/table items from MinerU *_content_list.json files."""
+    scan_dir = settings.output_dir / material_id
+    if not scan_dir.exists():
+        return ""
+    texts: list[str] = []
+    for json_path in sorted(scan_dir.rglob("*_content_list.json")):
+        if "_content_list_v2" in json_path.name:
+            continue
+        try:
+            raw: list = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for item in raw:
+            t = str(item.get("type") or "")
+            txt = ""
+            if t == "text":
+                txt = str(item.get("text") or "").strip()
+            elif t == "table":
+                txt = str(item.get("text") or item.get("html") or "").strip()
+            if txt:
+                texts.append(txt)
+    return "\n\n".join(texts)
+
+
+async def _generate_document_summary_async(
+    full_text: str,
+    filename: str | None,
+) -> str:
+    """Map-Reduce summarisation.
+
+    Map  : split into ~document_summary_chunk_tokens-token chunks → concurrent LLM calls.
+    Reduce : combine chunk summaries → final summary via refine_model.
+    Two-level : when chunk count > document_summary_two_level_threshold, reduce in groups first.
+    """
+    import asyncio
+
+    from lightrag.llm.openai import openai_complete_if_cache
+
+    cfg = settings
+    if not full_text.strip():
+        return ""
+
+    # ---- token-aware chunking -------------------------------------------
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        def _tok_count(t: str) -> int:
+            return len(enc.encode(t, disallowed_special=()))
+
+        def _split_to_chunks(t: str, max_tok: int) -> list[str]:
+            toks = enc.encode(t, disallowed_special=())
+            return [enc.decode(toks[i: i + max_tok]) for i in range(0, len(toks), max_tok)]
+
+    except ImportError:
+        _chars_per_tok = 3
+
+        def _tok_count(t: str) -> int:  # type: ignore[misc]
+            return len(t) // _chars_per_tok
+
+        def _split_to_chunks(t: str, max_tok: int) -> list[str]:  # type: ignore[misc]
+            size = max_tok * _chars_per_tok
+            return [t[i: i + size] for i in range(0, len(t), size)]
+
+    chunks = _split_to_chunks(full_text, cfg.document_summary_chunk_tokens)
+    if len(chunks) > cfg.document_summary_max_chunks:
+        logger.warning(
+            "Document summary: {} chunks exceeds max {}; truncating.",
+            len(chunks),
+            cfg.document_summary_max_chunks,
+        )
+        chunks = chunks[: cfg.document_summary_max_chunks]
+
+    if not chunks:
+        return ""
+
+    name_hint = f' of "{filename}"' if filename else ""
+
+    # ---- map phase -------------------------------------------------------
+    sem = asyncio.Semaphore(max(1, cfg.llm_max_async))
+
+    async def _map_one(idx: int, chunk: str) -> str:
+        prompt = (
+            f"The following is section {idx + 1} of a document{name_hint}. "
+            "Summarise this section in 3-5 sentences. "
+            "Write in the same language as the source text. "
+            "Focus on key concepts, main points, and important conclusions.\n\n"
+            f"{chunk}"
+        )
+        async with sem:
+            try:
+                return await openai_complete_if_cache(
+                    cfg.llm_model,
+                    prompt,
+                    system_prompt=(
+                        "You are a helpful assistant that summarises document sections concisely."
+                    ),
+                    history_messages=[],
+                    api_key=cfg.llm_api_key,
+                    base_url=cfg.llm_base_url,
+                    max_tokens=512,
+                    temperature=0.0,
+                )
+            except Exception as exc:
+                logger.warning("Document summary map[{}] failed: {}", idx, exc)
+                return ""
+
+    map_summaries = await asyncio.gather(*[_map_one(i, c) for i, c in enumerate(chunks)])
+    map_summaries = [s for s in map_summaries if s.strip()]
+    if not map_summaries:
+        return ""
+
+    # ---- reduce phase ----------------------------------------------------
+    async def _reduce(summaries: list[str], *, is_final: bool) -> str:
+        combined = "\n\n---\n\n".join(
+            f"[Part {i + 1}]\n{s}" for i, s in enumerate(summaries)
+        )
+        if is_final:
+            prompt = (
+                f"The following are section summaries of a document{name_hint}. "
+                "Write a comprehensive, well-structured final summary of the whole document "
+                "in the same language as the summaries. "
+                "Cover the main topics, key points, structure, and conclusions."
+                f"\n\n{combined}"
+            )
+            model = cfg.refine_model
+        else:
+            prompt = (
+                f"The following are summaries of consecutive sections of a document{name_hint}. "
+                "Merge them into one coherent paragraph in the same language."
+                f"\n\n{combined}"
+            )
+            model = cfg.llm_model
+        try:
+            return await openai_complete_if_cache(
+                model,
+                prompt,
+                system_prompt="You are a helpful assistant that synthesises document summaries.",
+                history_messages=[],
+                api_key=cfg.llm_api_key,
+                base_url=cfg.llm_base_url,
+                max_tokens=1024,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            logger.warning("Document summary reduce failed: {}", exc)
+            return "\n\n".join(summaries)  # fallback: plain concat
+
+    two_lvl_thresh = cfg.document_summary_two_level_threshold
+    if len(map_summaries) <= two_lvl_thresh:
+        final = await _reduce(map_summaries, is_final=True)
+    else:
+        group_size = 10
+        groups = [
+            map_summaries[i: i + group_size]
+            for i in range(0, len(map_summaries), group_size)
+        ]
+        mid = await asyncio.gather(*[_reduce(g, is_final=False) for g in groups])
+        mid = [s for s in mid if s.strip()]
+        final = await _reduce(mid or map_summaries, is_final=True)
+
+    return final.strip()
+
+
+def _generate_and_save_document_summary(
+    conn: psycopg.Connection,
+    material_id: str,
+    table: str,
+    original_filename: str | None,
+) -> None:
+    """Extract parsed text → async Map-Reduce → persist document_summary to DB.
+
+    Must be called while the MinerU output dir still exists (between PARSED and READY
+    status transitions). Non-fatal: any failure is logged but does not abort indexing.
+    """
+    if table not in {"materials", "personal_materials"}:
+        raise ValueError(f"Invalid table: {table}")
+    try:
+        full_text = _extract_text_from_content_list(material_id)
+        if not full_text.strip():
+            logger.info("Document summary: no text extracted for material {}", material_id)
+            return
+
+        logger.info(
+            "Generating document summary for {} ({} chars) …",
+            material_id,
+            len(full_text),
+        )
+
+        if is_worker_async_loop_started():
+            summary: str = run_worker_coroutine(
+                _generate_document_summary_async(full_text, original_filename),
+                timeout=600,
+            )
+        else:
+            import asyncio as _asyncio
+            summary = _asyncio.run(
+                _generate_document_summary_async(full_text, original_filename)
+            )
+
+        if not summary:
+            logger.info("Document summary: empty result for material {}", material_id)
+            return
+
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "UPDATE {table} SET document_summary = %s, updated_at = NOW() "
+                        "WHERE id = %s::uuid AND is_deleted = false"
+                    ).format(table=sql.Identifier(table)),
+                    (summary, material_id),
+                )
+        logger.info(
+            "Document summary saved for material {} ({} chars)", material_id, len(summary)
+        )
+    except Exception as exc:
+        logger.warning(
+            "Document summary generation failed for {} (non-fatal): {}", material_id, exc
+        )
 
 
 def _run_material_download_parse_and_ingest(
@@ -881,6 +1159,12 @@ def _run_material_download_parse_and_ingest(
             )
         parsed_committed = True
 
+        # Generate document summary while MinerU output dir still exists.
+        if settings.document_summary_enabled:
+            _generate_and_save_document_summary(
+                conn, material_id, "materials", original_filename
+            )
+
         with conn.transaction():
             update_material_status(
                 conn, material_id, "INDEXING", None, expect_status_in=("PARSED",)
@@ -920,6 +1204,7 @@ def _run_material_download_parse_and_ingest(
             shutil.rmtree(stem_dir, ignore_errors=True)
 
         logger.success("Indexed material {} ({} chunks via LightRAG)", material_id, n)
+        _notify_nextjs({"type": "MATERIAL_READY", "material_id": material_id, "course_id": course_id})
     except MaterialCancelledError:
         # Cancelled cleanly — material is already soft-deleted by the API.
         logger.info("Material {} processing cancelled; skipping ingest", material_id)
@@ -1680,6 +1965,12 @@ def _run_personal_material_download_parse_and_ingest(
                 conn, material_id, "PARSED", None, expect_status_in=("PARSING",)
             )
         parsed_committed = True
+
+        # Generate document summary while MinerU output dir still exists.
+        if settings.document_summary_enabled:
+            _generate_and_save_document_summary(
+                conn, material_id, "personal_materials", original_filename
+            )
 
         with conn.transaction():
             update_personal_material_status(

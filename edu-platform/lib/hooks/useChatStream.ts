@@ -1,6 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ExecutionPayload } from "@/lib/agent/react-loop";
+
+export type { ExecutionPayload };
 
 /**
  * A single item in the interleaved assistant message timeline.
@@ -16,6 +19,7 @@ export type MessageTimelineItem =
       status: "running" | "done";
       success?: boolean;
       durationMs?: number;
+      execution?: ExecutionPayload;
     };
 
 export type ChatMessage = {
@@ -72,6 +76,7 @@ export type ToolActivityItem = {
   status: "running" | "done";
   success?: boolean;
   durationMs?: number;
+  execution?: ExecutionPayload;
 };
 
 /** Pending tool-approval request emitted by the ReAct loop. */
@@ -81,6 +86,8 @@ export type PendingApprovalState = {
   argsPreview: Record<string, unknown>;
   approvalKey: string;
   reason: string;
+  /** Full un-truncated code for run_script approvals */
+  fullCode?: string;
 };
 
 export type AttachmentRef = {
@@ -101,6 +108,11 @@ export type UseChatStreamConfig =
       hydrateSessionId?: string | null;
       /** ID of the material the user is currently previewing. Sent as material_id in chat requests. */
       activeMaterialId?: string | null;
+      /**
+       * When provided, called just before each message send to silently capture the current
+       * page view. The resulting file is uploaded and sent as current_page_image (not shown in UI).
+       */
+      captureCurrentPage?: () => Promise<File | null>;
     }
   | {
       kind: "qa_center_global";
@@ -123,6 +135,15 @@ const ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
   "text/plain",
   "text/markdown",
+  // Code files (browser may report these before server normalises to text/plain)
+  "text/x-python",
+  "application/x-python",
+  "application/x-python-code",
+  "text/x-javascript",
+  "application/javascript",
+  "text/javascript",
+  "text/typescript",
+  "text/x-typescript",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.ms-powerpoint",
@@ -144,10 +165,6 @@ function formatChatHttpError(status: number, body: ApiErrJson): string {
 
 function newClientId(): string {
   return crypto.randomUUID();
-}
-
-function isAssistantErrorBubble(text: string): boolean {
-  return text.startsWith("[错误:");
 }
 
 type HydratedRow = {
@@ -392,7 +409,13 @@ export function useChatStream(config: UseChatStreamConfig) {
   }, []);
 
   const runChatRequest = useCallback(
-    async (message: string, lessonId: string | undefined, attachmentRefs: AttachmentRef[], trimHistoryTo?: number) => {
+    async (
+      message: string,
+      lessonId: string | undefined,
+      attachmentRefs: AttachmentRef[],
+      trimHistoryTo?: number,
+      currentPageImage?: { presigned_url: string; mime_type: string; name: string },
+    ) => {
       const config = cfgRef.current;
       setBusy(true);
       setStreaming("");
@@ -433,6 +456,7 @@ export function useChatStream(config: UseChatStreamConfig) {
           ...(materialId ? { material_id: materialId } : {}),
           ...(attachmentsPayload.length ? { attachments: attachmentsPayload } : {}),
           ...(trimHistoryTo !== undefined ? { trim_history_to: trimHistoryTo } : {}),
+          ...(currentPageImage ? { current_page_image: currentPageImage } : {}),
         };
         if (isQaGlobal && config.sessionId) {
           body.session_id = config.sessionId;
@@ -505,6 +529,9 @@ export function useChatStream(config: UseChatStreamConfig) {
                 approval_key?: string;
                 reason?: string;
                 approved?: boolean;
+                // execution result (run_script)
+                execution?: ExecutionPayload;
+                full_code?: string;
               };
 
               if (event.type === "text" && event.content) {
@@ -538,14 +565,26 @@ export function useChatStream(config: UseChatStreamConfig) {
                 setStreamTimeline(nextTl);
               } else if (event.type === "tool_result" && event.name) {
                 const toolName = event.name;
-                setToolActivity((prev) => {
-                  let runIdx = -1;
-                  for (let i = prev.length - 1; i >= 0; i--) {
-                    if (prev[i].status === "running" && prev[i].name === toolName) {
-                      runIdx = i;
-                      break;
+                const toolCallId = typeof event.tool_call_id === "string" ? event.tool_call_id : undefined;
+                const execution = event.execution as ExecutionPayload | undefined;
+
+                /** Find last running item matching by clientKey (preferred) then name. */
+                function findRunningIdx<T extends { clientKey: string; name: string; status: string }>(
+                  arr: T[],
+                ): number {
+                  if (toolCallId) {
+                    for (let i = arr.length - 1; i >= 0; i--) {
+                      if (arr[i].status === "running" && arr[i].clientKey === toolCallId) return i;
                     }
                   }
+                  for (let i = arr.length - 1; i >= 0; i--) {
+                    if (arr[i].status === "running" && arr[i].name === toolName) return i;
+                  }
+                  return -1;
+                }
+
+                setToolActivity((prev) => {
+                  const runIdx = findRunningIdx(prev);
                   if (runIdx === -1) return prev;
                   const next = [...prev];
                   next[runIdx] = {
@@ -553,17 +592,25 @@ export function useChatStream(config: UseChatStreamConfig) {
                     status: "done",
                     success: event.success,
                     durationMs: event.duration_ms,
+                    ...(execution ? { execution } : {}),
                   };
                   return next;
                 });
-                // Update matching running tool item in timeline
+
                 const tl = [...streamTimelineRef.current];
-                for (let i = tl.length - 1; i >= 0; i--) {
-                  const item = tl[i];
-                  if (item.kind === "tool" && item.name === toolName && item.status === "running") {
-                    tl[i] = { ...item, status: "done", success: event.success, durationMs: event.duration_ms };
-                    break;
-                  }
+                const toolItems = tl
+                  .map((it, idx) => (it.kind === "tool" ? { it, idx } : null))
+                  .filter((x): x is { it: Extract<MessageTimelineItem, { kind: "tool" }>; idx: number } => x !== null);
+                const runIdx = findRunningIdx(toolItems.map((x) => x.it));
+                if (runIdx !== -1) {
+                  const { idx } = toolItems[runIdx];
+                  tl[idx] = {
+                    ...(tl[idx] as Extract<MessageTimelineItem, { kind: "tool" }>),
+                    status: "done",
+                    success: event.success,
+                    durationMs: event.duration_ms,
+                    ...(execution ? { execution } : {}),
+                  };
                 }
                 streamTimelineRef.current = tl;
                 setStreamTimeline([...tl]);
@@ -592,6 +639,7 @@ export function useChatStream(config: UseChatStreamConfig) {
                   argsPreview: event.args_preview ?? {},
                   approvalKey: event.approval_key ?? "",
                   reason: event.reason ?? "此操作需要您的确认。",
+                  fullCode: typeof event.full_code === "string" ? event.full_code : undefined,
                 };
                 pendingApprovalRef.current = state;
                 setPendingApproval(state);
@@ -675,7 +723,41 @@ export function useChatStream(config: UseChatStreamConfig) {
         return next;
       });
 
-      await runChatRequest(trimmed, lessonId, snapshotAttachments);
+      // Silently capture + upload the current page for course chats (5 s timeout, best-effort).
+      let currentPageImage: { presigned_url: string; mime_type: string; name: string } | undefined;
+      const cfg = cfgRef.current;
+      if (cfg.kind === "course" && cfg.captureCurrentPage) {
+        try {
+          const file = await Promise.race([
+            cfg.captureCurrentPage(),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+          if (file instanceof File) {
+            const form = new FormData();
+            form.append("file", file);
+            const res = await fetch("/api/v1/attachments", {
+              method: "POST",
+              credentials: "include",
+              body: form,
+              signal: AbortSignal.timeout(8000),
+            });
+            if (res.ok) {
+              const data = (await res.json()) as { presigned_url: string; mime_type: string; name: string };
+              if (data.presigned_url) {
+                currentPageImage = {
+                  presigned_url: data.presigned_url,
+                  mime_type: data.mime_type || "image/png",
+                  name: data.name || file.name,
+                };
+              }
+            }
+          }
+        } catch {
+          // Best-effort: proceed without the page image if capture/upload fails
+        }
+      }
+
+      await runChatRequest(trimmed, lessonId, snapshotAttachments, undefined, currentPageImage);
     },
     [busy, pendingAttachments, runChatRequest],
   );

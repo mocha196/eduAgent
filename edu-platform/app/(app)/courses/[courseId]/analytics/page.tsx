@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ChevronLeft, AlertCircle, MessageSquare, Clock, Users, FileText } from "lucide-react";
+import {
+  ChevronLeft, AlertCircle, MessageSquare, Clock, Users, FileText, ClipboardList,
+} from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AssignmentAnalyticsPanel } from "@/components/assignment/AssignmentAnalyticsPanel";
 
 type Analytics = {
   total_questions: number;
@@ -23,11 +26,14 @@ type Analytics = {
   }[];
 };
 
+type AnalyticsTab = "qa" | "assignments";
+
 export default function CourseAnalyticsPage() {
   const params = useParams();
   const courseId = typeof params?.courseId === "string" ? params.courseId : null;
   const [data, setData] = useState<Analytics | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AnalyticsTab>("qa");
 
   useEffect(() => {
     if (!courseId) return;
@@ -59,6 +65,34 @@ export default function CourseAnalyticsPage() {
           <p className="mt-1 text-sm text-muted-foreground">课程问答统计与学习行为洞察</p>
         </div>
 
+        {/* Tab switcher */}
+        <div className="flex gap-1 rounded-xl bg-muted/50 p-1 w-fit">
+          <button
+            type="button"
+            onClick={() => setActiveTab("qa")}
+            className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors ${
+              activeTab === "qa"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <MessageSquare size={13} />
+            问答分析
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("assignments")}
+            className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors ${
+              activeTab === "assignments"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <ClipboardList size={13} />
+            作业分析
+          </button>
+        </div>
+
         {err && (
           <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-4 py-3 text-sm text-destructive">
             <AlertCircle size={15} />
@@ -66,106 +100,116 @@ export default function CourseAnalyticsPage() {
           </div>
         )}
 
-        {/* Stats row */}
-        {!data && !err && (
-          <div className="grid grid-cols-2 gap-3">
-            {Array.from({length:2}).map((_,i) => <Skeleton key={i} className="h-24 w-full rounded-xl" />)}
-          </div>
+        {/* ── QA Analytics Tab ── */}
+        {activeTab === "qa" && (
+          <>
+            {/* Stats row */}
+            {!data && !err && (
+              <div className="grid grid-cols-2 gap-3">
+                {Array.from({length:2}).map((_,i) => <Skeleton key={i} className="h-24 w-full rounded-xl" />)}
+              </div>
+            )}
+
+            {data && (
+              <>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-border bg-card p-5 space-y-1">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <MessageSquare size={12} />总问答数
+                    </div>
+                    <div className="text-3xl font-bold text-foreground font-ui">{data.total_questions.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-xl border border-border bg-card p-5 space-y-1">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Clock size={12} />平均耗时
+                    </div>
+                    <div className="text-3xl font-bold text-foreground font-ui">
+                      {data.avg_response_time_ms > 0 ? `${Math.round(data.avg_response_time_ms)} ms` : "—"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Top questions */}
+                <section className="space-y-3">
+                  <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
+                    <MessageSquare size={15} className="text-primary" />
+                    热点问题 TOP {data.top_questions.length}
+                  </h2>
+                  {data.top_questions.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">暂无问答数据</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {data.top_questions.map((q, idx) => (
+                        <div key={idx} className="flex items-start justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3">
+                          <div className="flex items-start gap-3">
+                            <span className="shrink-0 flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-primary text-[10px] font-bold mt-0.5">
+                              {idx + 1}
+                            </span>
+                            <p className="text-sm text-foreground leading-relaxed">{q.question}</p>
+                          </div>
+                          <span className="shrink-0 text-xs font-semibold text-muted-foreground">{q.count} 次</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                {/* Active students */}
+                <section className="space-y-3">
+                  <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
+                    <Users size={15} className="text-primary" />
+                    活跃学生
+                  </h2>
+                  {data.active_students.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">暂无学生活跃数据</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {data.active_students.map((s) => (
+                        <div key={s.student_id} className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3">
+                          <span className="text-sm font-medium text-foreground">{s.name || s.student_id}</span>
+                          <div className="text-xs text-muted-foreground text-right">
+                            <span className="font-semibold text-foreground">{s.question_count}</span> 次问答
+                            <br />
+                            {new Date(s.last_active).toLocaleDateString("zh-CN")}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                {/* Top materials */}
+                <section className="space-y-3">
+                  <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
+                    <FileText size={15} className="text-primary" />
+                    命中资料排行
+                  </h2>
+                  {data.top_materials.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">暂无资料命中数据</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {data.top_materials.map((m, idx) => (
+                        <div key={m.material_id} className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-muted-foreground w-4">{idx + 1}.</span>
+                            <span className="text-sm font-medium text-foreground truncate max-w-xs">
+                              {m.title || m.material_id}
+                            </span>
+                          </div>
+                          <span className="text-xs font-semibold text-muted-foreground">{m.hit_count} 次命中</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+          </>
         )}
 
-        {data && (
-          <>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
-              <div className="rounded-xl border border-border bg-card p-5 space-y-1">
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <MessageSquare size={12} />总问答数
-                </div>
-                <div className="text-3xl font-bold text-foreground font-ui">{data.total_questions.toLocaleString()}</div>
-              </div>
-              <div className="rounded-xl border border-border bg-card p-5 space-y-1">
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Clock size={12} />平均耗时
-                </div>
-                <div className="text-3xl font-bold text-foreground font-ui">
-                  {data.avg_response_time_ms > 0 ? `${Math.round(data.avg_response_time_ms)} ms` : "—"}
-                </div>
-              </div>
-            </div>
-
-            {/* Top questions */}
-            <section className="space-y-3">
-              <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
-                <MessageSquare size={15} className="text-primary" />
-                热点问题 TOP {data.top_questions.length}
-              </h2>
-              {data.top_questions.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4">暂无问答数据</p>
-              ) : (
-                <div className="space-y-2">
-                  {data.top_questions.map((q, idx) => (
-                    <div key={idx} className="flex items-start justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3">
-                      <div className="flex items-start gap-3">
-                        <span className="shrink-0 flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-primary text-[10px] font-bold mt-0.5">
-                          {idx + 1}
-                        </span>
-                        <p className="text-sm text-foreground leading-relaxed">{q.question}</p>
-                      </div>
-                      <span className="shrink-0 text-xs font-semibold text-muted-foreground">{q.count} 次</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* Active students */}
-            <section className="space-y-3">
-              <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
-                <Users size={15} className="text-primary" />
-                活跃学生
-              </h2>
-              {data.active_students.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4">暂无学生活跃数据</p>
-              ) : (
-                <div className="space-y-2">
-                  {data.active_students.map((s) => (
-                    <div key={s.student_id} className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3">
-                      <span className="text-sm font-medium text-foreground">{s.name || s.student_id}</span>
-                      <div className="text-xs text-muted-foreground text-right">
-                        <span className="font-semibold text-foreground">{s.question_count}</span> 次问答
-                        <br />
-                        {new Date(s.last_active).toLocaleDateString("zh-CN")}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* Top materials */}
-            <section className="space-y-3">
-              <h2 className="font-display text-base font-semibold text-foreground flex items-center gap-2">
-                <FileText size={15} className="text-primary" />
-                命中资料排行
-              </h2>
-              {data.top_materials.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4">暂无资料命中数据</p>
-              ) : (
-                <div className="space-y-2">
-                  {data.top_materials.map((m, idx) => (
-                    <div key={m.material_id} className="flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground w-4">{idx + 1}.</span>
-                        <span className="text-sm font-medium text-foreground truncate max-w-xs">
-                          {m.title || m.material_id}
-                        </span>
-                      </div>
-                      <span className="text-xs font-semibold text-muted-foreground">{m.hit_count} 次命中</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          </>
+        {/* ── Assignment Analytics Tab ── */}
+        {activeTab === "assignments" && courseId && (
+          <AssignmentAnalyticsPanel courseId={courseId} />
         )}
       </div>
     </div>

@@ -10,10 +10,11 @@ import {
   Loader2,
   X,
   FileText,
+  List,
 } from "lucide-react";
 import Image from "next/image";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { markdownRemarkPlugins, markdownRehypePlugins, normalizeMathDelimiters } from "@/lib/markdownMath";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
@@ -46,6 +47,7 @@ export default function QaCenterPage() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [citationPanel, setCitationPanel] = useState<CitationPanel | null>(null);
+  const [citationListPanel, setCitationListPanel] = useState<CitationPanel[] | null>(null);
 
   useEffect(() => {
     const h = (ev: Event) => {
@@ -56,6 +58,18 @@ export default function QaCenterPage() {
     };
     window.addEventListener("edu:open-material-preview", h as EventListener);
     return () => window.removeEventListener("edu:open-material-preview", h as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const h = (ev: Event) => {
+      const ce = ev as CustomEvent<CitationPanel[]>;
+      if (Array.isArray(ce.detail) && ce.detail.length > 0) {
+        setCitationListPanel(ce.detail);
+        setCitationPanel(null);
+      }
+    };
+    window.addEventListener("edu:open-citation-list", h as EventListener);
+    return () => window.removeEventListener("edu:open-citation-list", h as EventListener);
   }, []);
 
   const loadThreads = useCallback(async () => {
@@ -305,6 +319,60 @@ export default function QaCenterPage() {
           </div>
           </div>
 
+          {/* Citation list sidebar */}
+          <aside
+            className={cn(
+              "flex flex-col border-l border-border bg-background transition-[width,opacity] duration-200 ease-out shrink-0 overflow-hidden",
+              citationListPanel
+                ? "w-60 min-w-[200px] opacity-100"
+                : "w-0 min-w-0 opacity-0",
+            )}
+          >
+            {citationListPanel && (
+              <>
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 bg-muted/30">
+                  <List size={13} className="text-muted-foreground shrink-0" />
+                  <span className="text-xs font-medium text-muted-foreground flex-1">
+                    {citationListPanel.length} 个引用块
+                  </span>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7 shrink-0"
+                    aria-label="关闭引用列表"
+                    onClick={() => setCitationListPanel(null)}
+                  >
+                    <X size={15} />
+                  </Button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  <div className="flex flex-col divide-y divide-border">
+                    {citationListPanel.map((c, ci) => (
+                      <button
+                        key={ci}
+                        type="button"
+                        onClick={() => setCitationPanel(c)}
+                        className="flex flex-col items-start gap-1 px-3 py-2.5 text-left hover:bg-muted/40 transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-[10px] font-bold text-primary/60">[{ci + 1}]</span>
+                          <span className="text-[11px] font-medium text-foreground truncate max-w-[160px]">
+                            {c.sourceLabel ?? `引用 ${ci + 1}`}
+                          </span>
+                        </div>
+                        {c.chunkText && (
+                          <p className="text-[10px] text-muted-foreground leading-relaxed line-clamp-2">
+                            {c.chunkText.slice(0, 80)}
+                          </p>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </aside>
+
           {/* Citation preview sidebar */}
           <aside
             className={cn(
@@ -338,8 +406,11 @@ export default function QaCenterPage() {
                         <span>检索文本块</span>
                       </div>
                       <div className="prose prose-sm dark:prose-invert max-w-none rounded-lg bg-muted/40 border border-border p-3 text-xs leading-relaxed">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {citationPanel.chunkText}
+                        <ReactMarkdown
+                          remarkPlugins={markdownRemarkPlugins}
+                          rehypePlugins={markdownRehypePlugins}
+                        >
+                          {normalizeMathDelimiters(citationPanel.chunkText)}
                         </ReactMarkdown>
                       </div>
                       {(citationPanel.image_urls?.length ?? 0) > 0 && (

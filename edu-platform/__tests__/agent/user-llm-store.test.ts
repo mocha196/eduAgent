@@ -129,9 +129,9 @@ describe("user-llm-store — pure functions", () => {
       };
       const masked = maskConfig(config);
 
-      // All 5 roles must be present
+      // All 6 roles must be present
       expect(Object.keys(masked)).toEqual(expect.arrayContaining([...ALL_ROLES]));
-      expect(Object.keys(masked)).toHaveLength(5);
+      expect(Object.keys(masked)).toHaveLength(6);
 
       // chat: apiKey masked, model preserved, baseURL defaults to ""
       expect(masked.chat.apiKey).toBe("sk-l****");
@@ -147,6 +147,7 @@ describe("user-llm-store — pure functions", () => {
       expect(masked.vision.apiKey).toBe("");
       expect(masked.memory.model).toBe("");
       expect(masked.grading.baseURL).toBe("");
+      expect(masked.completion.apiKey).toBe("");
     });
   });
 });

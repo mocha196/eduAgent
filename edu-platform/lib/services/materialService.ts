@@ -29,6 +29,7 @@ import {
 import { enqueueRagTask, type RagQueueTask } from "@/lib/queue/ragTask";
 import { getRedis } from "@/lib/redis";
 import { getMaterialStaleSec } from "@/lib/config";
+import { createNotification } from "@/lib/services/notificationService";
 import type {
   MaterialCreatedDto,
   MaterialDetailDto,
@@ -384,6 +385,15 @@ export async function uploadMaterialStream(params: {
         skip_kg: skipKg,
       };
   await enqueueRagTaskWithRetry(task);
+
+  // Notify the uploading teacher that the file is in the processing queue.
+  void createNotification({
+    userId: params.teacherUserId,
+    type: "MATERIAL_UPLOADED",
+    title: "课件上传成功",
+    body: `《${params.originalFilename}》已上传，正在后台处理中。`,
+    metadata: { courseId: params.courseId, materialId: material.id },
+  });
 
   return {
     id: material.id,

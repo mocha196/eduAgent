@@ -5,6 +5,8 @@
 
 import { prisma } from "@/lib/db";
 import type { Tool, TurnContext } from "../types";
+import { getLLMClient, getVisionModel } from "../llm-registry";
+import { buildVisionToolImageUrl } from "./vision";
 
 // ---- get_course_info -------------------------------------------------------
 
@@ -132,6 +134,7 @@ export const listCourseMaterialsTool: Tool = {
         lessonId: true,
         indexedChunkCount: true,
         videoSummary: true,
+        documentSummary: true,
         transcriptText: true,
         createdAt: true,
       },
@@ -147,6 +150,7 @@ export const listCourseMaterialsTool: Tool = {
     const lines = materials.map((m) => {
       const flags: string[] = [];
       if (m.videoSummary) flags.push("有视频摘要");
+      if (m.documentSummary) flags.push("有文档摘要");
       if (m.transcriptText) flags.push("有转录文本");
       if (m.indexedChunkCount > 0) flags.push(`已索引 ${m.indexedChunkCount} 块`);
       const flagStr = flags.length ? ` [${flags.join("，")}]` : "";
@@ -208,6 +212,7 @@ export const getMaterialSummaryTool: Tool = {
         fileType: true,
         status: true,
         videoSummary: true,
+        documentSummary: true,
         transcriptText: true,
         indexedChunkCount: true,
       },
@@ -223,8 +228,12 @@ export const getMaterialSummaryTool: Tool = {
 
     if (mat.videoSummary) {
       parts.push(`\n**视频/音频摘要**：\n${mat.videoSummary}`);
-    } else {
-      parts.push(`\n（暂无视频摘要）`);
+    }
+    if (mat.documentSummary) {
+      parts.push(`\n**文档摘要**：\n${mat.documentSummary}`);
+    }
+    if (!mat.videoSummary && !mat.documentSummary) {
+      parts.push(`\n（暂无摘要）`);
     }
 
     if (mat.transcriptText) {
@@ -244,5 +253,93 @@ export const getMaterialSummaryTool: Tool = {
     }
 
     return parts.join("\n");
+  },
+};
+
+// ---- view_current_material_page -------------------------------------------
+
+/**
+ * Call the vision model on the implicitly-uploaded page screenshot.
+ * Returns a text description; OCR-mode retry on empty result; fallback message on failure.
+ */
+async function describePageImage(
+  presignedUrl: string,
+  mimeType: string,
+  prompt: string,
+): Promise<string | null> {
+  const imageUrl = await buildVisionToolImageUrl(presignedUrl);
+  if (!imageUrl) return null;
+
+  const client = getLLMClient("vision");
+  const model = getVisionModel();
+  const resp = await client.chat.completions.create({
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ],
+      },
+    ],
+    max_tokens: 1500,
+  });
+  return resp.choices[0]?.message?.content?.trim() ?? null;
+}
+
+export const viewCurrentMaterialPageTool: Tool = {
+  name: "view_current_material_page",
+  description:
+    "查看用户当前正在预览的资料页面或视频帧截图，获取其视觉内容描述（含图表、文字、公式等）。" +
+    "当用户问题涉及\u300c这个图\u300d、\u300c当前页\u300d、\u300c这里\u300d、\u300c图上写的\u300d等指示性表达，" +
+    "或当理解当前页面内容有助于回答问题时，应调用此工具。无需任何参数。",
+  category: "read",
+  parameters: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  async execute(_args: Record<string, unknown>, ctx: TurnContext): Promise<string> {
+    const img = ctx.currentPageImage;
+    if (!img?.presigned_url) {
+      return (
+        "当前没有可用的页面截图。" +
+        "如需查看页面内容，请使用预览区右上角的截图按钮，将当前页面作为附件上传。"
+      );
+    }
+
+    // Primary: ask vision model to describe the page content
+    try {
+      const description = await describePageImage(
+        img.presigned_url,
+        img.mime_type,
+        "请详细描述这张资料页面的内容，包括文字、图表、公式、表格等所有可见信息。",
+      );
+      if (description && description.trim().length > 10) {
+        return description;
+      }
+    } catch {
+      // Fall through to OCR retry
+    }
+
+    // OCR fallback: ask vision model to extract text specifically
+    try {
+      const ocrResult = await describePageImage(
+        img.presigned_url,
+        img.mime_type,
+        "请提取并输出这张图片中所有可见的文字内容，保持原有格式结构。",
+      );
+      if (ocrResult && ocrResult.trim().length > 10) {
+        return ocrResult;
+      }
+    } catch {
+      // Fall through to user hint
+    }
+
+    return (
+      "无法解析当前页面的图片内容。" +
+      "建议使用预览区右上角的截图按钮，将当前完整页面作为附件上传，以便获得更准确的内容分析。"
+    );
   },
 };

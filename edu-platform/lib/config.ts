@@ -108,13 +108,6 @@ export function getRagTaskConsumerName(): string {
   return `edu-next-${process.pid}`;
 }
 
-export function getCronStreamName(): string {
-  return process.env.CRON_STREAM_NAME?.trim() || "edu:cron:stream";
-}
-
-export function getCronStreamGroup(): string {
-  return process.env.CRON_STREAM_GROUP?.trim() || "edu-cron-workers";
-}
 
 export function getMaterialMaxUploadBytes(): number {
   return readInt("MATERIAL_MAX_UPLOAD_BYTES", 52_428_800);

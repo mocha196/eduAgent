@@ -3,21 +3,19 @@
  * Call once at module init; the returned objects are safe to share across requests.
  */
 
-import * as path from "path";
 import OpenAI from "openai";
 
 import { getLLMClient, getChatModel, getMemoryModel } from "./llm-registry";
 import { SessionStore } from "./session-store";
 import { ContextManager } from "./context-manager";
-import { PromptBuilder, promptBuilder } from "./prompt-builder";
-import { MemoryStore, memoryStore } from "./memory/memory-store";
+import { promptBuilder } from "./prompt-builder";
+import { memoryStore } from "./memory/memory-store";
 import { MemoryRetriever } from "./memory/memory-retriever";
 import { MemoryExtractor } from "./memory/memory-extractor";
 import { MemoryConsolidator } from "./memory/memory-consolidator";
 import { MemoryCoordinator } from "./memory/memory-coordinator";
 import { toolRegistry } from "./tools/index";
-import type { AgentConfig, TurnContext } from "./types";
-import type { LearnerProfile } from "./memory/types";
+import type { AgentConfig } from "./types";
 
 // ---- Base persona (fallback if EDUCATOR.md not present) -------------------
 
@@ -63,7 +61,15 @@ export { getSkillsLoader } from "./skills-loader";
 
 // ---- AgentConfig builder --------------------------------------------------
 
-const EVAL_PERSONA = `You are a retrieval-augmented question answering system. Answer questions directly and concisely based on the retrieved knowledge base content. Always call knowledge_query to retrieve relevant information before answering. Do not apply educational scaffolding or pedagogical filtering. You must **answer in the same language as the question.**`;
+const EVAL_PERSONA = `You are a retrieval-augmented question answering system.
+Always call knowledge_query FIRST — do NOT output any text before the first tool call.
+You may call knowledge_query up to 3 times with different English queries to gather all needed information.
+After all tool calls are done, output only the final answer: direct, concise, and grounded strictly in the retrieved content.
+Do NOT narrate your retrieval process or explain what you are about to do.
+
+**Retrieval language:** Always use English for knowledge_query queries regardless of the question's language.
+
+**Answer language:** Answer in the same language as the question (Chinese question → Chinese answer; English → English).`;
 
 export function buildAgentConfig(
   attachments?: AgentConfig["attachments"],

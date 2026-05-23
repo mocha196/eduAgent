@@ -100,31 +100,53 @@ async def content_item_to_surrogate_text_async(
     if not path_str:
         return content_item_to_surrogate_text(item)
 
-    p = Path(str(path_str))
-    if not p.is_file():
-        return content_item_to_surrogate_text(item)
-
     from rag_mvp.config import settings
-
-    try:
-        sz = p.stat().st_size
-    except OSError as exc:
-        logger.debug("ingest VLM skip image stat failed {}: {}", p.name, exc)
-        return base if base else content_item_to_surrogate_text(item)
-
-    if sz > settings.ingest_surrogate_image_vlm_max_bytes:
-        logger.debug(
-            "ingest VLM skip image too large: {} ({} bytes > {})",
-            p.name,
-            sz,
-            settings.ingest_surrogate_image_vlm_max_bytes,
-        )
-        return base if base else content_item_to_surrogate_text(item)
-
-    b64 = base64.standard_b64encode(p.read_bytes()).decode("ascii")
     from rag_mvp.llm import image_mime_type_for_suffix
 
-    mime = image_mime_type_for_suffix(p.suffix)
+    is_url = str(path_str).startswith(("http://", "https://"))
+
+    if is_url:
+        # Download CDN image on-the-fly for VLM analysis
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(path_str, follow_redirects=True)
+                resp.raise_for_status()
+                img_bytes = resp.content
+        except Exception as exc:
+            logger.debug("ingest VLM skip URL image download failed {}: {}", path_str, exc)
+            return base if base else content_item_to_surrogate_text(item)
+
+        if len(img_bytes) > settings.ingest_surrogate_image_vlm_max_bytes:
+            logger.debug("ingest VLM skip URL image too large: {}", path_str)
+            return base if base else content_item_to_surrogate_text(item)
+
+        # Infer mime from URL path
+        url_suffix = "." + path_str.rsplit(".", 1)[-1].split("?")[0] if "." in path_str else ".jpg"
+        mime = image_mime_type_for_suffix(url_suffix)
+        b64 = base64.standard_b64encode(img_bytes).decode("ascii")
+    else:
+        p = Path(str(path_str))
+        if not p.is_file():
+            return content_item_to_surrogate_text(item)
+
+        try:
+            sz = p.stat().st_size
+        except OSError as exc:
+            logger.debug("ingest VLM skip image stat failed {}: {}", p.name, exc)
+            return base if base else content_item_to_surrogate_text(item)
+
+        if sz > settings.ingest_surrogate_image_vlm_max_bytes:
+            logger.debug(
+                "ingest VLM skip image too large: {} ({} bytes > {})",
+                p.name,
+                sz,
+                settings.ingest_surrogate_image_vlm_max_bytes,
+            )
+            return base if base else content_item_to_surrogate_text(item)
+
+        b64 = base64.standard_b64encode(p.read_bytes()).decode("ascii")
+        mime = image_mime_type_for_suffix(p.suffix)
 
     try:
         if vlm_semaphore is not None:
@@ -133,18 +155,18 @@ async def content_item_to_surrogate_text_async(
         else:
             summary = await _call_vision_image_summary(b64, mime)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ingest VLM image summary failed for {}: {}", p.name, exc)
+        logger.warning("ingest VLM image summary failed for {}: {}", path_str, exc)
         return base if base else content_item_to_surrogate_text(item)
 
     summary = (summary or "").strip()
     if not summary or summary == _VISION_SKIPPED_DECORATIVE:
         if summary == _VISION_SKIPPED_DECORATIVE:
-            logger.debug("ingest VLM skip decorative image: {}", p.name)
+            logger.debug("ingest VLM skip decorative image: {}", path_str)
         return base if base else content_item_to_surrogate_text(item)
 
     glue = base if base.strip() else "[Image]"
     merged = f"{glue}\nVisual summary: {summary}".strip()
-    logger.debug("ingest VLM image summary ok: {}", p.name)
+    logger.debug("ingest VLM image summary ok: {}", path_str)
     return merged
 
 

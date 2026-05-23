@@ -1,0 +1,75 @@
+# Vector configuration — edu-platform logging pipeline
+# Reads Docker container stdout → parses JSON → forwards to Loki
+#
+# Mount: ./vector.toml:/etc/vector/vector.toml:ro
+# Needs: /var/run/docker.sock:/var/run/docker.sock:ro
+
+# ── Sources ─────────────────────────────────────────────────────────────────
+
+[sources.docker_logs]
+type = "docker_logs"
+# Only collect logs from edu-platform containers (names start with edu-platform-)
+include_containers = [
+  "edu-platform-nextjs",
+  "edu-platform-cron-worker",
+  "edu-platform-rag-service",
+  "edu-platform-rag-worker",
+]
+# Include image name for labelling when container_name is not set
+include_images = []
+
+# ── Transforms ──────────────────────────────────────────────────────────────
+
+[transforms.parse_logs]
+type = "remap"
+inputs = ["docker_logs"]
+# Try to parse message as JSON (pino / loguru serialize=True both emit JSON).
+# If parsing fails (plain-text line), wrap it in a minimal JSON envelope.
+source = '''
+parsed, err = parse_json(.message)
+if err == null {
+  . = merge!(., parsed)
+  # Normalise level field: pino uses numeric levels, loguru uses strings
+  if is_integer(.level) {
+    level_num = to_int!(.level)
+    if level_num >= 50 { .level = "fatal" }
+    else if level_num >= 40 { .level = "error" }
+    else if level_num >= 30 { .level = "warn" }
+    else if level_num >= 20 { .level = "info" }
+    else { .level = "debug" }
+  } else if is_string(.level) {
+    .level = downcase(string!(.level))
+  }
+  # loguru serialized JSON uses "record.level.name" instead of top-level "level"
+  if exists(.record.level.name) {
+    .level = downcase(string!(.record.level.name))
+  }
+  # Resolve service field: prefer JSON "service" field, else derive from container name
+  if !exists(.service) || is_null(.service) {
+    .service = .container_name
+  }
+} else {
+  # Fallback: plain-text line — wrap it
+  .level = "info"
+  .msg = .message
+  .service = .container_name
+}
+# Always ensure a timestamp
+if !exists(.time) || is_null(.time) {
+  .time = .timestamp
+}
+'''
+
+# ── Sinks ────────────────────────────────────────────────────────────────────
+
+[sinks.loki]
+type = "loki"
+inputs = ["parse_logs"]
+endpoint = "http://loki:3100"
+encoding.codec = "json"
+
+# Labels used for log stream selection in Grafana
+[sinks.loki.labels]
+service = "{{ service }}"
+level = "{{ level }}"
+container = "{{ container_name }}"

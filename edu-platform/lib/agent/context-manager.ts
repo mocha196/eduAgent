@@ -117,8 +117,23 @@ export class ContextManager {
 
     try {
       const summaryText = await this._callSummaryLLM(toSummarize, llmClient, model);
+
+      // Extract fenced code blocks from compressed messages so they survive summarisation.
+      const codeBlockRegex = /```[\s\S]*?```/g;
+      const extractedCodes: string[] = [];
+      for (const msg of toSummarize) {
+        if (msg.role !== "user") continue;
+        const text = typeof msg.content === "string" ? msg.content : "";
+        const blocks = text.match(codeBlockRegex);
+        if (blocks) extractedCodes.push(...blocks);
+      }
+      const codeAppendix =
+        extractedCodes.length > 0
+          ? `\n\n[最近代码片段（压缩前保留）]\n${extractedCodes.join("\n\n").slice(0, 2000)}`
+          : "";
+
       const summaryMessages: Message[] = [
-        { role: "user", content: `[对话历史摘要]\n${summaryText}` },
+        { role: "user", content: `[对话历史摘要]\n${summaryText}${codeAppendix}` },
         { role: "assistant", content: "好的，我已了解之前的对话内容，我们继续。" },
       ];
       return {

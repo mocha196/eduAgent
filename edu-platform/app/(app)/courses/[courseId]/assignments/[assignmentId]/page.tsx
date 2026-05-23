@@ -38,7 +38,7 @@ import { AddQuestionDialog } from "@/components/assignment/AddQuestionDialog";
 import { SubmissionForm } from "@/components/assignment/SubmissionForm";
 import { SubmissionResultView } from "@/components/assignment/SubmissionResultView";
 import { useNotify } from "@/hooks/useNotify";
-import type { AssignmentDetailDto, AssignmentStudentViewDto, CompleteQuestionBody, QuestionItem, RegenerateQuestionBody } from "@/lib/dto/assignment.dto";
+import type { AssignmentDetailDto, AssignmentStudentViewDto, QuestionItem, RegenerateQuestionBody } from "@/lib/dto/assignment.dto";
 import type { SubmissionDetailDto } from "@/lib/dto/submission.dto";
 import { AssignmentStatus } from "@prisma/client";
 
@@ -78,8 +78,8 @@ export default function AssignmentDetailPage() {
   useEffect(() => {
     fetch("/api/v1/user", { credentials: "include" })
       .then((r) => r.json() as Promise<{ role?: string }>)
-      .then((d) => setUserRole((d.role ?? "TEACHER") as "STUDENT" | "TEACHER" | "ADMIN"))
-      .catch(() => setUserRole("TEACHER"));
+      .then((d) => setUserRole((d.role ?? "STUDENT") as "STUDENT" | "TEACHER" | "ADMIN"))
+      .catch(() => setUserRole("STUDENT"));
   }, []);
 
   // ── Student load ───────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ export default function AssignmentDetailPage() {
     return (
       <div className="mx-auto w-full max-w-3xl px-4 py-6 space-y-6">
         <div className="flex items-center gap-3">
-          <Link href={`/courses/${courseId}/assignments`} className="text-muted-foreground hover:text-foreground">
+          <Link href={`/courses/${courseId}?tab=assignments`} className="text-muted-foreground hover:text-foreground">
             <ChevronLeft size={20} />
           </Link>
           <h1 className="text-lg font-semibold flex-1 truncate">{studentAssignment.title}</h1>
@@ -241,23 +241,6 @@ export default function AssignmentDetailPage() {
   }
 
   // ── Add custom question ────────────────────────────────────────────────────
-  async function handlePreviewQuestion(
-    body: Omit<CompleteQuestionBody, "score">,
-  ): Promise<QuestionItem> {
-    const res = await fetch(
-      `/api/v1/courses/${courseId}/assignments/${assignmentId}/preview-question`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(body),
-      },
-    );
-    const d = await res.json() as { question?: QuestionItem; error?: { message: string } };
-    if (!res.ok) throw new Error(d.error?.message ?? "AI 补全失败，请重试");
-    return d.question!;
-  }
-
   function handleAddQuestion(question: QuestionItem, score: number) {
     setQuestions((prev) => [...prev, { ...question, score }]);
     setAddDialogOpen(false);
@@ -367,11 +350,7 @@ export default function AssignmentDetailPage() {
       )}
 
       {!loading && assignment?.status === "GENERATING" && (
-        <div className="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
-          <Loader2 size={36} className="animate-spin text-primary" />
-          <p className="text-sm font-medium">AI 正在生成作业，请稍候…</p>
-          <p className="text-xs"> 生成成功后页面将自动刷新</p>
-        </div>
+        <GeneratingView phase={assignment.generationPhase ?? null} />
       )}
 
       {!loading && assignment?.status === "FAILED" && (
@@ -473,7 +452,6 @@ export default function AssignmentDetailPage() {
               <AddQuestionDialog
                 open={addDialogOpen}
                 onOpenChange={setAddDialogOpen}
-                onPreview={handlePreviewQuestion}
                 onAdd={handleAddQuestion}
               />
             </>
@@ -528,5 +506,186 @@ export default function AssignmentDetailPage() {
         </>
       )}
     </div>
+  );
+}
+
+// ── Generating animation ─────────────────────────────────────────────────────
+
+const PHASES = [
+  { key: "param_extract",    label: "参数识别" },
+  { key: "entity_retrieval", label: "实体检索" },
+  { key: "blueprint_gen",    label: "蓝图生成" },
+  { key: "question_gen",     label: "单题生成" },
+  { key: "reviewing",        label: "审阅中" },
+  { key: "improving",        label: "改进中" },
+] as const;
+
+type PhaseKey = (typeof PHASES)[number]["key"];
+
+function phaseGroup(key: PhaseKey | null): "planner" | "generator" | "reviewer" {
+  if (key === "question_gen") return "generator";
+  if (key === "reviewing" || key === "improving") return "reviewer";
+  return "planner";
+}
+
+function GeneratingView({ phase }: { phase: string | null }) {
+  const group = phaseGroup(phase as PhaseKey | null);
+  const currentIdx = phase ? PHASES.findIndex((p) => p.key === phase) : -1;
+
+  return (
+    <div className="flex flex-col items-center justify-center py-14 gap-8 select-none">
+      <style>{`
+        @keyframes _bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+        @keyframes _dot1 { 0%,80%,100%{opacity:.15} 0%{opacity:1} }
+        @keyframes _dot2 { 0%,100%{opacity:.15} 20%{opacity:1} }
+        @keyframes _dot3 { 0%,100%{opacity:.15} 40%{opacity:1} }
+        @keyframes _pencil { 0%,100%{transform:rotate(-12deg)} 50%{transform:rotate(12deg)} }
+        @keyframes _bubble1 { 0%,45%,100%{opacity:0;transform:scale(.8)} 15%,35%{opacity:1;transform:scale(1)} }
+        @keyframes _bubble2 { 0%,50%,100%{opacity:0;transform:scale(.8)} 65%,85%{opacity:1;transform:scale(1)} }
+        @keyframes _pulse-ring { 0%{transform:scale(1);opacity:.7} 70%,100%{transform:scale(1.6);opacity:0} }
+      `}</style>
+
+      {/* Scene */}
+      {group === "planner" && <PlannerScene />}
+      {group === "generator" && <GeneratorScene />}
+      {group === "reviewer" && <ReviewerScene />}
+
+      {/* Phase step list */}
+      <div className="flex flex-col gap-2 w-64">
+        {PHASES.map((p, i) => {
+          const done = currentIdx > i;
+          const active = currentIdx === i;
+          return (
+            <div key={p.key} className="flex items-center gap-2.5">
+              <span className="relative flex items-center justify-center w-5 h-5 shrink-0">
+                {done && (
+                  <svg viewBox="0 0 20 20" fill="none" className="w-5 h-5 text-green-500">
+                    <circle cx="10" cy="10" r="9" fill="currentColor" opacity=".15" />
+                    <path d="M6 10l3 3 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+                {active && (
+                  <>
+                    <span className="absolute inset-0 rounded-full bg-primary/30" style={{animation:"_pulse-ring 1.4s ease-out infinite"}} />
+                    <span className="w-2.5 h-2.5 rounded-full bg-primary" />
+                  </>
+                )}
+                {!done && !active && (
+                  <span className="w-2 h-2 rounded-full bg-muted-foreground/25" />
+                )}
+              </span>
+              <span className={cn(
+                "text-sm",
+                done && "text-green-600 dark:text-green-400",
+                active && "text-foreground font-semibold",
+                !done && !active && "text-muted-foreground/50",
+              )}>
+                {p.label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground">生成成功后页面将自动刷新</p>
+    </div>
+  );
+}
+
+function PlannerScene() {
+  return (
+    <svg width="120" height="110" viewBox="0 0 120 110" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Body */}
+      <rect x="35" y="50" width="50" height="42" rx="10" fill="oklch(0.55 0.18 250)" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      {/* Head */}
+      <rect x="40" y="20" width="40" height="34" rx="10" fill="oklch(0.6 0.18 250)" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      {/* Eyes */}
+      <circle cx="52" cy="33" r="4" fill="white" />
+      <circle cx="68" cy="33" r="4" fill="white" />
+      <circle cx="53" cy="34" r="2" fill="oklch(0.3 0.18 250)" />
+      <circle cx="69" cy="34" r="2" fill="oklch(0.3 0.18 250)" />
+      {/* Antenna */}
+      <line x1="60" y1="20" x2="60" y2="10" stroke="oklch(0.55 0.18 250)" strokeWidth="2.5" strokeLinecap="round" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      <circle cx="60" cy="8" r="4" fill="oklch(0.7 0.2 220)" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      {/* Mouth bar */}
+      <rect x="52" y="42" width="16" height="4" rx="2" fill="oklch(0.4 0.15 250)" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      {/* Arms */}
+      <rect x="20" y="54" width="16" height="8" rx="4" fill="oklch(0.55 0.18 250)" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      <rect x="84" y="54" width="16" height="8" rx="4" fill="oklch(0.55 0.18 250)" style={{animation:"_bob 2s ease-in-out infinite"}} />
+      {/* Thinking dots */}
+      <circle cx="84" cy="18" r="4" fill="oklch(0.65 0.2 250)" style={{animation:"_dot1 1.2s ease-in-out infinite"}} />
+      <circle cx="96" cy="11" r="5" fill="oklch(0.65 0.2 250)" style={{animation:"_dot2 1.2s ease-in-out infinite"}} />
+      <circle cx="110" cy="5" r="6" fill="oklch(0.65 0.2 250)" style={{animation:"_dot3 1.2s ease-in-out infinite"}} />
+    </svg>
+  );
+}
+
+function GeneratorScene() {
+  return (
+    <svg width="120" height="110" viewBox="0 0 120 110" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Body */}
+      <rect x="35" y="50" width="50" height="42" rx="10" fill="oklch(0.5 0.2 140)" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      {/* Head */}
+      <rect x="40" y="20" width="40" height="34" rx="10" fill="oklch(0.55 0.2 140)" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      {/* Eyes (squint — concentrating) */}
+      <rect x="48" y="31" width="8" height="4" rx="2" fill="white" />
+      <rect x="64" y="31" width="8" height="4" rx="2" fill="white" />
+      {/* Mouth smile */}
+      <path d="M52 43 Q60 49 68 43" stroke="oklch(0.35 0.15 140)" strokeWidth="2" strokeLinecap="round" fill="none" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      {/* Antenna */}
+      <line x1="60" y1="20" x2="60" y2="10" stroke="oklch(0.5 0.2 140)" strokeWidth="2.5" strokeLinecap="round" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      <circle cx="60" cy="8" r="4" fill="oklch(0.7 0.22 110)" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      {/* Arms */}
+      <rect x="20" y="54" width="16" height="8" rx="4" fill="oklch(0.5 0.2 140)" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      <rect x="84" y="54" width="16" height="8" rx="4" fill="oklch(0.5 0.2 140)" style={{animation:"_bob 1.8s ease-in-out infinite"}} />
+      {/* Pencil held in right hand */}
+      <g style={{transformOrigin:"84px 58px", animation:"_pencil 1s ease-in-out infinite"}}>
+        <rect x="94" y="42" width="6" height="24" rx="3" fill="oklch(0.85 0.15 80)" />
+        <polygon points="94,66 100,66 97,74" fill="oklch(0.75 0.12 50)" />
+        <rect x="94" y="42" width="6" height="5" rx="2" fill="oklch(0.65 0.08 20)" />
+      </g>
+    </svg>
+  );
+}
+
+function ReviewerScene() {
+  return (
+    <svg width="160" height="110" viewBox="0 0 160 110" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Reviewer robot (left) */}
+      <rect x="10" y="50" width="40" height="40" rx="8" fill="oklch(0.55 0.18 30)" />
+      <rect x="14" y="22" width="32" height="30" rx="8" fill="oklch(0.6 0.18 30)" />
+      <circle cx="24" cy="35" r="4" fill="white" />
+      <circle cx="38" cy="35" r="4" fill="white" />
+      <circle cx="25" cy="36" r="2" fill="oklch(0.3 0.15 30)" />
+      <circle cx="39" cy="36" r="2" fill="oklch(0.3 0.15 30)" />
+      <rect x="22" y="45" width="16" height="3" rx="1.5" fill="oklch(0.42 0.12 30)" />
+      {/* Reviewer speech bubble */}
+      <g style={{animation:"_bubble1 2.4s ease-in-out infinite"}}>
+        <rect x="48" y="4" width="32" height="20" rx="6" fill="oklch(0.6 0.18 30)" />
+        <polygon points="52,24 46,30 58,24" fill="oklch(0.6 0.18 30)" />
+        <text x="64" y="18" textAnchor="middle" fontSize="10" fill="white" fontWeight="bold">?</text>
+      </g>
+
+      {/* Fixer robot (right) */}
+      <rect x="110" y="50" width="40" height="40" rx="8" fill="oklch(0.5 0.2 280)" />
+      <rect x="114" y="22" width="32" height="30" rx="8" fill="oklch(0.55 0.2 280)" />
+      <circle cx="124" cy="35" r="4" fill="white" />
+      <circle cx="138" cy="35" r="4" fill="white" />
+      <circle cx="125" cy="36" r="2" fill="oklch(0.3 0.15 280)" />
+      <circle cx="139" cy="36" r="2" fill="oklch(0.3 0.15 280)" />
+      <path d="M122 47 Q130 52 138 47" stroke="oklch(0.38 0.12 280)" strokeWidth="2" strokeLinecap="round" fill="none" />
+      {/* Fixer speech bubble */}
+      <g style={{animation:"_bubble2 2.4s ease-in-out infinite"}}>
+        <rect x="80" y="4" width="32" height="20" rx="6" fill="oklch(0.55 0.2 280)" />
+        <polygon points="102,24 108,30 96,24" fill="oklch(0.55 0.2 280)" />
+        <text x="96" y="18" textAnchor="middle" fontSize="10" fill="white" fontWeight="bold">✓</text>
+      </g>
+
+      {/* Center arrow left-right */}
+      <g opacity=".5">
+        <line x1="55" y1="70" x2="105" y2="70" stroke="oklch(0.6 0.05 250)" strokeWidth="1.5" strokeDasharray="4 3" />
+        <polygon points="100,66 108,70 100,74" fill="oklch(0.6 0.05 250)" />
+        <polygon points="60,66 52,70 60,74" fill="oklch(0.6 0.05 250)" />
+      </g>
+    </svg>
   );
 }

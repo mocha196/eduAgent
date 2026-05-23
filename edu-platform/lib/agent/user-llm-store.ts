@@ -24,7 +24,7 @@ import path from "path";
 // ---- Types -----------------------------------------------------------------
 
 // Local aliases to avoid circular imports with llm-registry.ts
-export type LLMRoleKey = "chat" | "vision" | "title" | "memory" | "grading";
+export type LLMRoleKey = "chat" | "vision" | "title" | "memory" | "grading" | "completion";
 export type UserRoleOverride = {
   apiKey?: string;
   baseURL?: string;
@@ -36,7 +36,7 @@ export type UserLlmConfig = Partial<Record<LLMRoleKey, UserRoleOverride>>;
 type StoredRoleConfig = { apiKey?: string; baseURL?: string; model?: string };
 type StoredConfig = Partial<Record<LLMRoleKey, StoredRoleConfig>>;
 
-export const ALL_ROLES: LLMRoleKey[] = ["chat", "vision", "title", "memory", "grading"];
+export const ALL_ROLES: LLMRoleKey[] = ["chat", "vision", "title", "memory", "grading", "completion"];
 
 // ---- AsyncLocalStorage -----------------------------------------------------
 

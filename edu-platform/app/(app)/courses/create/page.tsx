@@ -14,7 +14,7 @@ export default function CreateCoursePage() {
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [coverImageUrl, setCoverImageUrl] = useState("");
+  const [coverImageUrl] = useState("");
   const [notify, setNotify] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   function showNotify(type: "success" | "error", msg: string) {
@@ -103,7 +103,7 @@ export default function CreateCoursePage() {
               className="resize-none"
             />
           </div>
-
+{/* 
           <div className="space-y-1.5">
             <label htmlFor="cover" className="text-sm font-medium text-foreground">
               封面图片 URL
@@ -114,7 +114,7 @@ export default function CreateCoursePage() {
               value={coverImageUrl}
               onChange={(e) => setCoverImageUrl(e.target.value)}
             />
-          </div>
+          </div> */}
 
           <div className="flex items-center gap-3 pt-1">
             <Button type="submit" disabled={saving} className="w-full sm:w-auto">

@@ -31,7 +31,6 @@ export default function KnowledgeGraphPanel({ courseId, isTeacher }: KnowledgeGr
   }
 
   if (status === "idle") {
-    if (!isTeacher) return null;
     return (
       <div className="rounded-xl border border-border bg-card p-5 flex items-center justify-between gap-4">
         <div>
@@ -40,7 +39,7 @@ export default function KnowledgeGraphPanel({ courseId, isTeacher }: KnowledgeGr
         </div>
         <Button variant="outline" size="sm" onClick={() => void handleLoad()} className="shrink-0">
           <Network size={14} className="mr-1.5" />
-          生成图谱
+          {isTeacher ? "生成图谱" : "查看图谱"}
         </Button>
       </div>
     );
@@ -72,7 +71,9 @@ export default function KnowledgeGraphPanel({ courseId, isTeacher }: KnowledgeGr
             </Button>
           )}
         </div>
-        <p className="text-xs text-muted-foreground">暂无知识图谱数据，请先上传并索引课程资料。</p>
+        <p className="text-xs text-muted-foreground">
+          {isTeacher ? "暂无知识图谱数据，请先上传并索引课程资料。" : "暂无知识图谱数据，等待教师上传课程资料后再试。"}
+        </p>
       </div>
     );
   }

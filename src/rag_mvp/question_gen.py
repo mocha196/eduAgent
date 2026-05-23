@@ -551,6 +551,7 @@ async def _generate_one(
         "id":               q_id,
         "type":             q_type,
         "objective":        objective,
+        "difficulty":       difficulty,
         "entities":         entity_names if entity_names is not None else [entity_name],
         "tags":             entity_names if entity_names is not None else [entity_name],
         "importance_score": round(score, 2),

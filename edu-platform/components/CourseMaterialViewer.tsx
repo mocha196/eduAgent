@@ -14,6 +14,7 @@ import {
   markdownRemarkPlugins,
   normalizeMathDelimiters,
 } from "@/lib/markdownMath";
+import { markdownComponents } from "@/lib/markdownComponents";
 
 type MaterialDetail = {
   id: string;
@@ -36,6 +37,12 @@ type Props = {
   sourceLabel?: string;
   /** Base path for material API calls, e.g. "/api/v1/me/materials". Defaults to "/api/v1/materials". */
   apiBase?: string;
+  /**
+   * Called whenever the capture function changes. Pass a function to capture the current
+   * page as a File, or null when no capturable content is available (material unloaded, audio).
+   * Used by the chat component to silently attach a page snapshot on message send.
+   */
+  onCaptureFnChange?: (fn: (() => Promise<File | null>) | null) => void;
 };
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v", "wmv"]);
@@ -49,6 +56,7 @@ export default function CourseMaterialViewer({
   chunkId,
   sourceLabel,
   apiBase = "/api/v1/materials",
+  onCaptureFnChange,
 }: Props) {
   const [material, setMaterial] = useState<MaterialDetail | null>(null);
   const [chunkError, setChunkError] = useState<string | null>(null);
@@ -91,7 +99,7 @@ export default function CourseMaterialViewer({
     } finally {
       setLoading(false);
     }
-  }, [materialId]);
+  }, [materialId, apiBase]);
 
   useEffect(() => {
     setVideoDataLoaded(false);
@@ -142,7 +150,8 @@ export default function CourseMaterialViewer({
     return () => {
       cancelled = true;
     };
-  }, [materialId, material?.file_type, material?.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [materialId, material?.file_type, material?.id, apiBase]);
 
   useEffect(() => {
     setPdfViewportReady(false);
@@ -220,7 +229,8 @@ export default function CourseMaterialViewer({
       }
     })();
     return () => { cancelled = true; };
-  }, [materialId, material?.file_type, material?.id, renderPdfPage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [materialId, material?.file_type, material?.id, renderPdfPage, apiBase]);
 
   // Re-render when page number changes
   useEffect(() => {
@@ -255,6 +265,93 @@ export default function CourseMaterialViewer({
     };
   }, [materialId, chunkId]);
 
+  // Derived variables — computed before early returns so that Hooks below are
+  // always called unconditionally.  When `material` is null the early returns
+  // below will fire first, so the default values here are never used in the JSX.
+  const ft = material?.file_type.toLowerCase() ?? "";
+  const showPdfCanvas = ft === "pdf";
+  const showOfficePdfIframe =
+    !!office && material?.preview_pdf_status === "READY";
+  const previewFailed =
+    !!office && material?.preview_pdf_status === "FAILED";
+  const previewPending =
+    !!office && material?.preview_pdf_status === "PENDING";
+  const previewPendingText =
+    previewPending && material?.status === "READY"
+      ? "索引已完成，正在同步 PDF 预览状态…"
+      : "正在生成 PDF 预览…";
+
+  const textPreviewReady =
+    (ft === "md" || ft === "txt") && textBody !== null;
+
+  const isVideo = isVideoType(ft);
+  const isAudio = isAudioType(ft);
+
+  const hasMediaContent =
+    (isVideo || isAudio) &&
+    material?.status === "READY" &&
+    !!(material?.transcript || material?.video_summary);
+
+  // Screenshot availability per type
+  const canScreenshot =
+    !captureBusy &&
+    !loading &&
+    !previewPending &&
+    (
+      textPreviewReady ||
+      (showPdfCanvas && pdfViewportReady) ||
+      (isVideo && videoDataLoaded) ||
+      previewFailed
+    ) &&
+    !isAudio &&
+    !showOfficePdfIframe;
+
+  const safeScreenshotBase = (material?.filename ?? "")
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .slice(0, 80);
+
+  /**
+   * Capture the current page/frame as a File without side-effects.
+   * Returns null if the material is not in a capturable state (audio, loading, etc.).
+   */
+  const captureCurrentPageFile = useCallback(async (): Promise<File | null> => {
+    if (!canScreenshot) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    if (showPdfCanvas && pdfCanvasRef.current) {
+      const canvas = pdfCanvasRef.current;
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((b) => b ? resolve(b) : reject(new Error("canvas.toBlob failed")), "image/png");
+      });
+      return new File([blob], `资料截图-${safeScreenshotBase}-${stamp}.png`, { type: "image/png" });
+    } else if (isVideo && videoRef.current) {
+      const video = videoRef.current;
+      const tmpCanvas = document.createElement("canvas");
+      tmpCanvas.width = video.videoWidth || 640;
+      tmpCanvas.height = video.videoHeight || 360;
+      const ctx = tmpCanvas.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, tmpCanvas.width, tmpCanvas.height);
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        tmpCanvas.toBlob((b) => b ? resolve(b) : reject(new Error("canvas.toBlob failed")), "image/png");
+      });
+      return new File([blob], `资料截图-${safeScreenshotBase}-${stamp}.png`, { type: "image/png" });
+    } else if (textScrollRef.current) {
+      return captureScrollViewportToPngFile(
+        textScrollRef.current,
+        `资料截图-${safeScreenshotBase}-${stamp}.png`,
+      );
+    }
+    return null;
+  }, [canScreenshot, showPdfCanvas, isVideo, safeScreenshotBase]);
+
+  // Notify parent whenever the capture function becomes available or unavailable.
+  useEffect(() => {
+    onCaptureFnChange?.(canScreenshot ? captureCurrentPageFile : null);
+    return () => onCaptureFnChange?.(null);
+  // captureCurrentPageFile is stable when canScreenshot deps are unchanged
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canScreenshot, captureCurrentPageFile]);
+
   if (!materialId) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[120px] py-8 text-muted-foreground gap-2 px-3 text-center">
@@ -280,85 +377,12 @@ export default function CourseMaterialViewer({
     );
   }
 
-  const ft = material.file_type.toLowerCase();
-  const showPdfCanvas = ft === "pdf";
-  const showOfficePdfIframe =
-    office && material.preview_pdf_status === "READY";
-  const previewFailed =
-    office && material.preview_pdf_status === "FAILED";
-  const previewPending =
-    office && material.preview_pdf_status === "PENDING";
-  const previewPendingText =
-    previewPending && material.status === "READY"
-      ? "索引已完成，正在同步 PDF 预览状态…"
-      : "正在生成 PDF 预览…";
-
-  const textPreviewReady =
-    (ft === "md" || ft === "txt") && textBody !== null;
-
-  const isVideo = isVideoType(ft);
-  const isAudio = isAudioType(ft);
-
-  const hasMediaContent =
-    (isVideo || isAudio) &&
-    material.status === "READY" &&
-    !!(material.transcript || material.video_summary);
-
-  // Screenshot availability per type
-  const canScreenshot =
-    !captureBusy &&
-    !loading &&
-    !previewPending &&
-    (
-      textPreviewReady ||
-      (showPdfCanvas && pdfViewportReady) ||
-      (isVideo && videoDataLoaded) ||
-      previewFailed
-    ) &&
-    !isAudio &&
-    !showOfficePdfIframe;
-
-  const safeScreenshotBase = material.filename
-    .replace(/[/\\:*?"<>|]/g, "_")
-    .slice(0, 80);
-
   const handleScreenshotToChat = async () => {
     if (!canScreenshot) return;
     setCaptureBusy(true);
     try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      let file: File;
-
-      if (showPdfCanvas && pdfCanvasRef.current) {
-        // PDF: capture the rendered canvas directly
-        const canvas = pdfCanvasRef.current;
-        const blob = await new Promise<Blob>((resolve, reject) => {
-          canvas.toBlob((b) => b ? resolve(b) : reject(new Error("canvas.toBlob failed")), "image/png");
-        });
-        file = new File([blob], `资料截图-${safeScreenshotBase}-${stamp}.png`, { type: "image/png" });
-      } else if (isVideo && videoRef.current) {
-        // Video: capture current frame to canvas
-        const video = videoRef.current;
-        const tmpCanvas = document.createElement("canvas");
-        tmpCanvas.width = video.videoWidth || 640;
-        tmpCanvas.height = video.videoHeight || 360;
-        const ctx = tmpCanvas.getContext("2d");
-        if (!ctx) throw new Error("无法创建 canvas");
-        ctx.drawImage(video, 0, 0, tmpCanvas.width, tmpCanvas.height);
-        const blob = await new Promise<Blob>((resolve, reject) => {
-          tmpCanvas.toBlob((b) => b ? resolve(b) : reject(new Error("canvas.toBlob failed")), "image/png");
-        });
-        file = new File([blob], `资料截图-${safeScreenshotBase}-${stamp}.png`, { type: "image/png" });
-      } else {
-        // Text/markdown
-        const el = textScrollRef.current;
-        if (!el) throw new Error("截屏目标不存在");
-        file = await captureScrollViewportToPngFile(
-          el,
-          `资料截图-${safeScreenshotBase}-${stamp}.png`,
-        );
-      }
-
+      const file = await captureCurrentPageFile();
+      if (!file) return;
       window.dispatchEvent(
         new CustomEvent(EDU_CHAT_ADD_ATTACHMENT_EVENT, {
           detail: { file },
@@ -622,6 +646,7 @@ export default function CourseMaterialViewer({
                     <ReactMarkdown
                       remarkPlugins={markdownRemarkPlugins}
                       rehypePlugins={markdownRehypePlugins}
+                      components={markdownComponents}
                     >
                       {normalizeMathDelimiters(material.video_summary)}
                     </ReactMarkdown>
@@ -645,6 +670,7 @@ export default function CourseMaterialViewer({
               <ReactMarkdown
                 remarkPlugins={markdownRemarkPlugins}
                 rehypePlugins={markdownRehypePlugins}
+                components={markdownComponents}
               >
                 {normalizeMathDelimiters(textBody)}
               </ReactMarkdown>

@@ -19,6 +19,8 @@ export type SubAgentConfig = {
   /** Optional context (user/session IDs etc.) passed through for tool execution */
   ctx?: TurnContext;
   model?: string;
+  /** Override temperature (e.g. 0 for deterministic eval runs) */
+  temperature?: number;
 };
 
 export type SubTaskResult = {
@@ -82,6 +84,7 @@ export async function runSubAgent(
       messages,
       tools: openaiTools.length > 0 ? openaiTools : undefined,
       tool_choice: openaiTools.length > 0 ? "auto" : undefined,
+      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
       // Disable DeepSeek thinking mode
       ...subExtraBody,
     } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);

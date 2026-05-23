@@ -28,7 +28,12 @@ const TYPE_LABEL: Record<StudentQuestionItem["type"], string> = {
 
 export function SubmissionForm({ assignment, courseId, assignmentId, existingSubmission, onSubmitted }: Props) {
   const questions = assignment.questions ?? [];
-  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [answers, setAnswers] = useState<Record<number, string>>(() => {
+    if (!existingSubmission?.answers) return {};
+    return Object.fromEntries(
+      existingSubmission.answers.map((a) => [a.questionId, a.answer])
+    );
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,7 +90,8 @@ export function SubmissionForm({ assignment, courseId, assignmentId, existingSub
         <div className="rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30 p-4 text-sm text-blue-700 dark:text-blue-300">
           你已于 {new Date(existingSubmission.submittedAt).toLocaleString("zh-CN")} 提交，当前状态：
           <strong className="ml-1">
-            {existingSubmission.status === "GRADING" ? "批改中" : "待批改"}
+            {existingSubmission.status === "RETURNED" ? "已批改" :
+             existingSubmission.status === "GRADING" ? "待批改" : "待批改"}
           </strong>
           。可重新填写答案并再次提交（截止前）。
         </div>

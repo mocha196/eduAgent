@@ -11,7 +11,7 @@ vi.mock("@/lib/agent/subagent", () => ({
   runSubAgent: vi.fn().mockResolvedValue({ success: false, summary: "" }),
 }));
 
-import { knowledgeQueryTool, buildMindmapTool } from "@/lib/agent/tools/rag";
+import { knowledgeQueryTool } from "@/lib/agent/tools/rag";
 
 const ctx: TurnContext = {
   userId: "u-1",
@@ -117,26 +117,6 @@ describe("RAG tools", () => {
     const payload = JSON.parse(String(req.body)) as Record<string, unknown>;
     expect(payload.source).toBe("all");
     expect(payload.top_k).toBe(20);
-  });
-
-  it("业务规则：build_mindmap 成功时应返回摘要而非超长 HTML 正文", async () => {
-    // given
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        markdown: "# 导图\n- A\n- B",
-        html: "<html>" + "x".repeat(300) + "</html>",
-      }),
-    });
-    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
-
-    // when
-    const result = asString(await buildMindmapTool.execute({ source: "./notes" }, ctx));
-
-    // then
-    const parsed = JSON.parse(result) as { markdown: string; html_length: number };
-    expect(parsed.markdown).toContain("# 导图");
-    expect(parsed.html_length).toBeGreaterThan(100);
   });
 
   // ---- 个人知识库（personal KB）业务规则 -------------------------------------

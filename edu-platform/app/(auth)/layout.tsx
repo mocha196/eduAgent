@@ -14,13 +14,13 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       {/* Left panel */}
       <aside className="hidden lg:flex lg:w-[480px] xl:w-[540px] relative flex-col justify-between p-12 overflow-hidden bg-[oklch(0.20_0.010_262)] text-white shrink-0">
         {/* Decorative blobs */}
-        <div className="pointer-events-none absolute -top-32 -left-32 h-80 w-80 rounded-full bg-[oklch(0.54_0.130_68)] opacity-20 blur-3xl" />
-        <div className="pointer-events-none absolute -bottom-24 -right-16 h-64 w-64 rounded-full bg-[oklch(0.54_0.130_68)] opacity-15 blur-3xl" />
+        <div className="pointer-events-none absolute -top-32 -left-32 h-80 w-80 rounded-full bg-[oklch(0.54_0.130_250)] opacity-20 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-24 -right-16 h-64 w-64 rounded-full bg-[oklch(0.54_0.130_250)] opacity-15 blur-3xl" />
         <div className="pointer-events-none absolute top-1/2 left-1/3 h-40 w-40 rounded-full bg-[oklch(0.60_0.12_250)] opacity-10 blur-2xl" />
 
         {/* Brand */}
         <div className="relative z-10 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[oklch(0.54_0.130_68)] shadow-lg">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[oklch(0.54_0.130_250)] shadow-lg">
             <GraduationCap size={22} />
           </div>
           <div className="leading-tight">
@@ -33,7 +33,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         <div className="relative z-10 space-y-4">
           <h1 className="font-display text-3xl font-semibold leading-tight text-white">
             让教学流程与{" "}
-            <span className="text-[oklch(0.82_0.10_72)]">AI 学习支持</span>
+            <span className="text-[oklch(0.82_0.10_250)]">AI 学习支持</span>
             {" "}自然融合
           </h1>
           <p className="text-sm leading-relaxed text-white/60 max-w-xs">
@@ -47,7 +47,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
           {features.map(({ icon: Icon, title, desc }) => (
             <div key={title} className="flex items-start gap-3">
               <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/10">
-                <Icon size={14} className="text-[oklch(0.82_0.10_72)]" />
+                <Icon size={14} className="text-[oklch(0.82_0.10_250)]" />
               </div>
               <div>
                 <div className="text-[13px] font-semibold text-white/90">{title}</div>

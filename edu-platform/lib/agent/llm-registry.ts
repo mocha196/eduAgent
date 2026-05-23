@@ -32,8 +32,11 @@
 
 import OpenAI from "openai";
 import { getUserLlmStore } from "./user-llm-store";
+import { logger } from "@/lib/logger";
 
-export type LLMRole = "chat" | "vision" | "title" | "memory" | "grading";
+const log = logger.child({ component: "llm-registry" });
+
+export type LLMRole = "chat" | "vision" | "title" | "memory" | "grading" | "completion";
 
 export type RoleConfig = {
   apiKey: string;
@@ -60,52 +63,129 @@ export function getRoleConfig(role: LLMRole): RoleConfig {
   // Per-user overrides from AsyncLocalStorage (set by runWithUserLlm in chatService et al.)
   const userCfg = getUserLlmStore();
   const u = userCfg?.[role] ?? {};
-  // Fallback helper: user override first, then env-derived value
-  const pick = (userVal: string | undefined, envVal: string | undefined) =>
+  // Fallback helpers: user override first, then env-derived value.
+  // pickStr: envVal is guaranteed non-undefined → returns string.
+  // pickOpt: envVal may be undefined → returns string | undefined.
+  const pickStr = (userVal: string | undefined, envVal: string): string =>
+    s(userVal) ?? envVal;
+  const pickOpt = (userVal: string | undefined, envVal: string | undefined): string | undefined =>
     s(userVal) ?? envVal;
 
   switch (role) {
     case "chat":
       return {
-        apiKey: pick(u.apiKey, e("LLM_CHAT_API_KEY") ?? defaultKey),
-        baseURL: pick(u.baseURL, e("LLM_CHAT_BASE_URL") ?? defaultBase),
-        model: pick(u.model, e("LLM_CHAT_MODEL") ?? defaultModel),
+        apiKey: pickStr(u.apiKey, e("LLM_CHAT_API_KEY") ?? defaultKey),
+        baseURL: pickOpt(u.baseURL, e("LLM_CHAT_BASE_URL") ?? defaultBase),
+        model: pickStr(u.model, e("LLM_CHAT_MODEL") ?? defaultModel),
       };
 
     case "title":
       return {
-        apiKey: pick(u.apiKey, e("LLM_TITLE_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
-        baseURL: pick(u.baseURL, e("LLM_TITLE_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
-        model: pick(u.model, e("LLM_TITLE_MODEL") ?? e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+        apiKey: pickStr(u.apiKey, e("LLM_TITLE_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
+        baseURL: pickOpt(u.baseURL, e("LLM_TITLE_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
+        model: pickStr(u.model, e("LLM_TITLE_MODEL") ?? e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
       };
 
     case "vision":
       return {
-        apiKey: pick(u.apiKey, e("LLM_VISION_API_KEY") ?? defaultKey),
-        baseURL: pick(u.baseURL, e("LLM_VISION_BASE_URL") ?? defaultBase),
-        model: pick(u.model, e("LLM_VISION_MODEL") ?? defaultModel),
+        apiKey: pickStr(u.apiKey, e("LLM_VISION_API_KEY") ?? defaultKey),
+        baseURL: pickOpt(u.baseURL, e("LLM_VISION_BASE_URL") ?? defaultBase),
+        model: pickStr(u.model, e("LLM_VISION_MODEL") ?? defaultModel),
       };
 
     case "memory":
       return {
-        apiKey: pick(u.apiKey, defaultKey),
-        baseURL: pick(u.baseURL, defaultBase),
-        model: pick(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+        apiKey: pickStr(u.apiKey, e("LLM_MEMORY_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
+        baseURL: pickOpt(u.baseURL, e("LLM_MEMORY_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
+        model: pickStr(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
       };
 
     case "grading":
       return {
-        apiKey: pick(u.apiKey, defaultKey),
-        baseURL: pick(u.baseURL, defaultBase),
-        model: pick(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+        apiKey: pickStr(u.apiKey, e("LLM_MEMORY_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
+        baseURL: pickOpt(u.baseURL, e("LLM_MEMORY_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
+        model: pickStr(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+      };
+
+    // completion role — FIM endpoint (deepseek-v4-flash via beta URL by default)
+    // Env: LLM_COMPLETION_API_KEY, LLM_COMPLETION_BASE_URL, LLM_COMPLETION_MODEL
+    case "completion":
+      return {
+        apiKey: pickStr(u.apiKey, e("LLM_COMPLETION_API_KEY") ?? defaultKey),
+        baseURL: pickOpt(u.baseURL, e("LLM_COMPLETION_BASE_URL") ?? "https://api.deepseek.com/beta"),
+        model: pickStr(u.model, e("LLM_COMPLETION_MODEL") ?? "deepseek-v4-flash"),
       };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Debug logging — enabled by LLM_DEBUG=true in .env
+// ---------------------------------------------------------------------------
+
+const _LLM_DEBUG = process.env.LLM_DEBUG === "true" || process.env.LLM_DEBUG === "1";
+const _LLM_DEBUG_MAX_CHARS = Math.max(0, parseInt(process.env.LLM_DEBUG_MAX_CHARS ?? "400", 10) || 400);
+
+function _clip(s: string): string {
+  const str = (s ?? "").replace(/\n/g, "↵");
+  return _LLM_DEBUG_MAX_CHARS > 0 && str.length > _LLM_DEBUG_MAX_CHARS
+    ? str.slice(0, _LLM_DEBUG_MAX_CHARS) + "…"
+    : str;
+}
+
+/**
+ * Wraps an OpenAI client's `chat.completions.create` to log inputs, outputs
+ * and errors when LLM_DEBUG=true. API keys are never logged.
+ * Streaming calls log the input only (STREAM tag); the stream object is returned as-is.
+ */
+function _wrapClientForDebug(client: OpenAI, role: LLMRole): OpenAI {
+  if (!_LLM_DEBUG) return client;
+
+  const completions = client.chat.completions;
+  const origCreate = completions.create.bind(completions) as typeof completions.create;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (completions as any).create = async function (params: any, options?: any) {
+    const model: string = params.model ?? "(unknown)";
+    const msgsSummary: string = Array.isArray(params.messages)
+      ? (params.messages as Array<{ role: string; content: unknown }>)
+          .map((m) => {
+            const content =
+              typeof m.content === "string" ? m.content : "[multimodal]";
+            return `${m.role}:${_clip(content)}`;
+          })
+          .join(" │ ")
+      : "(no messages)";
+    if (params.stream) {
+      log.debug({ role, model, msgs: msgsSummary, tools: params.tools?.length }, "LLM stream");
+      try {
+        return await origCreate(params, options);
+      } catch (err) {
+        log.error({ err, role, model, msgs: msgsSummary }, "LLM stream error");
+        throw err;
+      }
+    }
+
+    log.debug({ role, model, msgs: msgsSummary, tools: params.tools?.length }, "LLM call");
+    try {
+      const result = await origCreate(params, options);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const out: string = _clip((result as any)?.choices?.[0]?.message?.content ?? JSON.stringify(result));
+      log.debug({ role, model, result: out }, "LLM ok");
+      return result;
+    } catch (err) {
+      log.error({ err, role, model, msgs: msgsSummary }, "LLM call error");
+      throw err;
+    }
+  };
+
+  return client;
 }
 
 /** Create a new OpenAI-compatible client for the given role. */
 export function getLLMClient(role: LLMRole): OpenAI {
   const { apiKey, baseURL } = getRoleConfig(role);
-  return new OpenAI({ apiKey, baseURL });
+  const client = new OpenAI({ apiKey, baseURL });
+  return _wrapClientForDebug(client, role);
 }
 
 /**

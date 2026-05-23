@@ -1,0 +1,15 @@
+{
+  "servers": [
+    {
+      "id": "everything",
+      "label": "MCP Everything",
+      "enabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-everything"
+      ]
+    }
+  ]
+}

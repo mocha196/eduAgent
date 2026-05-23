@@ -52,6 +52,7 @@ export default function AdminSkillsPage() {
     }
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { void load(); }, []);
 
   async function save(updated: SkillSource[]) {

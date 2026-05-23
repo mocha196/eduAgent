@@ -40,6 +40,7 @@ export default function PrivacyPage() {
     }
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { void loadUser(); }, []);
 
   async function updateCollection(enabled: boolean) {

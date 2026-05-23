@@ -15,7 +15,8 @@ export type ApiErrorCode =
   | "NOT_PUBLISHED"
   | "DEADLINE_PASSED"
   | "ALREADY_RETURNED"
-  | "NOT_GRADED";
+  | "NOT_GRADED"
+  | "ALREADY_ANSWERED";
 
 export class ApiError extends Error {
   readonly status: number;

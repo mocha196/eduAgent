@@ -249,9 +249,12 @@ export async function getKnowledgeAnalytics(
     heat_score: Number(r.hit_count),
   }));
 
+  // --- Error-prone knowledge points from assignment submissions ---
+  const error_prone_knowledge_points = await computeErrorProneKnowledgePoints(courseId);
+
   return {
     high_frequency_questions,
-    error_prone_knowledge_points: [], // reserved for future assignment-submission data
+    error_prone_knowledge_points,
     knowledge_heatmap,
   };
 }
@@ -296,5 +299,259 @@ export async function getStudentLearningProgress(
     weak_areas: weak.slice(0, 15),
     recent_activity: recent ? recent.toISOString() : null,
     engagement_score: Math.round(engagement_score * 100) / 100,
+  };
+}
+
+// ── Assignment Analytics ──────────────────────────────────────────────────────
+
+export type ScoreBucket = { range: string; count: number };
+
+export type AssignmentStats = {
+  id: string;
+  title: string;
+  maxScore: number;
+  submittedCount: number;
+  gradedCount: number;
+  returnedCount: number;
+  enrolledCount: number;
+  submissionRate: number;
+  avgScore: number | null;
+  scoreDistribution: ScoreBucket[];
+};
+
+export type QuestionAnalysisItem = {
+  assignmentId: string;
+  assignmentTitle: string;
+  questionId: number;
+  questionStem: string;
+  questionType: string;
+  entities: string[];
+  errorRate: number;
+  errorCount: number;
+  totalAnswered: number;
+  avgScore: number;
+};
+
+export type AssignmentAnalyticsResult = {
+  assignments: AssignmentStats[];
+  questionAnalysis: QuestionAnalysisItem[];
+};
+
+type GradeRow = {
+  questionId: number;
+  score: number;
+  maxScore: number;
+  isCorrect: boolean | null;
+};
+
+type GradingResultJson = {
+  totalScore: number;
+  maxScore: number;
+  questionGrades: GradeRow[];
+};
+
+type QuestionJson = {
+  id: number;
+  type: string;
+  entities?: string[];
+  question: string;
+  score: number;
+};
+
+function parseGradingResult(raw: unknown): GradingResultJson | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.totalScore !== "number" || !Array.isArray(r.questionGrades)) return null;
+  return raw as GradingResultJson;
+}
+
+/** Internal: compute error-prone knowledge points from all course submissions. */
+async function computeErrorProneKnowledgePoints(
+  courseId: string,
+): Promise<{ knowledge_point: string; error_rate: number; error_count: number }[]> {
+  // Fetch all graded submissions for this course
+  const submissions = await prisma.assignmentSubmission.findMany({
+    where: {
+      assignment: { courseId },
+      status: { in: ["GRADED", "RETURNED"] },
+    },
+    select: { gradingResult: true, assignment: { select: { questions: true } } },
+  });
+
+  // Map: entity name → { errorCount, totalAnswered }
+  const entityStats = new Map<string, { errorCount: number; totalAnswered: number }>();
+
+  for (const sub of submissions) {
+    const grading = parseGradingResult(sub.gradingResult);
+    if (!grading) continue;
+    const questions: QuestionJson[] = Array.isArray(sub.assignment.questions)
+      ? (sub.assignment.questions as QuestionJson[])
+      : [];
+    const questionMap = new Map(questions.map((q) => [q.id, q]));
+
+    for (const grade of grading.questionGrades) {
+      const q = questionMap.get(grade.questionId);
+      if (!q) continue;
+      const entities = q.entities ?? [];
+      const isWrong = grade.isCorrect === false || (grade.score < grade.maxScore && grade.maxScore > 0);
+      for (const entity of entities) {
+        if (!entity) continue;
+        const cur = entityStats.get(entity) ?? { errorCount: 0, totalAnswered: 0 };
+        cur.totalAnswered += 1;
+        if (isWrong) cur.errorCount += 1;
+        entityStats.set(entity, cur);
+      }
+    }
+  }
+
+  return Array.from(entityStats.entries())
+    .filter(([, v]) => v.totalAnswered >= 1)
+    .map(([entity, v]) => ({
+      knowledge_point: entity,
+      error_rate: Math.round((v.errorCount / v.totalAnswered) * 100) / 100,
+      error_count: v.errorCount,
+    }))
+    .sort((a, b) => b.error_rate - a.error_rate)
+    .slice(0, 10);
+}
+
+/**
+ * Assignment-level analytics for a course (teachers only).
+ * Returns per-assignment stats and per-question error rates.
+ * @param assignmentId - optional filter to a single assignment
+ */
+export async function getAssignmentAnalytics(
+  courseId: string,
+  assignmentId?: string,
+): Promise<AssignmentAnalyticsResult> {
+  // Enrolled student count
+  const enrolledCount = await prisma.courseEnrollment.count({ where: { courseId } });
+
+  // Fetch published assignments (optionally filtered)
+  const assignments = await prisma.assignment.findMany({
+    where: {
+      courseId,
+      status: { in: ["PUBLISHED", "ARCHIVED"] },
+      ...(assignmentId ? { id: assignmentId } : {}),
+    },
+    select: { id: true, title: true, questions: true },
+    orderBy: { publishedAt: "desc" },
+  });
+
+  const assignmentStats: AssignmentStats[] = [];
+  const allQuestionAnalysis: QuestionAnalysisItem[] = [];
+
+  for (const assignment of assignments) {
+    const questions: QuestionJson[] = Array.isArray(assignment.questions)
+      ? (assignment.questions as QuestionJson[])
+      : [];
+    const maxScore = questions.reduce((acc, q) => acc + (q.score ?? 0), 0);
+
+    // Fetch all submissions for this assignment
+    const submissions = await prisma.assignmentSubmission.findMany({
+      where: { assignmentId: assignment.id },
+      select: { status: true, gradingResult: true },
+    });
+
+    const submittedCount = submissions.length;
+    const gradedCount = submissions.filter(
+      (s) => s.status === "GRADED" || s.status === "RETURNED",
+    ).length;
+    const returnedCount = submissions.filter((s) => s.status === "RETURNED").length;
+
+    // Score distribution and avg score (only graded submissions)
+    const gradedSubs = submissions
+      .map((s) => parseGradingResult(s.gradingResult))
+      .filter((g): g is GradingResultJson => g !== null);
+
+    const buckets: Record<string, number> = {
+      "0-59": 0,
+      "60-74": 0,
+      "75-89": 0,
+      "90-100": 0,
+    };
+    let scoreSum = 0;
+    for (const g of gradedSubs) {
+      const effMax = g.maxScore || maxScore || 1;
+      const pct = (g.totalScore / effMax) * 100;
+      if (pct < 60) buckets["0-59"] += 1;
+      else if (pct < 75) buckets["60-74"] += 1;
+      else if (pct < 90) buckets["75-89"] += 1;
+      else buckets["90-100"] += 1;
+      scoreSum += g.totalScore;
+    }
+
+    const avgScore =
+      gradedSubs.length > 0
+        ? Math.round((scoreSum / gradedSubs.length) * 10) / 10
+        : null;
+
+    assignmentStats.push({
+      id: assignment.id,
+      title: assignment.title,
+      maxScore,
+      submittedCount,
+      gradedCount,
+      returnedCount,
+      enrolledCount,
+      submissionRate:
+        enrolledCount > 0
+          ? Math.round((submittedCount / enrolledCount) * 100) / 100
+          : 0,
+      avgScore,
+      scoreDistribution: Object.entries(buckets).map(([range, count]) => ({
+        range,
+        count,
+      })),
+    });
+
+    // Per-question error rate analysis
+    const qStats = new Map<
+      number,
+      { errorCount: number; totalAnswered: number; scoreSum: number }
+    >();
+    for (const q of questions) {
+      qStats.set(q.id, { errorCount: 0, totalAnswered: 0, scoreSum: 0 });
+    }
+
+    for (const g of gradedSubs) {
+      for (const grade of g.questionGrades) {
+        const stat = qStats.get(grade.questionId);
+        if (!stat) continue;
+        stat.totalAnswered += 1;
+        stat.scoreSum += grade.score;
+        if (grade.isCorrect === false || (grade.score < grade.maxScore && grade.maxScore > 0)) {
+          stat.errorCount += 1;
+        }
+      }
+    }
+
+    for (const q of questions) {
+      const stat = qStats.get(q.id);
+      if (!stat || stat.totalAnswered === 0) continue;
+      allQuestionAnalysis.push({
+        assignmentId: assignment.id,
+        assignmentTitle: assignment.title,
+        questionId: q.id,
+        questionStem: q.question.replace(/<[^>]+>/g, "").slice(0, 60),
+        questionType: q.type,
+        entities: q.entities ?? [],
+        errorRate: Math.round((stat.errorCount / stat.totalAnswered) * 100) / 100,
+        errorCount: stat.errorCount,
+        totalAnswered: stat.totalAnswered,
+        avgScore:
+          stat.totalAnswered > 0
+            ? Math.round((stat.scoreSum / stat.totalAnswered) * 10) / 10
+            : 0,
+      });
+    }
+  }
+
+  // Sort question analysis by error rate descending
+  allQuestionAnalysis.sort((a, b) => b.errorRate - a.errorRate);
+
+  return {
+    assignments: assignmentStats,
+    questionAnalysis: allQuestionAnalysis.slice(0, 20),
   };
 }

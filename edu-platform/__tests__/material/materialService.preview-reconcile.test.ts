@@ -4,6 +4,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listMaterials, openMaterialContentStream } from "@/lib/services/materialService";
 
 const {
   findManyMock,
@@ -41,6 +42,11 @@ const {
 
 const { enqueueRagTaskMock } = vi.hoisted(() => ({
   enqueueRagTaskMock: vi.fn(),
+}));
+
+vi.mock("@/lib/services/notificationService", () => ({
+  createNotification: vi.fn().mockResolvedValue(undefined),
+  createBulkNotifications: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -120,7 +126,6 @@ describe("materialService preview reconcile", () => {
       previewPdfStatus: MaterialPreviewPdfStatus.READY,
     });
 
-    const { listMaterials } = await import("@/lib/services/materialService");
     const out = await listMaterials(
       "teacher-1",
       UserRole.TEACHER,
@@ -166,7 +171,6 @@ describe("materialService preview reconcile", () => {
       isPartial: false,
     });
 
-    const { openMaterialContentStream } = await import("@/lib/services/materialService");
     const out = await openMaterialContentStream({
       userId: "teacher-1",
       role: UserRole.TEACHER,
@@ -209,7 +213,6 @@ describe("materialService preview reconcile", () => {
       isPartial: true,
     });
 
-    const { openMaterialContentStream } = await import("@/lib/services/materialService");
     const out = await openMaterialContentStream({
       userId: "teacher-1",
       role: UserRole.TEACHER,
@@ -254,7 +257,6 @@ describe("materialService preview reconcile", () => {
       isPartial: true,
     });
 
-    const { openMaterialContentStream } = await import("@/lib/services/materialService");
     const out = await openMaterialContentStream({
       userId: "teacher-1",
       role: UserRole.TEACHER,
