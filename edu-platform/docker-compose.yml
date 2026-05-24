@@ -186,58 +186,8 @@ services:
       WATCHTOWER_CLEANUP: "true"
     command: edu-platform-nextjs edu-platform-rag-service
 
-  # ---------------------------------------------------------------------------
-  # Logging stack: Vector → Loki → Grafana
-  # ---------------------------------------------------------------------------
-
-  loki:
-    image: grafana/loki:3.0.0
-    container_name: edu-platform-loki
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3100:3100"
-    command: -config.file=/etc/loki/loki-config.yaml
-    volumes:
-      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
-      - edu_platform_loki_data:/loki
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  vector:
-    image: timberio/vector:0.40.0-alpine
-    container_name: edu-platform-vector
-    restart: unless-stopped
-    volumes:
-      - ./vector.toml:/etc/vector/vector.toml:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      loki:
-        condition: service_healthy
-
-  grafana:
-    image: grafana/grafana:11.0.0
-    container_name: edu-platform-grafana
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3300:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-edu_grafana}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - edu_platform_grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-    depends_on:
-      loki:
-        condition: service_healthy
-
 volumes:
   edu_platform_pgdata:
   edu_platform_redisdata:
   edu_platform_minio:
   edu_platform_neo4jdata:
-  edu_platform_loki_data:
-  edu_platform_grafana_data:

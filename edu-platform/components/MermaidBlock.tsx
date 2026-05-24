@@ -19,12 +19,9 @@ export function MermaidBlock({ code }: Props) {
     (async () => {
       try {
         const { default: mermaid } = await import("mermaid");
-        const isDark =
-          typeof document !== "undefined" &&
-          document.documentElement.classList.contains("dark");
         mermaid.initialize({
           startOnLoad: false,
-          theme: isDark ? "dark" : "neutral",
+          theme: "neutral",
           securityLevel: "strict",
         });
         const { svg: rendered } = await mermaid.render(`mermaid_${id}`, code);

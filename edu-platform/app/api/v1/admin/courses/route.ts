@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { CourseStatus, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { jsonOk, jsonError } from "@/lib/http/json-response";
 import { ApiError } from "@/lib/http/api-error";
@@ -16,7 +16,6 @@ type SortDir = "asc" | "desc";
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/admin/courses
-//   ?status=DRAFT|PUBLISHED|ARCHIVED
 //   &search=<course name>
 //   &teacher=<teacher username or realName>
 //   &page=<number, 1-based>
@@ -29,17 +28,12 @@ export async function GET(req: NextRequest) {
     requireAdmin(auth);
 
     const sp = req.nextUrl.searchParams;
-    const statusParam = sp.get("status");
     const search = sp.get("search")?.trim() ?? "";
     const teacherSearch = sp.get("teacher")?.trim() ?? "";
     const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10));
     const sortByParam = sp.get("sortBy") ?? "createdAt";
     const sortDirParam = sp.get("sortDir") ?? "desc";
 
-    const validStatuses = Object.values(CourseStatus) as string[];
-    if (statusParam && !validStatuses.includes(statusParam)) {
-      throw new ApiError(400, "VALIDATION_ERROR", "Invalid status value");
-    }
     if (!SORT_FIELDS.includes(sortByParam as SortField)) {
       throw new ApiError(400, "VALIDATION_ERROR", "Invalid sort field");
     }
@@ -54,9 +48,6 @@ export async function GET(req: NextRequest) {
       isDeleted: false,
     };
 
-    if (statusParam) {
-      where.status = statusParam as CourseStatus;
-    }
     if (search) {
       where.name = { contains: search, mode: "insensitive" };
     }

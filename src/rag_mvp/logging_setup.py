@@ -11,10 +11,19 @@ Call ``configure_logging()`` once at process startup (in main.py / worker.py).
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 
 from loguru import logger
+
+
+def _utf8_stdout() -> io.TextIOWrapper | None:
+    """Return a UTF-8 wrapper around stdout.buffer, or None if not available."""
+    buf = getattr(sys.stdout, "buffer", None)
+    if buf is None:
+        return None
+    return io.TextIOWrapper(buf, encoding="utf-8", errors="replace", line_buffering=True)
 
 
 def configure_logging(service: str) -> None:
@@ -25,10 +34,13 @@ def configure_logging(service: str) -> None:
     force_json = os.environ.get("LOG_FORMAT", "").lower() == "json"
     is_json = force_json or not sys.stdout.isatty()
 
+    # Always use a UTF-8 sink so emoji / CJK in log records survive Windows GBK pipes.
+    sink = _utf8_stdout() or sys.stdout
+
     if is_json:
         # Structured JSON — Vector/Loki pipeline
         logger.add(
-            sys.stdout,
+            sink,
             level=log_level,
             serialize=True,  # loguru built-in JSON serialisation
             # Inject the service name into every record's extra dict so it appears in JSON.
@@ -39,13 +51,13 @@ def configure_logging(service: str) -> None:
     else:
         # Pretty coloured output for local dev
         logger.add(
-            sys.stdout,
+            sink,
             level=log_level,
-            colorize=True,
+            colorize=False,  # colorize conflicts with TextIOWrapper on Windows
             format=(
-                "<green>{time:HH:mm:ss.SSS}</green> | "
-                "<level>{level: <8}</level> | "
-                f"<cyan>{service}</cyan> | "
-                "<cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+                "{time:HH:mm:ss.SSS} | "
+                "{level: <8} | "
+                f"{service} | "
+                "{name}:{line} - {message}"
             ),
         )

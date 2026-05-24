@@ -3,7 +3,6 @@ name: scaffolding
 description: 在学习者最近发展区提供支架，逐步撤除支持直至自主完成
 version: 1.0.0
 triggers: [太难了, 不懂, 卡住了, 不会做, 复杂任务]
-requires_tools: [hint_generator]
 ---
 
 # 脚手架教学策略（Scaffolding）

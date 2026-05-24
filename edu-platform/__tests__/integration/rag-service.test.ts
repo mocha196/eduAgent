@@ -16,7 +16,7 @@ const RAG_KEY = process.env.RAG_SERVICE_API_KEY ?? "change-me-rag-service-key";
 
 const headers = {
   "Content-Type": "application/json",
-  "X-API-Key": RAG_KEY,
+  "X-Internal-Key": RAG_KEY,
 };
 
 // Find a real course_id and user_id from the DB to use in smoke tests
@@ -104,7 +104,7 @@ describe("RAG Service integration", () => {
       const json = (await res.json()) as { hits: unknown[]; warnings: unknown[] };
       expect(Array.isArray(json.hits)).toBe(true);
       expect(Array.isArray(json.warnings)).toBe(true);
-    });
+    }, 90_000);
 
     it("/rag/query with source=personal returns valid response", async () => {
       if (!firstUserId) {
@@ -128,6 +128,6 @@ describe("RAG Service integration", () => {
         return;
       }
       expect(res.status).toBe(200);
-    });
+    }, 90_000);
   });
 });

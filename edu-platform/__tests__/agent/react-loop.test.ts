@@ -28,14 +28,6 @@ vi.mock("@/lib/redis", () => ({
   })),
 }));
 
-vi.mock("@/lib/agent/mcp-manager", () => ({
-  McpManager: {
-    getInstance: () => ({
-      getTools: vi.fn(async () => []),
-    }),
-  },
-}));
-
 import { createReActStream } from "@/lib/agent/react-loop";
 
 function makeStream(chunks: Array<Record<string, unknown>>) {

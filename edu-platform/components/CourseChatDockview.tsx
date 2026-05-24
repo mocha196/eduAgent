@@ -9,11 +9,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { useTheme } from "next-themes";
 import type { DockviewIDisposable, IDockviewPanel } from "dockview";
 import {
   DockviewReact,
-  themeDark,
   themeLight,
   type DockviewApi,
   type DockviewReadyEvent,
@@ -162,8 +160,6 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
   const [citation, setCitation] = useState<CitationPreview | null>(null);
   const [citationTextPanel, setCitationTextPanel] = useState<CitationPreview | null>(null);
   const [citationListPanel, setCitationListPanel] = useState<CitationPreview[] | null>(null);
-  const { resolvedTheme } = useTheme();
-
   // Closed-panels tracking
   const [, setClosedPanels] = useState<ClosedPanelInfo[]>([]);
   const closedPanelsRef = useRef<ClosedPanelInfo[]>([]);
@@ -360,7 +356,7 @@ export default function CourseChatDockview({ courseId, onClosedPanelsChange, res
     [courseId, activeMaterialId, onPickMaterial, citation, setPageCaptureFn],
   );
 
-  const dockTheme = resolvedTheme === "dark" ? themeDark : themeLight;
+  const dockTheme = themeLight;
 
   useEffect(() => {
     const api = apiRef.current;

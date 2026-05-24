@@ -16,6 +16,9 @@ import { MemoryConsolidator } from "./memory/memory-consolidator";
 import { MemoryCoordinator } from "./memory/memory-coordinator";
 import { toolRegistry } from "./tools/index";
 import type { AgentConfig } from "./types";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "setup" });
 
 // ---- Base persona (fallback if EDUCATOR.md not present) -------------------
 
@@ -51,6 +54,7 @@ export function getMemoryCoordinator(): MemoryCoordinator {
   const extractor = new MemoryExtractor(_openaiClient, model);
   const consolidator = new MemoryConsolidator(memoryStore, extractor);
   _coordinator = new MemoryCoordinator(retriever, consolidator);
+  log.info({ model }, "MemoryCoordinator initialized");
   return _coordinator;
 }
 

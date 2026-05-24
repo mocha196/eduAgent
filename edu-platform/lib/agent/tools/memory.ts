@@ -6,6 +6,9 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/db";
 import type { Tool, TurnContext } from "../types";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "tool:memory" });
 
 const VALID_CATEGORIES = new Set([
   "concept_mastery",
@@ -59,6 +62,7 @@ export const rememberFactTool: Tool = {
       conf = Math.max(0, Math.min(1, args.confidence));
     }
 
+    log.debug({ userId: ctx.userId, category: cat, confidence: conf }, "remember_fact");
     const id = randomUUID();
     await prisma.userMemoryFact.create({
       data: {
@@ -97,6 +101,8 @@ export const searchMemoryTool: Tool = {
 
     const limit =
       typeof args.limit === "number" ? Math.max(1, Math.min(30, args.limit)) : 10;
+
+    log.debug({ userId: ctx.userId, keyword: kw, limit }, "search_memory start");
 
     const facts = await prisma.userMemoryFact.findMany({
       where: { userId: ctx.userId },

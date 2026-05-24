@@ -28,19 +28,20 @@ function toSummary(row: {
   student: { realName: string | null; username: string } | null;
   status: SubmissionStatus;
   gradingResult: unknown;
+  totalScore: number | null;
+  maxScore: number | null;
   submittedAt: Date;
   gradedAt: Date | null;
   returnedAt: Date | null;
 }): SubmissionSummaryDto {
-  const gr = row.gradingResult as GradingResultDto | null;
   return {
     id: row.id,
     assignmentId: row.assignmentId,
     studentId: row.studentId,
     studentName: row.student?.realName ?? row.student?.username ?? null,
     status: row.status,
-    totalScore: gr?.totalScore ?? null,
-    maxScore: gr?.maxScore ?? null,
+    totalScore: row.totalScore ?? null,
+    maxScore: row.maxScore ?? null,
     submittedAt: row.submittedAt.toISOString(),
     gradedAt: row.gradedAt?.toISOString() ?? null,
     returnedAt: row.returnedAt?.toISOString() ?? null,
@@ -55,6 +56,8 @@ function toDetail(row: {
   status: SubmissionStatus;
   answers: unknown;
   gradingResult: unknown;
+  totalScore: number | null;
+  maxScore: number | null;
   teacherFeedback: string | null;
   submittedAt: Date;
   gradedAt: Date | null;
@@ -302,46 +305,12 @@ export async function triggerGrading(submissionId: string): Promise<void> {
     data: {
       status: SubmissionStatus.GRADED,
       gradingResult: gradingResult as unknown as import("@prisma/client").Prisma.InputJsonValue,
+      totalScore,
+      maxScore,
       gradedAt: new Date(),
     },
   });
 
-  // Asynchronously extract memory facts from grading result (non-blocking)
-  void (async () => {
-    try {
-      const memoryCtx: SubmissionMemoryContext = {
-        assignmentTitle: submission.assignment.title,
-        totalScore,
-        maxScore,
-        questions: questions.map((q) => {
-          const grade = questionGrades.find((g) => g.questionId === q.id);
-          const studentAnswer = answers.find((a) => a.questionId === q.id)?.answer ?? "";
-          return {
-            stem: q.question,
-            type: q.type,
-            entities: q.entities ?? [],
-            studentAnswer,
-            score: grade?.score ?? 0,
-            maxScore: q.score,
-            isCorrect: grade?.isCorrect ?? null,
-            feedback: grade?.feedback ?? "",
-            correctAnswer: q.answer,
-          };
-        }),
-      };
-      const extractor = new MemoryExtractor(getLLMClient("memory"), getMemoryModel());
-      const facts = await extractor.extractFactsFromSubmission(
-        submission.studentId,
-        submissionId,
-        memoryCtx,
-      );
-      for (const fact of facts) {
-        await memoryStore.addFact(fact);
-      }
-    } catch (err) {
-      console.error("[triggerGrading] memory extraction failed:", err);
-    }
-  })();
 }
 
 /** Student retrieves their own submission (answers visible; grading only after RETURNED). */
@@ -484,6 +453,7 @@ export async function overrideGrades(
     where: { id: submissionId },
     data: {
       gradingResult: updated as unknown as import("@prisma/client").Prisma.InputJsonValue,
+      totalScore,
       teacherFeedback: body.teacherFeedback ?? row.teacherFeedback,
     },
     include: { student: { select: { realName: true, username: true } } },
@@ -517,12 +487,12 @@ export async function returnSubmission(
     include: { student: { select: { realName: true, username: true } } },
   });
 
-  // Notify the student that their grade has been returned
+  // Notify the student and extract memory facts now that teacher has reviewed (non-blocking)
   void (async () => {
     try {
       const assignment = await prisma.assignment.findFirst({
         where: { id: assignmentId },
-        select: { title: true, course: { select: { name: true } } },
+        select: { title: true, questions: true, course: { select: { name: true } } },
       });
       if (assignment) {
         void createNotification({
@@ -535,6 +505,57 @@ export async function returnSubmission(
       }
     } catch {
       // Best-effort
+    }
+  })();
+
+  // Asynchronously extract memory facts after teacher review (non-blocking)
+  void (async () => {
+    try {
+      const assignment = await prisma.assignment.findFirst({
+        where: { id: assignmentId },
+        select: { questions: true, title: true },
+      });
+      if (!assignment) return;
+      const questions = Array.isArray(assignment.questions)
+        ? (assignment.questions as unknown as QuestionItem[])
+        : [];
+      const answers = row.answers as unknown as StudentAnswerItem[];
+      const gradingResult = (row.gradingResult as unknown as GradingResultDto) ?? {
+        totalScore: 0,
+        maxScore: 0,
+        questionGrades: [],
+      };
+      const memoryCtx: SubmissionMemoryContext = {
+        assignmentTitle: assignment.title,
+        totalScore: gradingResult.totalScore,
+        maxScore: gradingResult.maxScore,
+        questions: questions.map((q) => {
+          const grade = gradingResult.questionGrades.find((g) => g.questionId === q.id);
+          const studentAnswer = answers.find((a) => a.questionId === q.id)?.answer ?? "";
+          return {
+            stem: q.question,
+            type: q.type,
+            entities: q.entities ?? [],
+            studentAnswer,
+            score: grade?.score ?? 0,
+            maxScore: q.score,
+            isCorrect: grade?.isCorrect ?? null,
+            feedback: grade?.feedback ?? "",
+            correctAnswer: q.answer,
+          };
+        }),
+      };
+      const extractor = new MemoryExtractor(getLLMClient("memory"), getMemoryModel());
+      const facts = await extractor.extractFactsFromSubmission(
+        row.studentId,
+        submissionId,
+        memoryCtx,
+      );
+      for (const fact of facts) {
+        await memoryStore.addFact(fact);
+      }
+    } catch (err) {
+      console.error("[returnSubmission] memory extraction failed:", err);
     }
   })();
 
@@ -551,10 +572,10 @@ export async function batchReturnSubmissions(
   assertUuid(assignmentId, "assignment_id");
   await assertTeacherOfCourse(teacherId, role, courseId);
 
-  // Collect student IDs before updating (updateMany doesn't return rows)
+  // Collect submission data before updating (updateMany doesn't return rows)
   const toReturn = await prisma.assignmentSubmission.findMany({
     where: { assignmentId, status: SubmissionStatus.GRADED },
-    select: { studentId: true },
+    select: { id: true, studentId: true, gradingResult: true, answers: true },
   });
 
   const result = await prisma.assignmentSubmission.updateMany({
@@ -562,22 +583,65 @@ export async function batchReturnSubmissions(
     data: { status: SubmissionStatus.RETURNED, returnedAt: new Date() },
   });
 
-  // Notify each student asynchronously
+  // Notify each student and extract memory facts asynchronously
   void (async () => {
     try {
       const assignment = await prisma.assignment.findFirst({
         where: { id: assignmentId },
-        select: { title: true, course: { select: { name: true } } },
+        select: { title: true, questions: true, course: { select: { name: true } } },
       });
-      if (assignment && toReturn.length > 0) {
-        const studentIds = toReturn.map((s) => s.studentId);
-        void createBulkNotifications({
-          userIds: studentIds,
-          type: "GRADE_RETURNED",
-          title: "成绩已返回",
-          body: `《${assignment.title}》的批改结果已发布，请查看。`,
-          metadata: { courseId, assignmentId, courseName: assignment.course.name },
-        });
+      if (!assignment || toReturn.length === 0) return;
+      const studentIds = toReturn.map((s) => s.studentId);
+      void createBulkNotifications({
+        userIds: studentIds,
+        type: "GRADE_RETURNED",
+        title: "成绩已返回",
+        body: `《${assignment.title}》的批改结果已发布，请查看。`,
+        metadata: { courseId, assignmentId, courseName: assignment.course.name },
+      });
+      const questions = Array.isArray(assignment.questions)
+        ? (assignment.questions as unknown as QuestionItem[])
+        : [];
+      const extractor = new MemoryExtractor(getLLMClient("memory"), getMemoryModel());
+      for (const sub of toReturn) {
+        try {
+          const answers = sub.answers as unknown as StudentAnswerItem[];
+          const gradingResult = (sub.gradingResult as unknown as GradingResultDto) ?? {
+            totalScore: 0,
+            maxScore: 0,
+            questionGrades: [],
+          };
+          const memoryCtx: SubmissionMemoryContext = {
+            assignmentTitle: assignment.title,
+            totalScore: gradingResult.totalScore,
+            maxScore: gradingResult.maxScore,
+            questions: questions.map((q) => {
+              const grade = gradingResult.questionGrades.find((g) => g.questionId === q.id);
+              const studentAnswer = answers.find((a) => a.questionId === q.id)?.answer ?? "";
+              return {
+                stem: q.question,
+                type: q.type,
+                entities: q.entities ?? [],
+                studentAnswer,
+                score: grade?.score ?? 0,
+                maxScore: q.score,
+                isCorrect: grade?.isCorrect ?? null,
+                feedback: grade?.feedback ?? "",
+                correctAnswer: q.answer,
+              };
+            }),
+          };
+          const facts = await extractor.extractFactsFromSubmission(
+            sub.studentId,
+            sub.id,
+            memoryCtx,
+          );
+          for (const fact of facts) {
+            await memoryStore.addFact(fact);
+          }
+        } catch (err) {
+          console.error("[batchReturnSubmissions] memory extraction failed for", sub.id, err);
+        }
       }
     } catch {
       // Best-effort

@@ -3,7 +3,7 @@ name: assignment_fixer
 description: 作业题目修复：针对评审未通过的题目进行精准改写或删除补全
 version: 1.0.0
 agent_mode: fixer
-allowed_tools: [wikipedia_search, web_search]
+allowed_tools: []
 handoffs:
   - target_skill: assignment_reviewer
     condition: fixes_applied
@@ -30,8 +30,7 @@ always_inject: false
 
 ## 工具使用策略
 
-- **wikipedia_search**：改写时不确定知识点准确定义时调用
-- **web_search**：查找真实工程场景案例，用于替换教学管理场景
+（无外部搜索工具）
 
 ## 输出格式
 

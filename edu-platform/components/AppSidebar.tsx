@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useTheme } from "next-themes";
 import {
   Bell,
   Blocks,
@@ -12,15 +11,10 @@ import {
   GraduationCap,
   MessageSquare,
   LogOut,
-  Moon,
-  Sun,
-  TrendingUp,
   User,
   Users,
-  Shield,
   Brain,
   ChevronRight,
-  Settings2,
 } from "lucide-react";
 import {
   Sidebar,
@@ -45,7 +39,6 @@ type UserInfo = {
   username: string;
   role: string;
   real_name: string | null;
-  avatar_url: string | null;
 };
 
 const navItems = [
@@ -56,19 +49,16 @@ const navItems = [
     label: "问答中心",
     href: "/me/qa-center",
     icon: MessageSquare,
-    roles: ["STUDENT", "TEACHER", "ADMIN"],
+    roles: ["STUDENT", "TEACHER"],
   },
   {
     label: "个人知识库",
     href: "/me/personal-kb",
     icon: Brain,
-    roles: ["STUDENT", "TEACHER", "ADMIN"],
+    roles: ["STUDENT", "TEACHER"],
   },
-  { label: "个人中心", href: "/user", icon: User },
-  { label: "学习进度", href: "/me/progress", icon: TrendingUp, roles: ["STUDENT"] },
-  { label: "长期记忆", href: "/me/memories", icon: Brain },
-  { label: "隐私与数据", href: "/me/privacy", icon: Shield },
-  { label: "LLM 配置", href: "/me/llm-config", icon: Settings2 },
+  { label: "个人中心", href: "/user", icon: User, roles: ["STUDENT", "TEACHER"] },
+  { label: "长期记忆", href: "/me/memories", icon: Brain, roles: ["STUDENT", "TEACHER"] },
   { label: "技能管理", href: "/admin/skills", icon: Blocks, roles: ["ADMIN"] },
   { label: "风格管理", href: "/admin/styles", icon: Sparkles, roles: ["ADMIN"] },
 ];
@@ -82,7 +72,6 @@ const roleLabels: Record<string, string> = {
 export function AppSidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { resolvedTheme, setTheme } = useTheme();
   const { state, isMobile } = useSidebar();
   /** Desktop icon rail only; mobile sheet always uses expanded header chrome */
   const isCollapsed = state === "collapsed" && !isMobile;
@@ -255,14 +244,6 @@ export function AppSidebar() {
                   {unreadCount > 99 ? "99+" : unreadCount}
                 </span>
               )}
-            </button>
-            {/* Dark mode toggle */}
-            <button
-              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-              title={resolvedTheme === "dark" ? "切换亮色模式" : "切换暗色模式"}
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-            >
-              {resolvedTheme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
             </button>
             {/* Logout */}
             <button

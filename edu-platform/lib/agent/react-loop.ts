@@ -7,7 +7,6 @@ import OpenAI from "openai";
 import { getLLMClient, getRoleExtraBody } from "./llm-registry";
 import { getRedis } from "@/lib/redis";
 import { logger } from "@/lib/logger";
-import { McpManager } from "./mcp-manager";
 
 const log = logger.child({ component: "react-loop" });
 import type { Message, TurnContext, AgentConfig, ToolCitation } from "./types";
@@ -222,6 +221,11 @@ async function _runLoop(
   // Merge attachments from config into ctx so tools (e.g. read_attachment) can access them.
   const ctx: TurnContext = { ...opts.ctx, attachments: config.attachments };
 
+  log.info(
+    { userId: ctx.userId, sessionId: ctx.sessionId, model: config.model, msgLen: opts.userMessage.length },
+    "turn start",
+  );
+
   const client = getLLMClient("chat");
   const chatExtraBody = getRoleExtraBody("chat");
 
@@ -269,24 +273,9 @@ async function _runLoop(
     { role: "user", content: _buildUserContent(opts) },
   ];
 
-  // Fetch MCP tools (skipped in eval/allowedTools mode for determinism)
-  const mcpTools = (opts.allowedTools || opts.evalMode)
-    ? []
-    : await McpManager.getInstance().getTools().catch((err) => {
-        log.warn({ err }, "McpManager.getTools failed, continuing without MCP tools");
-        return [];
-      });
-  const mcpToolMap = new Map(mcpTools.map((t) => [t.name, t]));
-
-  const rawSchemas = [
-    ...(opts.allowedTools
-      ? toolRegistry.getSchemas().filter((s) => opts.allowedTools!.includes(s.function.name))
-      : toolRegistry.getSchemas()),
-    ...mcpTools.map((t) => ({
-      type: "function" as const,
-      function: { name: t.name, description: t.description, parameters: t.parameters },
-    })),
-  ];
+  const rawSchemas = opts.allowedTools
+    ? toolRegistry.getSchemas().filter((s) => opts.allowedTools!.includes(s.function.name))
+    : toolRegistry.getSchemas();
 
   // In eval mode, strip the `sources` parameter from knowledge_query so the LLM
   // cannot specify it — the tool will always use the effectiveSource override (course).
@@ -360,6 +349,8 @@ async function _runLoop(
       } catch { /* noop */ }
 
       // Stream LLM response
+      log.debug({ iter, model: config.model, reflectionRetry }, "llm call");
+      const llmCallStart = Date.now();
       const stream = await client.chat.completions.create({
         model: config.model,
         messages: loopMsgs,
@@ -402,6 +393,10 @@ async function _runLoop(
       }
 
       const toolCallsList = [...pendingTcs.values()].filter((t) => t.name);
+      log.debug(
+        { iter, durationMs: Date.now() - llmCallStart, toolCallCount: toolCallsList.length, tokens: iterUsage?.total },
+        "llm done",
+      );
 
       // End Langfuse generation
       try {
@@ -445,6 +440,13 @@ async function _runLoop(
         );
 
         const toolStart = Date.now();
+        const argsPreview = Object.fromEntries(
+          Object.entries(args).map(([k, v]) => [
+            k,
+            typeof v === "string" && v.length > 80 ? v.slice(0, 80) + "…" : v,
+          ]),
+        );
+        log.info({ toolName: tc.name, args: argsPreview }, "tool invoke");
         let toolContent = "";
         let citations: ToolCitation[] = [];
         let success = true;
@@ -455,7 +457,7 @@ async function _runLoop(
           toolSpan = loopSpan?.span({ name: `tool:${tc.name}`, input: args }) ?? null;
         } catch { /* noop */ }
 
-        const tool = toolRegistry.get(tc.name) ?? mcpToolMap.get(tc.name);
+        const tool = toolRegistry.get(tc.name);
         if (!tool) {
           toolContent = JSON.stringify({ error: `Tool "${tc.name}" not found in registry` });
           success = false;
@@ -509,6 +511,11 @@ async function _runLoop(
         }
 
         const durationMs = Date.now() - toolStart;
+        if (success) {
+          log.info({ toolName: tc.name, durationMs, resultLen: toolContent.length }, "tool done");
+        } else {
+          log.warn({ toolName: tc.name, durationMs, resultPreview: toolContent.slice(0, 200) }, "tool error");
+        }
 
         // End Langfuse tool span
         try {
@@ -619,7 +626,7 @@ async function _runLoop(
     }
   } catch (err) {
     streamError = err instanceof Error ? err.message : String(err);
-    console.error("[ReActLoop] error during loop:", err);
+    log.error({ err }, "ReActLoop: error during loop");
   }
 
   const execMs = Date.now() - startMs;
@@ -630,6 +637,10 @@ async function _runLoop(
     if (finalAssistantText) trace?.update({ output: finalAssistantText });
   } catch { /* noop */ }
 
+  log.info(
+    { userId: ctx.userId, sessionId: ctx.sessionId, totalTokens, execMs, error: streamError ?? null },
+    "turn end",
+  );
   await writer.write(
     sseData({ type: "done", tokens: totalTokens, exec_time_ms: execMs, error: streamError }),
   );

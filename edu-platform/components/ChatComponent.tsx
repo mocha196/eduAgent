@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
@@ -42,11 +42,6 @@ import {
   normalizeMathDelimiters,
 } from "@/lib/markdownMath";
 import { markdownComponents } from "@/lib/markdownComponents";
-
-type UserMe = {
-  qa_collection_enabled?: boolean;
-  qa_collection_notice_accepted_at?: string | null;
-};
 
 export type ChatComponentProps =
   | {
@@ -134,14 +129,17 @@ function CitationScrollBar({
   onExpandAll: () => void;
 }) {
   const scrollEl = useRef<HTMLDivElement>(null);
-  const drag = useRef({ active: false, startX: 0, scrollLeft: 0, moved: false });
+  const drag = useRef({ active: false, startX: 0, scrollLeft: 0, moved: false, pointerId: -1, captured: false });
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const el = scrollEl.current;
     if (!el) return;
-    drag.current = { active: true, startX: e.clientX, scrollLeft: el.scrollLeft, moved: false };
-    el.setPointerCapture(e.pointerId);
+    // Store state but do NOT call setPointerCapture yet — doing so immediately
+    // causes pointerup to fire on scrollEl (not the button), which makes the
+    // browser dispatch the click event to scrollEl instead of the child button,
+    // so the button's onClick never fires. Capture is deferred until drag starts.
+    drag.current = { active: true, startX: e.clientX, scrollLeft: el.scrollLeft, moved: false, pointerId: e.pointerId, captured: false };
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -149,7 +147,15 @@ function CitationScrollBar({
     const el = scrollEl.current;
     if (!el) return;
     const dx = e.clientX - drag.current.startX;
-    if (Math.abs(dx) > 4) drag.current.moved = true;
+    if (Math.abs(dx) > 4) {
+      drag.current.moved = true;
+      // Only capture the pointer once the drag threshold is exceeded so that
+      // simple clicks are never intercepted by pointer capture.
+      if (!drag.current.captured) {
+        el.setPointerCapture(drag.current.pointerId);
+        drag.current.captured = true;
+      }
+    }
     el.scrollLeft = drag.current.scrollLeft - dx;
   };
 
@@ -241,33 +247,6 @@ export default function ChatComponent(props: ChatComponentProps) {
     setEditingClientId(null);
     setEditDraft("");
   }, [threadKey]);
-
-  const loadUser = useCallback(async () => {
-    const res = await fetch("/api/v1/user", { credentials: "include" });
-    if (!res.ok) return;
-    const u = (await res.json()) as UserMe;
-    if (!u.qa_collection_notice_accepted_at) {
-      if (window.confirm("为改进教学，我们会记录提问数据。此行为可随时在个人资料关闭。确认知悉？")) {
-        await fetch("/api/v1/user", {
-          method: "PUT",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ qa_collection_notice_accepted: true }),
-        });
-      } else {
-        await fetch("/api/v1/user", {
-          method: "PUT",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ qa_collection_enabled: false }),
-        });
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadUser();
-  }, [loadUser]);
 
   useEffect(() => {
     if (props.variant === "qa_center") return;

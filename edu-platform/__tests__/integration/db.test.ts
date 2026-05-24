@@ -4,7 +4,7 @@
  * Tests user + refresh-token lifecycle using the real database.
  * All data is inserted with a recognizable test prefix and deleted on cleanup.
  *
- * TC-DB-001: User CRUD + unique-email constraint
+ * TC-DB-001: User CRUD + unique-username constraint
  * TC-DB-002: Refresh token create / lookup / revoke cycle
  * TC-AUTH-001: Password hash + verify round-trip via argon2id
  */
@@ -17,7 +17,6 @@ import { UserRole } from "@prisma/client";
 const TEST_PREFIX = `it_db_${Date.now()}`;
 const TEST_USER = {
   username: `${TEST_PREFIX}_user`,
-  email: `${TEST_PREFIX}@test.local`,
   password: "Integration!T3st",
 };
 
@@ -27,7 +26,7 @@ describe("PostgreSQL integration — User & RefreshToken", () => {
   afterAll(async () => {
     // Clean up all test-prefixed users (cascades to refresh_tokens)
     await prisma.user.deleteMany({
-      where: { email: { endsWith: "@test.local" } },
+      where: { username: { startsWith: TEST_PREFIX } },
     });
     await prisma.$disconnect();
   });
@@ -57,7 +56,6 @@ describe("PostgreSQL integration — User & RefreshToken", () => {
       const user = await prisma.user.create({
         data: {
           username: TEST_USER.username,
-          email: TEST_USER.email,
           passwordHash,
           role: UserRole.STUDENT,
         },
@@ -66,26 +64,25 @@ describe("PostgreSQL integration — User & RefreshToken", () => {
       expect(user.id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
       );
-      expect(user.email).toBe(TEST_USER.email);
+      expect(user.username).toBe(TEST_USER.username);
       expect(user.role).toBe(UserRole.STUDENT);
       expect(user.isActive).toBe(true);
     });
 
-    it("findUnique returns the created user by email", async () => {
+    it("findUnique returns the created user by username", async () => {
       const user = await prisma.user.findUnique({
-        where: { email: TEST_USER.email },
+        where: { username: TEST_USER.username },
       });
       expect(user).not.toBeNull();
-      expect(user!.username).toBe(TEST_USER.username);
+      expect(user!.id).toBe(createdUserId);
     });
 
-    it("duplicate email raises a unique constraint violation", async () => {
+    it("duplicate username raises a unique constraint violation", async () => {
       const passwordHash = await hashPassword("AnotherPass!1");
       await expect(
         prisma.user.create({
           data: {
-            username: `${TEST_PREFIX}_user2`,
-            email: TEST_USER.email, // same email — must fail
+            username: TEST_USER.username, // same username — must fail
             passwordHash,
             role: UserRole.STUDENT,
           },
@@ -158,7 +155,6 @@ describe("PostgreSQL integration — User & RefreshToken", () => {
       const tmp = await prisma.user.create({
         data: {
           username: `${TEST_PREFIX}_tmp`,
-          email: `${TEST_PREFIX}_tmp@test.local`,
           passwordHash: hash2,
           role: UserRole.STUDENT,
         },

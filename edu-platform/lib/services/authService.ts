@@ -20,6 +20,32 @@ import type {
 import { assertPasswordPolicy } from "@/lib/validation/password-policy";
 import { toPublicUser } from "@/lib/services/userService";
 
+export async function createUserByAdmin(body: {
+  username: string;
+  password: string;
+  role: UserRole;
+  realName?: string | null;
+}): Promise<RegisterResponseDto> {
+  const passwordHash = await hashPassword(body.password);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          username: body.username.trim(),
+          passwordHash,
+          role: body.role,
+          isActive: true,
+          realName: body.realName?.trim() || null,
+        },
+      });
+      return { user: toPublicUser(user) };
+    });
+  } catch (err) {
+    console.error("[createUserByAdmin] DB error:", err);
+    throw new ApiError(409, "CONFLICT", "学号已存在");
+  }
+}
+
 export async function registerUser(
   body: RegisterBody,
 ): Promise<RegisterResponseDto> {

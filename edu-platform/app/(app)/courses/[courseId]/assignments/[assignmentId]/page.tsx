@@ -163,13 +163,33 @@ export default function AssignmentDetailPage() {
             assignmentTitle={studentAssignment.title}
           />
         ) : (
-          <SubmissionForm
-            assignment={studentAssignment}
-            existingSubmission={mySubmission}
-            courseId={courseId}
-            assignmentId={assignmentId}
-            onSubmitted={(sub) => setMySubmission(sub)}
-          />
+          <>
+            {/* Score banner shown once grading is complete (before teacher formally returns) */}
+            {mySubmission?.status === "GRADED" && mySubmission.totalScore !== null && (
+              <div className="rounded-lg border border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-950/30 p-4 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-green-800 dark:text-green-200">批改已完成</p>
+                  <p className="text-xs text-green-700 dark:text-green-300 mt-0.5">详细评语将在教师发放后可见</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-3xl font-bold tabular-nums text-green-800 dark:text-green-200">
+                    {mySubmission.totalScore}
+                    <span className="text-base font-normal text-green-600 dark:text-green-400">
+                      /{mySubmission.maxScore}
+                    </span>
+                  </p>
+                  <p className="text-xs text-green-600 dark:text-green-400">总分</p>
+                </div>
+              </div>
+            )}
+            <SubmissionForm
+              assignment={studentAssignment}
+              existingSubmission={mySubmission}
+              courseId={courseId}
+              assignmentId={assignmentId}
+              onSubmitted={(sub) => setMySubmission(sub)}
+            />
+          </>
         )}
       </div>
     );

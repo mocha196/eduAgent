@@ -19,7 +19,6 @@ const TOOL_GUIDANCE = `## Tool Usage Guidelines
 - When users request practice problems, quizzes, or exercises, call \`generate_quiz\` to generate questions.
 - If a tool returns empty results or fails, honestly inform the user and provide the best explanation you can.
 - When a user provides or asks to **run/execute/test** a code snippet, call \`run_script\` to actually execute it — do NOT just review it statically unless the user explicitly asks for code review only.
-- \`evaluate_code\` is for static analysis/grading only; prefer \`run_script\` when the user wants to see actual output or debug runtime errors.
 - If a user says "刚才那段代码" / "上面的代码" / "之前的代码", look for the most recent fenced code block in the conversation history — do NOT fabricate code.
 - If the user attached a code file (.py/.js/.ts), its content has already been injected into the current user message. You can call \`run_script\` directly with that code without asking the user to paste it again.
 - For large code files or if the injected content was truncated, use \`read_attachment(attachment_id=...)\` to fetch the complete file contents before executing.`;

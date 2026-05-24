@@ -8,12 +8,16 @@ import { assertUuid, getCourseIfMember } from "@/lib/course-access";
 import { prisma } from "@/lib/db";
 import { courseChatSseResponse } from "@/lib/services/chatService";
 import { getAccessibleCourseIds } from "@/lib/course-access-injector";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "api:chat" });
 
 export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ courseId: string }> };
 
 export async function POST(req: NextRequest, ctx: Ctx) {
+  const t0 = Date.now();
   try {
     const auth = requireAuthenticated(await getAuthFromRequest(req));
     const { courseId } = await ctx.params;
@@ -68,6 +72,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     const traceId = req.headers.get("x-trace-id")?.trim() || null;
     const debugTraceRaw = req.headers.get("x-debug-trace")?.trim().toLowerCase() || "";
     const debugTrace = ["1", "true", "yes", "on"].includes(debugTraceRaw);
+    log.info({ userId: auth.sub, courseId, sessionId: body.session_id, msgLen: message.length, attachmentCount: attachments.length }, "chat POST");
     let sessionId: string | null = null;
     if (typeof body.session_id === "string" && body.session_id.trim()) {
       assertUuid(body.session_id, "session_id");
@@ -104,7 +109,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       currentPageImage,
     });
   } catch (e) {
-    if (e instanceof ApiError) return jsonError(e);
+    if (e instanceof ApiError) {
+      log.warn({ status: e.status, code: e.code }, "chat error");
+      return jsonError(e);
+    }
+    log.error({ err: e }, "chat unhandled error");
     return jsonError(
       new ApiError(500, "INTERNAL_ERROR", "Internal server error"),
     );

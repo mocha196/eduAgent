@@ -31,7 +31,6 @@
  */
 
 import OpenAI from "openai";
-import { getUserLlmStore } from "./user-llm-store";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ component: "llm-registry" });
@@ -50,70 +49,54 @@ function e(name: string): string | undefined {
   return v && v.trim() ? v.trim() : undefined;
 }
 
-/** Return non-empty string or undefined. */
-function s(value: string | undefined): string | undefined {
-  return value && value.trim() ? value.trim() : undefined;
-}
-
 export function getRoleConfig(role: LLMRole): RoleConfig {
   const defaultKey = e("LLM_API_KEY") ?? e("OPENAI_API_KEY") ?? "";
   const defaultBase = e("LLM_BASE_URL");
   const defaultModel = e("LLM_MODEL") ?? "gpt-4o";
 
-  // Per-user overrides from AsyncLocalStorage (set by runWithUserLlm in chatService et al.)
-  const userCfg = getUserLlmStore();
-  const u = userCfg?.[role] ?? {};
-  // Fallback helpers: user override first, then env-derived value.
-  // pickStr: envVal is guaranteed non-undefined → returns string.
-  // pickOpt: envVal may be undefined → returns string | undefined.
-  const pickStr = (userVal: string | undefined, envVal: string): string =>
-    s(userVal) ?? envVal;
-  const pickOpt = (userVal: string | undefined, envVal: string | undefined): string | undefined =>
-    s(userVal) ?? envVal;
-
   switch (role) {
     case "chat":
       return {
-        apiKey: pickStr(u.apiKey, e("LLM_CHAT_API_KEY") ?? defaultKey),
-        baseURL: pickOpt(u.baseURL, e("LLM_CHAT_BASE_URL") ?? defaultBase),
-        model: pickStr(u.model, e("LLM_CHAT_MODEL") ?? defaultModel),
+        apiKey: e("LLM_CHAT_API_KEY") ?? defaultKey,
+        baseURL: e("LLM_CHAT_BASE_URL") ?? defaultBase,
+        model: e("LLM_CHAT_MODEL") ?? defaultModel,
       };
 
     case "title":
       return {
-        apiKey: pickStr(u.apiKey, e("LLM_TITLE_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
-        baseURL: pickOpt(u.baseURL, e("LLM_TITLE_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
-        model: pickStr(u.model, e("LLM_TITLE_MODEL") ?? e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+        apiKey: e("LLM_TITLE_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey,
+        baseURL: e("LLM_TITLE_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase,
+        model: e("LLM_TITLE_MODEL") ?? e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini",
       };
 
     case "vision":
       return {
-        apiKey: pickStr(u.apiKey, e("LLM_VISION_API_KEY") ?? defaultKey),
-        baseURL: pickOpt(u.baseURL, e("LLM_VISION_BASE_URL") ?? defaultBase),
-        model: pickStr(u.model, e("LLM_VISION_MODEL") ?? defaultModel),
+        apiKey: e("LLM_VISION_API_KEY") ?? defaultKey,
+        baseURL: e("LLM_VISION_BASE_URL") ?? defaultBase,
+        model: e("LLM_VISION_MODEL") ?? defaultModel,
       };
 
     case "memory":
       return {
-        apiKey: pickStr(u.apiKey, e("LLM_MEMORY_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
-        baseURL: pickOpt(u.baseURL, e("LLM_MEMORY_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
-        model: pickStr(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+        apiKey: e("LLM_MEMORY_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey,
+        baseURL: e("LLM_MEMORY_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase,
+        model: e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini",
       };
 
     case "grading":
       return {
-        apiKey: pickStr(u.apiKey, e("LLM_MEMORY_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey),
-        baseURL: pickOpt(u.baseURL, e("LLM_MEMORY_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase),
-        model: pickStr(u.model, e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini"),
+        apiKey: e("LLM_MEMORY_API_KEY") ?? e("LLM_CHAT_API_KEY") ?? defaultKey,
+        baseURL: e("LLM_MEMORY_BASE_URL") ?? e("LLM_CHAT_BASE_URL") ?? defaultBase,
+        model: e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini",
       };
 
     // completion role — FIM endpoint (deepseek-v4-flash via beta URL by default)
     // Env: LLM_COMPLETION_API_KEY, LLM_COMPLETION_BASE_URL, LLM_COMPLETION_MODEL
     case "completion":
       return {
-        apiKey: pickStr(u.apiKey, e("LLM_COMPLETION_API_KEY") ?? defaultKey),
-        baseURL: pickOpt(u.baseURL, e("LLM_COMPLETION_BASE_URL") ?? "https://api.deepseek.com/beta"),
-        model: pickStr(u.model, e("LLM_COMPLETION_MODEL") ?? "deepseek-v4-flash"),
+        apiKey: e("LLM_COMPLETION_API_KEY") ?? defaultKey,
+        baseURL: e("LLM_COMPLETION_BASE_URL") ?? "https://api.deepseek.com/beta",
+        model: e("LLM_COMPLETION_MODEL") ?? "deepseek-v4-flash",
       };
   }
 }

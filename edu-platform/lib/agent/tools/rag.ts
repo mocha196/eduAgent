@@ -6,6 +6,9 @@
 import type { Tool, TurnContext, ToolResult } from "../types";
 import { runSubAgent } from "../subagent";
 import { getLLMClient, getRoleConfig } from "../llm-registry";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "tool:rag" });
 
 // ---- Shared HTTP helper ----------------------------------------------------
 
@@ -185,6 +188,7 @@ export const knowledgeQueryTool: Tool = {
     required: ["question", "sources"],
   },
   async execute(args: Record<string, unknown>, ctx: TurnContext): Promise<ToolResult> {
+    const t0 = Date.now();
     const ragUrl = process.env.RAG_SERVICE_URL ?? "http://localhost:8001";
     const ragKey = process.env.RAG_SERVICE_API_KEY ?? "";
 
@@ -192,6 +196,7 @@ export const knowledgeQueryTool: Tool = {
     if (!question) {
       return { content: JSON.stringify({ error: "缺少必要参数：question" }) };
     }
+    log.debug({ question: question.slice(0, 80), sources: args.sources, top_k: args.top_k, courseId: ctx.courseId }, "knowledge_query start");
 
     const source = _normalizeSource(args.sources);
     if (!source && !ctx.evalMode) {
@@ -285,6 +290,7 @@ export const knowledgeQueryTool: Tool = {
     if (lowConfidence) content += "\n\n[置信度: 低]";
 
     const citations = _hitsToB3Citations(hits);
+    log.debug({ hitCount: hits.length, lowConfidence, rewritten, durationMs: Date.now() - t0 }, "knowledge_query done");
     return { content, citations };
   },
 };

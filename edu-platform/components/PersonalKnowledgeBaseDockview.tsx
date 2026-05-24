@@ -9,11 +9,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { useTheme } from "next-themes";
 import type { DockviewIDisposable, IDockviewPanel } from "dockview";
 import {
   DockviewReact,
-  themeDark,
   themeLight,
   type DockviewApi,
   type DockviewReadyEvent,
@@ -122,7 +120,6 @@ export default function PersonalKnowledgeBaseDockview({ onClosedPanelsChange, re
   const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [listKey, setListKey] = useState(0);
-  const { resolvedTheme } = useTheme();
   const apiRef = useRef<DockviewApi | null>(null);
   const layoutDisposableRef = useRef<DockviewIDisposable | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -213,7 +210,7 @@ export default function PersonalKnowledgeBaseDockview({ onClosedPanelsChange, re
     [selectedMaterialId, onPickMaterial, sessionId, refreshList, listKey],
   );
 
-  const dockTheme = resolvedTheme === "dark" ? themeDark : themeLight;
+  const dockTheme = themeLight;
 
   useEffect(() => {
     const api = apiRef.current;

@@ -6,13 +6,12 @@ import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
-import { User, Mail, Shield, CheckCircle2, AlertCircle, Eye, EyeOff, KeyRound } from "lucide-react";
+import { User, Shield, CheckCircle2, AlertCircle, Eye, EyeOff, KeyRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type UserData = {
   id: string;
   username: string;
-  email: string;
   role: string;
   created_at?: string;
 };
@@ -21,7 +20,6 @@ export default function UserPage() {
   const [user, setUser] = useState<UserData | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [editEmail, setEditEmail] = useState("");
   const [editUsername, setEditUsername] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -44,7 +42,6 @@ export default function UserPage() {
       if (res.ok) {
         const u = (await res.json()) as UserData;
         setUser(u);
-        setEditEmail(u.email);
         setEditUsername(u.username);
       }
       setLoading(false);
@@ -60,7 +57,7 @@ export default function UserPage() {
         method: "PUT",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: editEmail, username: editUsername }),
+        body: JSON.stringify({ username: editUsername }),
       });
       if (!res.ok) {
         const j = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
@@ -170,12 +167,6 @@ export default function UserPage() {
                   <User size={13} />用户名
                 </label>
                 <Input value={editUsername} onChange={e => setEditUsername(e.target.value)} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                  <Mail size={13} />邮箱
-                </label>
-                <Input type="email" value={editEmail} onChange={e => setEditEmail(e.target.value)} />
               </div>
               <Button type="submit" disabled={saving}>
                 {saving ? "保存中…" : "保存修改"}

@@ -91,7 +91,7 @@ export function SubmissionForm({ assignment, courseId, assignmentId, existingSub
           你已于 {new Date(existingSubmission.submittedAt).toLocaleString("zh-CN")} 提交，当前状态：
           <strong className="ml-1">
             {existingSubmission.status === "RETURNED" ? "已批改" :
-             existingSubmission.status === "GRADING" ? "待批改" : "待批改"}
+             existingSubmission.status === "GRADED" ? "批改完成，待发放" : "待批改"}
           </strong>
           。可重新填写答案并再次提交（截止前）。
         </div>

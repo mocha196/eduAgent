@@ -5,6 +5,9 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "skills-loader" });
 
 export type SkillSource = {
   /** Resolved absolute path to a skills directory. */
@@ -128,6 +131,7 @@ export class SkillsLoader {
       }
     }
 
+    log.debug({ skillCount: entries.length }, "skills loaded");
     return entries;
   }
 

@@ -7,6 +7,9 @@ import type { Tool, TurnContext } from "../types";
 import { getLLMClient, getChatModel } from "../llm-registry";
 import { runSubAgent } from "../subagent";
 import { toolRegistry } from "./registry";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "tool:delegation" });
 
 export const delegateTaskTool: Tool = {
   name: "delegate_task",
@@ -34,12 +37,15 @@ export const delegateTaskTool: Tool = {
     required: ["task"],
   },
   async execute(args: Record<string, unknown>, ctx: TurnContext): Promise<string> {
+    const t0 = Date.now();
     const task = typeof args.task === "string" ? args.task.trim() : "";
     if (!task) return JSON.stringify({ error: "缺少必要参数：task" });
 
     const allowedToolNames = Array.isArray(args.allowed_tools)
       ? (args.allowed_tools as unknown[]).filter((t) => typeof t === "string")
       : ([] as string[]);
+
+    log.debug({ taskPreview: task.slice(0, 80), allowedToolCount: allowedToolNames.length }, "delegate_task start");
 
     const allowedTools = (allowedToolNames as string[])
       .map((n) => toolRegistry.get(n))
@@ -51,8 +57,10 @@ export const delegateTaskTool: Tool = {
     const result = await runSubAgent(client, model, { task, allowedTools, ctx }, 0);
 
     if (result.success) {
+      log.debug({ durationMs: Date.now() - t0, summaryLen: result.summary.length }, "delegate_task done");
       return result.summary;
     }
+    log.warn({ durationMs: Date.now() - t0, error: result.error }, "delegate_task failed");
     return JSON.stringify({ error: result.error ?? "子 Agent 执行失败" });
   },
 };

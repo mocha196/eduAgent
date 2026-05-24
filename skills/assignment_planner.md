@@ -3,7 +3,7 @@ name: assignment_planner
 description: 作业命题蓝图规划：将教师自然语言需求转化为结构化命题蓝图
 version: 1.0.0
 agent_mode: planner
-allowed_tools: [wikipedia_search, web_search]
+allowed_tools: []
 handoffs:
   - target_skill: assignment_generator
     condition: blueprint_ready
@@ -40,8 +40,7 @@ always_inject: false
 
 ## 工具使用策略
 
-- **wikipedia_search**：当实体/概念模糊时，主动调用澄清知识边界（例如：不确定"滑动窗口"是链路层还是传输层概念时）
-- **web_search**：寻找该主题常见的考试题型或业界实践案例，为题目情境设计提供参考
+（无外部搜索工具）
 
 ## 禁止事项
 

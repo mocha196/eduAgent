@@ -20,7 +20,7 @@ export type CourseSummaryDto = {
   status: CourseStatus;
   created_at: string;
   updated_at: string;
-  /** Present only for course owner when status is PUBLISHED. */
+  /** Present only for the course owner (teacher). */
   share_code?: string | null;
 };
 

@@ -7,6 +7,9 @@ import { prisma } from "@/lib/db";
 import type { Tool, TurnContext } from "../types";
 import { getLLMClient, getVisionModel } from "../llm-registry";
 import { buildVisionToolImageUrl } from "./vision";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "tool:course" });
 
 // ---- get_course_info -------------------------------------------------------
 
@@ -29,10 +32,12 @@ export const getCourseInfoTool: Tool = {
     required: [],
   },
   async execute(args, ctx: TurnContext): Promise<string> {
+    const t0 = Date.now();
     const courseId =
       typeof args.course_id === "string" && args.course_id.trim()
         ? args.course_id.trim()
         : ctx.courseId ?? null;
+    log.debug({ courseId, userId: ctx.userId }, "get_course_info start");
 
     // No specific course → list all accessible courses
     if (!courseId) {
@@ -71,14 +76,16 @@ export const getCourseInfoTool: Tool = {
         )
       : ["  （暂无课节）"];
 
-    return [
-      `课程：《${course.name}》（id: ${course.id}，状态：${course.status}）`,
+    const result = [
+      `课程：《${course.name}》（id: ${course.id}）`,
       course.description ? `描述：${course.description.slice(0, 200)}` : "",
       `课节列表（共 ${lessons.length} 节）：`,
       ...lessonLines,
     ]
       .filter(Boolean)
       .join("\n");
+    log.debug({ courseId, lessonCount: lessons.length, durationMs: Date.now() - t0 }, "get_course_info done");
+    return result;
   },
 };
 

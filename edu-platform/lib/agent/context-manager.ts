@@ -12,6 +12,9 @@
 
 import OpenAI from "openai";
 import type { Message } from "./types";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "context-manager" });
 
 const CHARS_PER_TOKEN = 4;
 
@@ -55,6 +58,8 @@ export class ContextManager {
   compress(messages: Message[], maxTokens?: number): Message[] {
     const limit = maxTokens ?? this.maxTokens;
     if (estimateTokens(messages) <= limit) return messages;
+
+    log.debug({ before: messages.length, tokensBefore: estimateTokens(messages), limit }, "context compress triggered");
 
     const system = messages[0]?.role === "system" ? [messages[0]] : [];
     const rest = messages[0]?.role === "system" ? messages.slice(1) : messages;

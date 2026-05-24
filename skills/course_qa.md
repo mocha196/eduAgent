@@ -3,7 +3,7 @@ name: course_qa
 description: 课程问答入口：检索课程 RAG 知识库直接回答事实类问题，复杂/原理/混淆问题路由至对应教学策略
 version: 1.1.0
 always_inject: false
-allowed_tools: [knowledge_query, get_course_info, list_course_materials, get_material_summary, view_current_material_page, web_search, wikipedia_search]
+allowed_tools: [knowledge_query, get_course_info, list_course_materials, get_material_summary, view_current_material_page]
 handoffs:
   - target_skill: concept_clarification
     condition: confusion_detected

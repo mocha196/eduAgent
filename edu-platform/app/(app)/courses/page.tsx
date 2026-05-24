@@ -6,32 +6,16 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
-import { Plus, BookOpen, ChevronRight, Clock, Archive } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Plus, BookOpen, ChevronRight, Clock } from "lucide-react";
 
 type CourseRow = {
   id: string;
   name: string;
   description?: string | null;
-  status: string;
   created_at?: string;
 };
 
 type UserInfo = { role?: string };
-
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { label: string; className: string }> = {
-    PUBLISHED: { label: "已发布", className: "status-published" },
-    DRAFT: { label: "草稿", className: "status-draft" },
-    ARCHIVED: { label: "已归档", className: "status-archived" },
-  };
-  const item = map[status] ?? { label: status, className: "status-archived" };
-  return (
-    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold", item.className)}>
-      {item.label}
-    </span>
-  );
-}
 
 function CourseCardSkeleton() {
   return (
@@ -202,15 +186,6 @@ export default function CoursesPage() {
                 href={`/courses/${c.id}`}
                 className="group relative flex flex-col rounded-xl border border-border bg-card p-5 transition-all hover:border-primary/40 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {/* Status + archived icon */}
-                <div className="mb-3 flex items-center justify-between">
-                  <StatusBadge status={c.status} />
-                  {c.status === "ARCHIVED" && (
-                    <Archive size={13} className="text-muted-foreground/60" />
-                  )}
-                </div>
-
-                {/* Title */}
                 <h2 className="font-display text-base font-semibold text-foreground line-clamp-2 leading-snug mb-2 group-hover:text-primary transition-colors">
                   {c.name}
                 </h2>

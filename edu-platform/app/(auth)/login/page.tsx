@@ -62,13 +62,13 @@ export default function LoginPage() {
       <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4">
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-foreground" htmlFor="username">
-            用户名
+            学号
           </label>
           <Input
             id="username"
             type="text"
             autoComplete="username"
-            placeholder="输入用户名"
+            placeholder="输入学号"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             disabled={loading}
@@ -119,15 +119,7 @@ export default function LoginPage() {
         </Button>
       </form>
 
-      <p className="text-center text-sm text-muted-foreground">
-        还没有账号？{" "}
-        <Link
-          href="/register"
-          className="font-medium text-primary underline-offset-4 hover:underline"
-        >
-          立即注册
-        </Link>
-      </p>
+
     </div>
   );
 }

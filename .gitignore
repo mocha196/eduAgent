@@ -51,3 +51,4 @@ node_modules/
 npm-debug.log*
 skills/pptx/
 tests/eval/useless
+tmp_jwt.txt

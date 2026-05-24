@@ -7,6 +7,9 @@
 import OpenAI from "openai";
 import { getLLMClient, getVisionModel } from "../llm-registry";
 import type { Tool, TurnContext } from "../types";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "tool:vision" });
 
 function isPrivateOrLocalHostname(hostname: string): boolean {
   const h = hostname.trim().toLowerCase();
@@ -89,6 +92,7 @@ export const analyzeImageTool: Tool = {
   },
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async execute(args: Record<string, unknown>, _ctx: TurnContext): Promise<string> {
+    const t0 = Date.now();
     const imageUrls = Array.isArray(args.image_urls)
       ? (args.image_urls as unknown[]).filter((u): u is string => typeof u === "string")
       : [];
@@ -100,6 +104,7 @@ export const analyzeImageTool: Tool = {
     if (!question) {
       return JSON.stringify({ error: "缺少 question 参数" });
     }
+    log.debug({ imageCount: imageUrls.length, question: question.slice(0, 80) }, "analyzeImage start");
 
     try {
       const client = getLLMClient("vision");
@@ -127,6 +132,7 @@ export const analyzeImageTool: Tool = {
       });
 
       const answer = resp.choices[0]?.message?.content?.trim() ?? "";
+      log.debug({ durationMs: Date.now() - t0, answerLen: answer.length }, "analyzeImage done");
       return answer || JSON.stringify({ error: "视觉模型未返回内容" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

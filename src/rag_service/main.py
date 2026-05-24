@@ -4,7 +4,6 @@ Endpoints:
   POST /rag/query                         — hybrid/course/personal/enrolled_courses retrieval
   POST /rag/generate-quiz                 — question generation from a course's knowledge graph
   POST /rag/build-mindmap                 — mindmap from parsed Markdown files
-  POST /rag/eval                          — LLM-based evaluation (hint / score_essay / evaluate_code)
   POST /rag/parse-document                — base64 → extracted text (PDF / office / image)
   POST /rag/assignment/regenerate-question — regenerate a single assignment question via RAG
   POST /rag/assignment/complete-question  — complete a teacher-written question stem with AI
@@ -423,99 +422,6 @@ def rag_build_mindmap(
     markdown = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
 
     return BuildMindmapResponse(markdown=markdown, html=html)
-
-
-# ---------------------------------------------------------------------------
-# /rag/eval
-# ---------------------------------------------------------------------------
-
-class EvalRequest(BaseModel):
-    eval_type: str  # "hint" | "score_essay" | "evaluate_code"
-    # hint params
-    question: str | None = None
-    context: str | None = None
-    level: int = 1
-    # score_essay params
-    answer: str | None = None
-    reference: str | None = None
-    # evaluate_code params
-    code: str | None = None
-    task_description: str | None = None
-    language: str = "python"
-
-
-class EvalResponse(BaseModel):
-    result: str
-
-
-_HINT_SYSTEM = """你是一位启发式教学助手，专注于苏格拉底式提问。
-你的职责是通过分级提示引导学生自己找到答案，而不是直接给出答案。
-提示等级：1=轻微方向性引导，2=提供部分思路，3=接近答案但不揭示。"""
-
-_ESSAY_SYSTEM = """你是一位专业教育评估者，负责批改学生书面作答。
-请基于评分标准给出：① 分数（0-100）② 优点 ③ 不足 ④ 改进建议。输出格式为 Markdown。"""
-
-_CODE_SYSTEM = """你是一位代码审查专家，专门对学生代码提供教育性反馈。
-请评估：① 正确性 ② 代码质量 ③ 边界情况 ④ 改进建议。输出格式为 Markdown。"""
-
-
-async def _llm_eval(system: str, user: str) -> str:
-    from openai import AsyncOpenAI
-    from rag_mvp.config import settings
-
-    client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
-    resp = await client.chat.completions.create(
-        model=settings.llm_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.3,
-        max_tokens=2048,
-    )
-    return resp.choices[0].message.content or ""
-
-
-@app.post("/rag/eval", response_model=EvalResponse)
-def rag_eval(body: EvalRequest, _auth: None = Depends(_require_key)) -> EvalResponse:
-    eval_type = (body.eval_type or "").strip().lower()
-
-    if eval_type == "hint":
-        q = (body.question or "").strip()
-        if not q:
-            raise HTTPException(status_code=400, detail="question required for hint eval")
-        lvl = max(1, min(3, body.level))
-        user = f"问题：{q}\n\n"
-        if body.context:
-            user += f"背景信息：{body.context}\n\n"
-        user += f"请提供第 {lvl} 级提示（1=最轻微，3=最接近答案）。"
-        result = asyncio.run(_llm_eval(_HINT_SYSTEM, user))
-
-    elif eval_type == "score_essay":
-        q = (body.question or "").strip()
-        ans = (body.answer or "").strip()
-        if not q or not ans:
-            raise HTTPException(status_code=400, detail="question and answer required for score_essay")
-        user = f"题目：{q}\n\n学生作答：{ans}"
-        if body.reference:
-            user += f"\n\n评分标准：{body.reference}"
-        result = asyncio.run(_llm_eval(_ESSAY_SYSTEM, user))
-
-    elif eval_type == "evaluate_code":
-        code = (body.code or "").strip()
-        task = (body.task_description or "").strip()
-        if not code or not task:
-            raise HTTPException(status_code=400, detail="code and task_description required for evaluate_code")
-        user = f"编程语言：{body.language}\n\n任务要求：{task}\n\n学生代码：\n```{body.language}\n{code}\n```"
-        result = asyncio.run(_llm_eval(_CODE_SYSTEM, user))
-
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown eval_type={eval_type!r}. Allowed: hint, score_essay, evaluate_code",
-        )
-
-    return EvalResponse(result=result)
 
 
 # ---------------------------------------------------------------------------

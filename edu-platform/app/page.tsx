@@ -33,11 +33,8 @@ export default function HomePage() {
             <span className="font-display text-sm font-semibold tracking-tight">EduAgent Campus</span>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" asChild>
-              <Link href="/login">登录</Link>
-            </Button>
             <Button size="sm" asChild>
-              <Link href="/register">注册</Link>
+              <Link href="/login">登录</Link>
             </Button>
           </div>
         </div>
@@ -63,13 +60,10 @@ export default function HomePage() {
           </p>
           <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
             <Button size="lg" className="h-11 px-8 font-semibold" asChild>
-              <Link href="/register">
+              <Link href="/login">
                 开始使用
                 <ArrowRight size={16} className="ml-2" />
               </Link>
-            </Button>
-            <Button variant="outline" size="lg" className="h-11 px-8" asChild>
-              <Link href="/login">已有账号，去登录</Link>
             </Button>
           </div>
         </div>

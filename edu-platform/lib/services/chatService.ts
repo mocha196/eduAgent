@@ -217,7 +217,6 @@ export async function createNewCourseChatSession(
 type PersistArgs = {
   courseId: string | null;
   platformStudentId: string;
-  lessonId: string | null;
   sessionId: string;
   question: string;
   answer: string;
@@ -236,7 +235,6 @@ async function maybePersistQaLog(a: PersistArgs): Promise<void> {
     data: {
       courseId: a.courseId,
       studentId: a.platformStudentId,
-      lessonId: a.lessonId,
       sessionId: a.sessionId,
       question: a.question,
       questionTokens:
@@ -418,7 +416,6 @@ export type AttachmentParam = {
 type PersistTransformOpts = {
   courseId: string | null;
   platformStudentId: string;
-  lessonId: string | null;
   sessionId: string;
   question: string;
   persist: boolean;
@@ -489,7 +486,6 @@ function createB3PersistTransform(
             data: {
               courseId: opts.courseId,
               studentId: opts.platformStudentId,
-              lessonId: opts.lessonId,
               sessionId: opts.sessionId,
               question: opts.question,
               questionTokens: null,
@@ -813,13 +809,6 @@ export async function courseChatSseResponse(
   p: CourseChatParams,
 ): Promise<Response> {
   return runWithUserLlm(p.platformStudentId, async () => {
-  const user = await prisma.user.findFirst({
-    where: { id: p.platformStudentId, isActive: true },
-    select: { qaCollectionEnabled: true },
-  });
-  if (!user) {
-    throw new ApiError(404, "NOT_FOUND", "User not found");
-  }
   let sessionId: string;
   if (p.sessionId) {
     const row = await prisma.courseChatSession.findFirst({
@@ -927,10 +916,9 @@ export async function courseChatSseResponse(
     createB3PersistTransform({
       courseId: p.courseId,
       platformStudentId: p.platformStudentId,
-      lessonId: p.lessonId ?? null,
       sessionId,
       question: p.message,
-      persist: user.qaCollectionEnabled,
+      persist: true,
       traceId,
       baseHistory: summarizedHistory,
     }),
@@ -1016,13 +1004,6 @@ export async function qaCenterChatSseResponse(
   p: QaCenterChatParams,
 ): Promise<Response> {
   return runWithUserLlm(p.platformStudentId, async () => {
-  const user = await prisma.user.findFirst({
-    where: { id: p.platformStudentId, isActive: true },
-    select: { qaCollectionEnabled: true },
-  });
-  if (!user) {
-    throw new ApiError(404, "NOT_FOUND", "User not found");
-  }
   const sessionId = await getOrCreateQaCenterAgentSession(
     p.platformStudentId,
     p.sessionId,
@@ -1096,10 +1077,9 @@ export async function qaCenterChatSseResponse(
     createB3PersistTransform({
       courseId: null,
       platformStudentId: p.platformStudentId,
-      lessonId: null,
       sessionId,
       question: p.message,
-      persist: user.qaCollectionEnabled,
+      persist: true,
       traceId: p.traceId ?? undefined,
       baseHistory: summarizedHistory,
     }),
@@ -1122,14 +1102,6 @@ export async function personalKbChatSseResponse(
   p: PersonalKbChatParams,
 ): Promise<Response> {
   return runWithUserLlm(p.userId, async () => {
-  const user = await prisma.user.findFirst({
-    where: { id: p.userId, isActive: true },
-    select: { qaCollectionEnabled: true },
-  });
-  if (!user) {
-    throw new ApiError(404, "NOT_FOUND", "User not found");
-  }
-
   const [history, profile] = await Promise.all([
     sessionStore.get(p.sessionId).catch(() => []),
     memoryStore.loadProfile(p.userId).catch(() => null),
@@ -1220,7 +1192,6 @@ export async function personalKbChatSseResponse(
     createB3PersistTransform({
       courseId: null,
       platformStudentId: p.userId,
-      lessonId: null,
       sessionId: p.sessionId,
       question: p.message,
       persist: false,

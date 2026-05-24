@@ -7,6 +7,9 @@ import OpenAI from "openai";
 import { getRoleExtraBody } from "./llm-registry";
 import { createStandaloneTrace, flushLangfuse, recordGeneration } from "./tracing/langfuse-tracer";
 import type { Tool, TurnContext } from "./types";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "subagent" });
 
 const MAX_ITERATIONS = 6;
 const RECURSION_BLACKLIST = new Set(["delegate_task"]);
@@ -59,6 +62,8 @@ export async function runSubAgent(
   }));
 
   const subModel = config.model ?? model;
+  const t0 = Date.now();
+  log.debug({ task: config.task.slice(0, 80), model: subModel, toolCount: allowedTools.length }, "subagent start");
   const trace = createStandaloneTrace({
     name: "subagent.run",
     input: config.task,
@@ -157,5 +162,6 @@ export async function runSubAgent(
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const content = typeof lastAssistant?.content === "string" ? lastAssistant.content : "";
   void flushLangfuse();
+  log.debug({ durationMs: Date.now() - t0, summaryLen: content.length }, "subagent done");
   return { success: true, summary: content };
 }

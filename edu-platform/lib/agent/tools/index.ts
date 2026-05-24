@@ -5,9 +5,7 @@
 export { toolRegistry } from "./registry";
 import { toolRegistry } from "./registry";
 import { knowledgeQueryTool /* generateQuizTool */ } from "./rag";
-import { hintGeneratorTool, scoreEssayTool, evaluateCodeTool } from "./eval";
 import { rememberFactTool, searchMemoryTool } from "./memory";
-import { webSearchTool, wikipediaSearchTool } from "./search";
 import { listSkillsTool, viewSkillTool } from "./skills";
 import { parseDocumentTool } from "./ocr";
 import { analyzeImageTool } from "./vision";
@@ -20,18 +18,9 @@ import { readAttachmentTool } from "./read-attachment";
 toolRegistry.register(knowledgeQueryTool);
 // toolRegistry.register(generateQuizTool);
 
-// Eval tools
-toolRegistry.register(hintGeneratorTool);
-toolRegistry.register(scoreEssayTool);
-toolRegistry.register(evaluateCodeTool);
-
 // Memory tools
 toolRegistry.register(rememberFactTool);
 toolRegistry.register(searchMemoryTool);
-
-// Search tools
-toolRegistry.register(webSearchTool);
-toolRegistry.register(wikipediaSearchTool);
 
 // Skills tools
 toolRegistry.register(listSkillsTool);
@@ -63,9 +52,7 @@ import { delegateTaskTool } from "./delegation";
 toolRegistry.register(delegateTaskTool);
 
 export { knowledgeQueryTool /* generateQuizTool */ };
-export { hintGeneratorTool, scoreEssayTool, evaluateCodeTool };
 export { rememberFactTool, searchMemoryTool };
-export { webSearchTool, wikipediaSearchTool };
 export { listSkillsTool, viewSkillTool };
 export { parseDocumentTool };
 export { delegateTaskTool };

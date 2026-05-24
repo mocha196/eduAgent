@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const {
-  userFindFirstMock,
   courseSessionFindFirstMock,
   courseSessionFindUniqueMock,
   courseSessionCreateMock,
@@ -15,7 +14,6 @@ const {
   loadSkillsMock,
   loadProfileMock,
 } = vi.hoisted(() => ({
-  userFindFirstMock: vi.fn(),
   courseSessionFindFirstMock: vi.fn(),
   courseSessionFindUniqueMock: vi.fn(),
   courseSessionCreateMock: vi.fn(),
@@ -36,7 +34,6 @@ vi.mock("crypto", () => ({
 
 vi.mock("@/lib/db", () => ({
   prisma: {
-    user: { findFirst: userFindFirstMock },
     courseChatSession: {
       findFirst: courseSessionFindFirstMock,
       findUnique: courseSessionFindUniqueMock,
@@ -47,6 +44,7 @@ vi.mock("@/lib/db", () => ({
       create: qaCenterCreateMock,
     },
     qaLog: { create: qaLogCreateMock },
+    agentStyle: { findMany: vi.fn().mockResolvedValue([]) },
   },
 }));
 
@@ -114,7 +112,6 @@ import { courseChatSseResponse, qaCenterChatSseResponse } from "@/lib/services/c
 
 describe("chatService response integration", () => {
   beforeEach(() => {
-    userFindFirstMock.mockReset();
     courseSessionFindFirstMock.mockReset();
     courseSessionFindUniqueMock.mockReset();
     courseSessionCreateMock.mockReset();
@@ -138,7 +135,6 @@ describe("chatService response integration", () => {
 
   it("业务规则：课程对话应输出 SSE 并持久化问答与会话历史", async () => {
     // given
-    userFindFirstMock.mockResolvedValue({ qaCollectionEnabled: true });
     courseSessionFindFirstMock.mockResolvedValue({ agentSessionId: "course-sess-1" });
     courseSessionFindUniqueMock.mockResolvedValue({ agentSessionId: "course-sess-1" });
     sessionGetMock.mockResolvedValue([{ role: "user", content: "历史问题" }]);
@@ -185,7 +181,6 @@ describe("chatService response integration", () => {
 
   it("业务规则：问答中心无会话 ID 时应创建新会话并返回响应头", async () => {
     // given
-    userFindFirstMock.mockResolvedValue({ qaCollectionEnabled: false });
     createReActStreamMock.mockReturnValue(
       makeAgentStream([
         { type: "text", content: "跨课程回答" },
@@ -213,7 +208,8 @@ describe("chatService response integration", () => {
         agentSessionId: "qa-sess-fixed",
       },
     });
-    expect(qaLogCreateMock).not.toHaveBeenCalled();
+    // persist is hardcoded true — qa log should be attempted
+    expect(qaLogCreateMock).toHaveBeenCalled();
 
     const [savedSessionId] = sessionSetMock.mock.calls[0] as [string, Array<{ role: string; content: string }>];
     expect(savedSessionId).toBe("qa-sess-fixed");

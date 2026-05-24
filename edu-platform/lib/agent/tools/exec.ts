@@ -18,7 +18,9 @@
 import type { Tool, TurnContext } from "../types";
 import { getSkillsLoader } from "../skills-loader";
 import { getMinioPresignedUrl } from "@/lib/minio";
+import { logger } from "@/lib/logger";
 
+const log = logger.child({ component: "tool:exec" });
 const PRESIGN_TTL_SEC = 900; // 15 minutes
 
 type RunSkillScriptResponse = {
@@ -84,6 +86,7 @@ export const execSkillScriptTool: Tool = {
   category: "write",
 
   async execute(args: Record<string, unknown>, ctx: TurnContext): Promise<string> {
+    const t0 = Date.now();
     const skill = typeof args.skill === "string" ? args.skill.trim() : "";
     const script = typeof args.script === "string" ? args.script.trim() : "";
 
@@ -113,6 +116,7 @@ export const execSkillScriptTool: Tool = {
       user_id: ctx.userId,
       timeout_sec: typeof args.timeout_sec === "number" ? Math.min(args.timeout_sec, 300) : 60,
     };
+    log.debug({ skill, script, timeoutSec: payload.timeout_sec }, "exec_skill_script start");
 
     let resp: Response;
     try {
@@ -146,10 +150,11 @@ export const execSkillScriptTool: Tool = {
       try {
         output_url = await getMinioPresignedUrl(result.output_key, PRESIGN_TTL_SEC);
       } catch (err) {
-        console.warn("[exec_skill_script] presign failed:", err);
+        log.warn({ err, outputKey: result.output_key }, "exec_skill_script presign failed");
       }
     }
 
+    log.debug({ skill, script, returnCode: result.return_code, hasOutput: !!output_url, durationMs: Date.now() - t0 }, "exec_skill_script done");
     return JSON.stringify({
       return_code: result.return_code,
       stdout: result.stdout,

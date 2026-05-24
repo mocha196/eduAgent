@@ -4,6 +4,9 @@
  */
 
 import type { Tool } from "../types";
+import { logger } from "@/lib/logger";
+
+const log = logger.child({ component: "tool:ocr" });
 
 export const parseDocumentTool: Tool = {
   name: "parse_document",
@@ -25,6 +28,7 @@ export const parseDocumentTool: Tool = {
     required: ["filename", "base64_content"],
   },
   async execute(args: Record<string, unknown>): Promise<string> {
+    const t0 = Date.now();
     const filename = typeof args.filename === "string" ? args.filename.trim() : "document.pdf";
     const base64Content =
       typeof args.base64_content === "string" ? args.base64_content.trim() : "";
@@ -32,6 +36,7 @@ export const parseDocumentTool: Tool = {
     if (!base64Content) {
       return JSON.stringify({ error: "缺少必要参数：base64_content" });
     }
+    log.debug({ filename, contentLen: base64Content.length }, "parse_document start");
 
     const ragUrl = (process.env.RAG_SERVICE_URL ?? "http://localhost:8001").replace(/\/+$/, "");
     const ragKey = process.env.RAG_SERVICE_API_KEY ?? "";
@@ -64,6 +69,7 @@ export const parseDocumentTool: Tool = {
     }
 
     const truncated = text.length > 12000 ? text.slice(0, 12000) + "\n\n…（内容已截断）" : text;
+    log.debug({ filename, pages, textLen: text.length, durationMs: Date.now() - t0 }, "parse_document done");
     return pages !== null
       ? `【文档共 ${pages} 页，已提取文字内容】\n\n${truncated}`
       : truncated;

@@ -6,6 +6,7 @@ import { jsonError } from "@/lib/http/json-response";
 import { ApiError } from "@/lib/http/api-error";
 import { requireAuthenticated, requireAdmin, parseRoleParam } from "@/lib/admin";
 import { getAuthFromRequest } from "@/lib/request-auth";
+import { createUserByAdmin } from "@/lib/services/authService";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +41,6 @@ export async function GET(req: NextRequest) {
     if (search) {
       where.OR = [
         { username: { contains: search, mode: "insensitive" } },
-        { email: { contains: search, mode: "insensitive" } },
         { realName: { contains: search, mode: "insensitive" } },
       ];
     }
@@ -52,10 +52,8 @@ export async function GET(req: NextRequest) {
         select: {
           id: true,
           username: true,
-          email: true,
           role: true,
           realName: true,
-          avatarUrl: true,
           isActive: true,
           createdAt: true,
           _count: {
@@ -83,6 +81,48 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     if (err instanceof ApiError) return jsonError(err);
     console.error("[admin/users GET]", err);
+    return jsonError(new ApiError(500, "INTERNAL_ERROR", "Server error"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/admin/users  — 管理员创建账号
+//   Body: { username, realName?, role? }
+//   username 即学号，初始密码与学号相同
+// ---------------------------------------------------------------------------
+export async function POST(req: NextRequest) {
+  try {
+    const auth = requireAuthenticated(await getAuthFromRequest(req));
+    requireAdmin(auth);
+
+    const body = (await req.json()) as {
+      username?: string;
+      realName?: string;
+      role?: string;
+    };
+
+    const username = typeof body.username === "string" ? body.username.trim() : "";
+
+    if (!username) {
+      throw new ApiError(400, "VALIDATION_ERROR", "学号不能为空");
+    }
+
+    const role = parseRoleParam(body.role ?? "STUDENT");
+    if (role === UserRole.ADMIN) {
+      throw new ApiError(403, "FORBIDDEN", "不允许创建管理员账号");
+    }
+
+    const result = await createUserByAdmin({
+      username,
+      password: username, // 初始密码与学号相同
+      role,
+      realName: typeof body.realName === "string" ? body.realName.trim() || null : null,
+    });
+
+    return jsonOk({ user: result.user, initial_password: username }, 201);
+  } catch (err) {
+    if (err instanceof ApiError) return jsonError(err);
+    console.error("[admin/users POST]", err);
     return jsonError(new ApiError(500, "INTERNAL_ERROR", "Server error"));
   }
 }

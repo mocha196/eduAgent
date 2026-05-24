@@ -16,7 +16,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/lib/db";
 
 const PREFIX = `it_pkb_${Date.now()}`;
-const TEST_EMAIL = `${PREFIX}@test.local`;
 
 let userId: string;
 let materialId: string;
@@ -27,7 +26,6 @@ describe("PersonalMaterial — PostgreSQL integration", () => {
     const user = await prisma.user.create({
       data: {
         username: `${PREFIX}_user`,
-        email: TEST_EMAIL,
         passwordHash: "$argon2id$v=19$m=65536,t=3,p=4$placeholder$placeholder",
         role: UserRole.STUDENT,
       },
@@ -37,7 +35,7 @@ describe("PersonalMaterial — PostgreSQL integration", () => {
 
   afterAll(async () => {
     // Remove all test data; cascade deletes the personal_materials rows as well
-    await prisma.user.deleteMany({ where: { email: { endsWith: "@test.local" } } });
+    await prisma.user.deleteMany({ where: { username: { startsWith: PREFIX } } });
     await prisma.$disconnect();
   });
 

@@ -14,8 +14,6 @@ type CourseDetail = {
   id: string;
   name: string;
   description: string | null;
-  cover_image_url: string | null;
-  status: string;
 };
 
 export default function EditCoursePage() {
@@ -26,7 +24,6 @@ export default function EditCoursePage() {
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [coverImageUrl, setCoverImageUrl] = useState("");
   const [notify, setNotify] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   function showNotify(type: "success" | "error", msg: string) {
@@ -45,7 +42,6 @@ export default function EditCoursePage() {
         if (d.course) {
           setName(d.course.name);
           setDescription(d.course.description ?? "");
-          setCoverImageUrl(d.course.cover_image_url ?? "");
         }
       }
       if (!cancelled) setLoading(false);
@@ -65,7 +61,6 @@ export default function EditCoursePage() {
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim() || null,
-          cover_image_url: coverImageUrl.trim() || null,
         }),
       });
       if (!res.ok) {
@@ -107,7 +102,6 @@ export default function EditCoursePage() {
           <div className="space-y-4">
             <Skeleton className="h-10 w-full" />
             <Skeleton className="h-24 w-full" />
-            <Skeleton className="h-10 w-full" />
           </div>
         ) : (
           <form onSubmit={(e) => void handleSubmit(e)} className="space-y-5">
@@ -118,10 +112,6 @@ export default function EditCoursePage() {
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-foreground">课程描述</label>
               <Textarea rows={4} maxLength={500} value={description} onChange={e => setDescription(e.target.value)} className="resize-none" />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-foreground">封面图 URL</label>
-              <Input placeholder="https://..." value={coverImageUrl} onChange={e => setCoverImageUrl(e.target.value)} />
             </div>
             <div className="flex items-center gap-3">
               <Button type="submit" disabled={saving}>{saving ? "保存中…" : "保存变更"}</Button>

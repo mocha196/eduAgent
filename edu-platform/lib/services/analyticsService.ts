@@ -276,17 +276,13 @@ export async function getStudentLearningProgress(
     where: { studentId, deletedAt: null },
     orderBy: { createdAt: "desc" },
     take: 500,
-    select: { question: true, createdAt: true, responseQuality: true },
+    select: { question: true, createdAt: true },
   });
   const total = logs.length;
   const topics = new Set<string>();
-  const weak: string[] = [];
   for (const l of logs) {
     const q = l.question.trim().slice(0, 80);
     if (q.length >= 4) topics.add(q);
-    if (l.responseQuality !== null && l.responseQuality <= 2) {
-      weak.push(q);
-    }
   }
   const recent = logs[0]?.createdAt ?? null;
   const engagement_score =
@@ -296,7 +292,7 @@ export async function getStudentLearningProgress(
     student_id: studentId,
     total_questions: total,
     topics_covered: [...topics].slice(0, 30),
-    weak_areas: weak.slice(0, 15),
+    weak_areas: [],
     recent_activity: recent ? recent.toISOString() : null,
     engagement_score: Math.round(engagement_score * 100) / 100,
   };

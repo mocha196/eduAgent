@@ -40,14 +40,8 @@ async function courseToSummaryDto(
     created_at: c.createdAt.toISOString(),
     updated_at: c.updatedAt.toISOString(),
   };
-  if (
-    role === UserRole.TEACHER &&
-    c.status === CourseStatus.PUBLISHED &&
-    c.shareCode
-  ) {
-    if (c.teacherId === viewerId) {
-      base.share_code = c.shareCode;
-    }
+  if (role === UserRole.TEACHER && c.shareCode && c.teacherId === viewerId) {
+    base.share_code = c.shareCode;
   }
   return base;
 }
@@ -76,13 +70,15 @@ export async function createCourse(
   if (!name) {
     throw new ApiError(400, "VALIDATION_ERROR", "name is required");
   }
+  const shareCode = await allocateUniqueCourseShareCode();
   const c = await prisma.course.create({
     data: {
       teacherId,
       name,
       description: body.description?.trim() || null,
       coverImageUrl: body.cover_image_url?.trim() || null,
-      status: CourseStatus.DRAFT,
+      status: CourseStatus.PUBLISHED,
+      shareCode,
     },
   });
   return courseToSummaryDto(c, teacherId, role);
@@ -154,53 +150,6 @@ export async function updateCourse(
   return courseToSummaryDto(updated, userId, role);
 }
 
-export async function publishCourse(
-  userId: string,
-  role: UserRole,
-  courseId: string,
-): Promise<CourseSummaryDto> {
-  await assertCourseOwner(userId, role, courseId);
-  const existing = await prisma.course.findFirst({
-    where: { id: courseId, isDeleted: false },
-  });
-  if (!existing) {
-    throw new ApiError(404, "NOT_FOUND", "Course not found");
-  }
-  if (existing.status === CourseStatus.ARCHIVED) {
-    throw new ApiError(
-      409,
-      "CONFLICT",
-      "Cannot publish an archived course",
-    );
-  }
-  if (existing.status === CourseStatus.PUBLISHED) {
-    return courseToSummaryDto(existing, userId, role);
-  }
-  const shareCode =
-    existing.shareCode ?? (await allocateUniqueCourseShareCode());
-  const updated = await prisma.course.update({
-    where: { id: courseId },
-    data: {
-      status: CourseStatus.PUBLISHED,
-      shareCode,
-    },
-  });
-  return courseToSummaryDto(updated, userId, role);
-}
-
-export async function archiveCourse(
-  userId: string,
-  role: UserRole,
-  courseId: string,
-): Promise<CourseSummaryDto> {
-  await assertTeacherOfCourse(userId, role, courseId);
-  const updated = await prisma.course.update({
-    where: { id: courseId },
-    data: { status: CourseStatus.ARCHIVED },
-  });
-  return courseToSummaryDto(updated, userId, role);
-}
-
 export async function joinCourse(
   studentId: string,
   role: UserRole,
@@ -214,14 +163,7 @@ export async function joinCourse(
     where: { id: courseId, isDeleted: false },
   });
   if (!course) {
-    throw new ApiError(404, "NOT_FOUND", "Course not found");
-  }
-  if (course.status !== CourseStatus.PUBLISHED) {
-    throw new ApiError(
-      403,
-      "FORBIDDEN",
-      "Course is not published; enrollment is not open",
-    );
+    throw new ApiError(404, "NOT_FOUND", "Course not found or has been deleted");
   }
   const existing = await prisma.courseEnrollment.findUnique({
     where: {
@@ -256,14 +198,13 @@ export async function joinCourseByShareCode(
     where: {
       shareCode: code,
       isDeleted: false,
-      status: CourseStatus.PUBLISHED,
     },
   });
   if (!course) {
     throw new ApiError(
       404,
       "NOT_FOUND",
-      "Invalid share code or course is not open for joining",
+      "Invalid share code or course has been deleted",
     );
   }
   const existing = await prisma.courseEnrollment.findUnique({

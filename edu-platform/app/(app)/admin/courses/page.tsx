@@ -25,15 +25,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { FilterSelect } from "@/components/FilterSelect";
-
-type CourseStatus = "DRAFT" | "PUBLISHED" | "ARCHIVED";
-
 type CourseItem = {
   id: string;
   name: string;
   description: string | null;
-  status: CourseStatus;
+  status: "PUBLISHED";
   createdAt: string;
   updatedAt: string;
   teacher: {
@@ -66,28 +62,6 @@ function useNotify() {
   };
   return { notification: n, notify };
 }
-
-const statusConfig: Record<CourseStatus, { label: string; color: string }> = {
-  DRAFT: {
-    label: "草稿",
-    color: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
-  },
-  PUBLISHED: {
-    label: "已发布",
-    color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-400",
-  },
-  ARCHIVED: {
-    label: "已归档",
-    color: "bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-500",
-  },
-};
-
-const STATUS_FILTERS = [
-  { value: "", label: "全部状态" },
-  { value: "PUBLISHED", label: "已发布" },
-  { value: "DRAFT", label: "草稿" },
-  { value: "ARCHIVED", label: "已归档" },
-];
 
 /** 表头列：图标 + 文字，可点击排序 */
 function HeaderCell({
@@ -154,7 +128,6 @@ export default function AdminCoursesPage() {
   const [forbidden, setForbidden] = useState(false);
   const { notification, notify } = useNotify();
 
-  const [statusFilter, setStatusFilter] = useState("");
   const [courseSearch, setCourseSearch] = useState("");
   const [courseSearchInput, setCourseSearchInput] = useState("");
   const [teacherSearch, setTeacherSearch] = useState("");
@@ -163,9 +136,8 @@ export default function AdminCoursesPage() {
   const [sortBy, setSortBy] = useState<SortField>("createdAt");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
-  // colFrs[0..6]: 课程名称, 授课教师, 状态, 选课学生, 课节数, 资料数, 创建时间
-  // proportional fr units — all columns scale together when container resizes
-  const [colFrs, setColFrs] = useState([32, 16, 9, 9, 8, 8, 11]);
+  // colFrs[0..5]: 课程名称, 授课教师, 选课学生, 课节数, 资料数, 创建时间
+  const [colFrs, setColFrs] = useState([36, 18, 10, 10, 10, 16]);
   const tableRef = useRef<HTMLDivElement>(null);
 
   const gridTemplate = colFrs.map((f) => `${f}fr`).join(" ");
@@ -201,7 +173,6 @@ export default function AdminCoursesPage() {
     setLoading(true);
     try {
       const sp = new URLSearchParams();
-      if (statusFilter) sp.set("status", statusFilter);
       if (courseSearch) sp.set("search", courseSearch);
       if (teacherSearch) sp.set("teacher", teacherSearch);
       sp.set("page", String(page));
@@ -220,7 +191,7 @@ export default function AdminCoursesPage() {
       setLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, courseSearch, teacherSearch, page, sortBy, sortDir]);
+  }, [courseSearch, teacherSearch, page, sortBy, sortDir]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -320,13 +291,6 @@ export default function AdminCoursesPage() {
           <Button size="sm" onClick={applySearch} variant="secondary">
             搜索
           </Button>
-
-          {/* Status filter */}
-          <FilterSelect
-            options={STATUS_FILTERS}
-            value={statusFilter}
-            onChange={(v) => { setStatusFilter(v); setPage(1); }}
-          />
         </div>
 
         {/* Stats bar */}
@@ -360,7 +324,6 @@ export default function AdminCoursesPage() {
             </div>
             {[
               { label: "授课教师", colIdx: 1 },
-              { label: "状态", colIdx: 2 },
             ].map(({ label, colIdx }) => (
               <div key={label} className="relative group/col pr-2">
                 {label}
@@ -373,9 +336,9 @@ export default function AdminCoursesPage() {
               </div>
             ))}
             {[
-              { icon: Users, label: "选课学生", field: "enrollments" as SortField, colIdx: 3 },
-              { icon: LayoutList, label: "课节数", field: "lessons" as SortField, colIdx: 4 },
-              { icon: FileStack, label: "资料数", field: "materials" as SortField, colIdx: 5 },
+              { icon: Users, label: "选课学生", field: "enrollments" as SortField, colIdx: 2 },
+              { icon: LayoutList, label: "课节数", field: "lessons" as SortField, colIdx: 3 },
+              { icon: FileStack, label: "资料数", field: "materials" as SortField, colIdx: 4 },
             ].map(({ icon, label, field, colIdx }) => (
               <div key={field} className="relative group/col text-center">
                 <HeaderCell
@@ -408,7 +371,6 @@ export default function AdminCoursesPage() {
                 >
                   <Skeleton className="h-4 w-44" />
                   <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-5 w-14" />
                   <Skeleton className="h-4 w-6 mx-auto" />
                   <Skeleton className="h-4 w-6 mx-auto" />
                   <Skeleton className="h-4 w-6 mx-auto" />
@@ -423,7 +385,6 @@ export default function AdminCoursesPage() {
           ) : (
             <div className="divide-y">
               {courses.map((course) => {
-                const sc = statusConfig[course.status];
                 const createdDate = new Date(course.createdAt).toLocaleDateString("zh-CN", {
                   year: "numeric",
                   month: "2-digit",
@@ -453,18 +414,6 @@ export default function AdminCoursesPage() {
                           {course.teacher.realName}
                         </div>
                       )}
-                    </div>
-
-                    {/* Status badge */}
-                    <div>
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
-                          sc.color,
-                        )}
-                      >
-                        {sc.label}
-                      </span>
                     </div>
 
                     {/* Enrollments */}

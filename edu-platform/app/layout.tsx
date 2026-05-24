@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Noto_Sans_SC, Noto_Serif_SC } from "next/font/google";
-import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import "katex/dist/katex.min.css";
 
@@ -31,9 +30,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning className={`${notoSerifSC.variable} ${notoSansSC.variable}`}>
       <body suppressHydrationWarning>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          {children}
-        </ThemeProvider>
+        {children}
       </body>
     </html>
   );

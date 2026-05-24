@@ -3,7 +3,7 @@ name: assignment_reviewer
 description: 作业题目质量评审：对生成的题目进行清晰度、准确性、难度匹配评分
 version: 1.0.0
 agent_mode: reviewer
-allowed_tools: [wikipedia_search, web_search]
+allowed_tools: []
 handoffs:
   - target_skill: assignment_fixer
     condition: overall_score_lt_0.85
@@ -34,8 +34,7 @@ always_inject: false
 
 ## 工具使用策略
 
-- **wikipedia_search**：当题目涉及的知识点存在学术争议或定义模糊时，用于核实
-- **web_search**：当需要判断题目的行业实践准确性时（例如TCP握手步骤是否描述准确）
+（无外部搜索工具）
 
 ## 输出格式
 
