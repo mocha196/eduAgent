@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +54,53 @@ def _require_key(request: Request) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Startup warmup — pre-initialise LightRAG for all published courses so that
+# the first knowledge_query tool call doesn't pay the cold-start penalty.
+# ---------------------------------------------------------------------------
+
+async def _warmup_course_caches() -> None:
+    """Query DB for published course IDs and pre-initialise each workspace."""
+    from rag_mvp.db import connect_sync
+    from rag_mvp.engine import get_course_rag_anything
+
+    try:
+        with connect_sync() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id::text FROM courses WHERE status IN ('PUBLISHED', 'ARCHIVED')"
+                )
+                course_ids: list[str] = [row[0] for row in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Warmup: failed to fetch course IDs: {}", exc)
+        return
+
+    if not course_ids:
+        logger.info("Warmup: no published courses found, skipping.")
+        return
+
+    logger.info("Warmup: pre-initialising {} course workspace(s)...", len(course_ids))
+    for cid in course_ids:
+        try:
+            await get_course_rag_anything(cid)
+            logger.debug("Warmup: course {} ready", cid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Warmup: course {} skipped — {}", cid, exc)
+    logger.info("Warmup: all course workspaces ready.")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Schedule warmup as a background task so the server accepts requests
+    # immediately — warmup runs concurrently and completes in the background.
+    asyncio.create_task(_warmup_course_caches())
+    yield
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="RAG Service", version="1.0.0", docs_url="/docs")
+app = FastAPI(title="RAG Service", version="1.0.0", docs_url="/docs", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # /rag/query
@@ -649,10 +693,16 @@ async def run_arbitrary_script(
                     timeout=body.timeout_sec,
                     # Restrict inherited env to avoid leaking secrets
                     env={
-                        k: v
-                        for k, v in os.environ.items()
-                        if k in {"PATH", "PYTHONPATH", "HOME", "TEMP", "TMP", "SystemRoot",
-                                 "USERPROFILE", "LANG", "LC_ALL"}
+                        **{
+                            k: v
+                            for k, v in os.environ.items()
+                            if k in {"PATH", "PYTHONPATH", "HOME", "TEMP", "TMP", "SystemRoot",
+                                     "USERPROFILE", "LANG", "LC_ALL"}
+                        },
+                        # Force UTF-8 I/O so emoji / CJK in print() won't raise
+                        # UnicodeEncodeError on Windows (which defaults to GBK).
+                        "PYTHONUTF8": "1",
+                        "PYTHONIOENCODING": "utf-8",
                     },
                 ),
             )

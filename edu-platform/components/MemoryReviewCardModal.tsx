@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
 import { CheckCircle, XCircle, BookOpen, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ interface AnswerResult {
   isCorrect: boolean;
   correctAnswer: string;
   explanation: string;
+  userAnswer?: string;
 }
 
 export interface MemoryReviewSession {
@@ -90,7 +91,7 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
   });
 
   const [inputValue, setInputValue] = useState("");
-  const [isPending, startTransition] = useTransition();
+  const [isPending, setIsPending] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const questions = session.questions;
@@ -108,7 +109,8 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
   // ---------------------------------------------------------------------------
 
   function handleDismiss() {
-    startTransition(async () => {
+    setIsPending(true);
+    void (async () => {
       try {
         await fetch(`/api/v1/me/memory-reviews/${session.sessionId}/dismiss`, {
           method: "POST",
@@ -117,16 +119,18 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
       } catch {
         // best-effort dismiss; still close modal
       } finally {
+        setIsPending(false);
         onClose();
       }
-    });
+    })();
   }
 
   function handleConfirm() {
     if (!currentQuestion || !inputValue.trim() || isPending) return;
     setSubmitError(null);
+    setIsPending(true);
 
-    startTransition(async () => {
+    void (async () => {
       try {
         const res = await fetch(
           `/api/v1/me/memory-reviews/${session.sessionId}/questions/${currentQuestion.id}/answer`,
@@ -150,8 +154,10 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
         setRevealed((prev) => ({ ...prev, [currentQuestion.id]: result }));
       } catch {
         setSubmitError("网络错误，请重试");
+      } finally {
+        setIsPending(false);
       }
-    });
+    })();
   }
 
   function goNext() {
@@ -229,8 +235,72 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
     );
   }
 
+  function renderRevealedOptions() {
+    if (!currentQuestion || !revealData) return null;
+    if (currentQuestion.type === "FILL_BLANK") return null;
+
+    const opts = effectiveOptions ?? [];
+    const correctAnswer = revealData.correctAnswer;
+    // Prefer server-returned userAnswer (set on fresh submit), fall back to component state
+    // and finally DB value (already-answered questions navigated back to).
+    const userAnswer = revealData.userAnswer || inputValue || currentQuestion.userAnswer || "";
+
+    return (
+      <div className="mt-4 space-y-2">
+        {opts.map((opt) => {
+          const isCorrect = opt === correctAnswer;
+          const isUserWrong = opt === userAnswer && !revealData.isCorrect;
+          return (
+            <div
+              key={opt}
+              className={cn(
+                "flex items-center space-x-2 rounded-lg border px-4 py-3",
+                isCorrect
+                  ? "border-green-500 bg-green-50 dark:bg-green-950/30"
+                  : isUserWrong
+                    ? "border-red-400 bg-red-50 dark:bg-red-950/30"
+                    : "border-border opacity-50",
+              )}
+            >
+              <div
+                className={cn(
+                  "h-4 w-4 rounded-full border-2 flex items-center justify-center shrink-0",
+                  isCorrect
+                    ? "border-green-500 bg-green-500"
+                    : isUserWrong
+                      ? "border-red-400 bg-red-400"
+                      : "border-muted-foreground",
+                )}
+              >
+                {(isCorrect || isUserWrong) && (
+                  <div className="h-1.5 w-1.5 rounded-full bg-white" />
+                )}
+              </div>
+              <span
+                className={cn(
+                  "text-sm flex-1",
+                  isCorrect
+                    ? "font-medium text-green-700 dark:text-green-300"
+                    : isUserWrong
+                      ? "text-red-700 dark:text-red-300"
+                      : "text-muted-foreground",
+                )}
+              >
+                {opt}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   function renderRevealedState() {
     if (!revealData) return null;
+    // For FILL_BLANK wrong answers, also show what the user typed
+    const showUserFillAnswer =
+      currentQuestion?.type === "FILL_BLANK" && !revealData.isCorrect;
+    const userFillAnswer = inputValue || currentQuestion?.userAnswer || "";
     return (
       <div
         className={cn(
@@ -255,6 +325,11 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
             {revealData.isCorrect ? "回答正确！" : `正确答案：${revealData.correctAnswer}`}
           </span>
         </div>
+        {showUserFillAnswer && userFillAnswer && (
+          <p className="text-xs text-muted-foreground">
+            你的回答：<span className="line-through">{userFillAnswer}</span>
+          </p>
+        )}
         {revealData.explanation && (
           <p className="text-sm text-muted-foreground leading-relaxed">{revealData.explanation}</p>
         )}
@@ -314,8 +389,8 @@ export function MemoryReviewCardModal({ session, open, onClose }: Props) {
             {currentQuestion.stem}
           </p>
 
-          {/* Answer input (hidden when revealed) */}
-          {!isRevealed && renderAnswerInput()}
+          {/* Answer input → options list with highlights after reveal */}
+          {!isRevealed ? renderAnswerInput() : renderRevealedOptions()}
 
           {/* Already-answered but current is not yet revealed (navigation) */}
           {currentQuestion.answeredAt && !revealData && (

@@ -13,19 +13,13 @@ export const MATERIAL_UPLOAD_ALLOWED_EXTENSIONS = [
   "docx",
   // Video
   "mp4",
-  "mov",
   "mkv",
   "webm",
   "avi",
-  "m4v",
-  "wmv",
   // Audio
   "mp3",
   "wav",
   "m4a",
-  "flac",
-  "ogg",
-  "opus",
 ] as const;
 
 export const MATERIAL_UPLOAD_ALLOWED_EXT_SET = new Set<string>(

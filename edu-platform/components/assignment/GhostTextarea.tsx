@@ -42,6 +42,7 @@ export function GhostTextarea({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   const fetchSuggestion = useCallback(
     async (prefix: string) => {
@@ -96,6 +97,12 @@ export function GhostTextarea({
     setSuggestion("");
   }
 
+  function handleScroll() {
+    if (overlayRef.current && textareaRef.current) {
+      overlayRef.current.scrollTop = textareaRef.current.scrollTop;
+    }
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (!suggestion) return;
 
@@ -123,16 +130,16 @@ export function GhostTextarea({
       {/* Ghost text overlay — rendered behind the real textarea */}
       {suggestion && (
         <div
+          ref={overlayRef}
           aria-hidden
           className={cn(
-            "pointer-events-none absolute inset-0 whitespace-pre-wrap break-words",
-            "rounded-md border border-transparent px-3 py-2 text-sm leading-[1.5]",
-            "font-[inherit]",
+            "pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words",
+            "rounded-md border border-transparent px-3 py-2 text-sm leading-5",
           )}
-          style={{ fontFamily: "inherit", fontSize: "inherit" }}
+          style={{ fontFamily: "inherit" }}
         >
           <span className="invisible">{value}</span>
-          <span className="text-muted-foreground/50 select-none">{suggestion}</span>
+          <span className="text-muted-foreground select-none opacity-50">{suggestion}</span>
         </div>
       )}
 
@@ -141,12 +148,13 @@ export function GhostTextarea({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
+        onScroll={handleScroll}
         placeholder={placeholder}
         rows={rows}
         disabled={disabled}
         className={cn(
           "relative z-10 flex min-h-[60px] w-full rounded-md border border-input bg-transparent",
-          "px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground",
+          "px-3 py-2 text-sm leading-5 shadow-sm placeholder:text-muted-foreground",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           "disabled:cursor-not-allowed disabled:opacity-50 resize-y",
           className,

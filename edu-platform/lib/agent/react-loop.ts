@@ -9,6 +9,7 @@ import { getRedis } from "@/lib/redis";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ component: "react-loop" });
+const CONTEXT_DIFF_DEBUG = process.env.AGENT_CONTEXT_DIFF_DEBUG === "1";
 import type { Message, TurnContext, AgentConfig, ToolCitation } from "./types";
 import type { ToolRegistry } from "./tool-registry";
 import type { MemoryCoordinator } from "./memory/memory-coordinator";
@@ -35,13 +36,16 @@ type B3Event =
   | { type: "text"; content: string }
   | ({ type: "citation" } & ToolCitation)
   | { type: "tool_call"; name: string; tool_call_id?: string; input?: Record<string, unknown> }
+  | { type: "tool_progress"; tool_call_id: string; label: string }
   | {
       type: "tool_result";
       name: string;
+      tool_call_id?: string;
       success?: boolean;
       duration_ms?: number;
       output?: string;
       execution?: ExecutionPayload;
+      meta?: Record<string, unknown>;
     }
   | { type: "done"; tokens?: number | null; exec_time_ms?: number | null; error?: string }
   | { type: "trace"; event: string; payload?: Record<string, unknown> }
@@ -82,6 +86,47 @@ export type ReactLoopOptions = {
 };
 
 type PendingToolCall = { id: string; name: string; args: string };
+
+function _looksLikeCodeTask(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    t.includes("```") ||
+    t.includes("def ") ||
+    t.includes("class ") ||
+    t.includes("function ") ||
+    t.includes("代码") ||
+    t.includes("报错") ||
+    t.includes("debug") ||
+    t.includes("运行")
+  );
+}
+
+function _isLikelyKnowledgeQuestion(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  const cnPattern = /为什么|原理|解释|定义|区别|联系|机制|流程|步骤|如何|怎么|是什么|哪些问题|作用/;
+  const enPattern = /\b(why|what is|define|explain|principle|mechanism|difference|compare|how does|how to)\b/;
+  return cnPattern.test(t) || enPattern.test(t) || t.endsWith("?") || t.endsWith("？");
+}
+
+function _hasAnyKbAvailable(ctx: TurnContext): boolean {
+  if (ctx.courseId) return true;
+  if (Array.isArray(ctx.accessibleCourseIds) && ctx.accessibleCourseIds.length > 0) return true;
+  // QA Center also supports personal KB retrieval.
+  return true;
+}
+
+function _shouldForceFirstKnowledgeQuery(opts: ReactLoopOptions, schemas: OpenAI.Chat.ChatCompletionTool[]): boolean {
+  if (opts.evalMode) return false;
+  const hasKnowledgeTool = schemas.some((s) => {
+    const fn = (s as { function?: { name?: string } }).function;
+    return typeof fn?.name === "string" && fn.name === "knowledge_query";
+  });
+  if (!hasKnowledgeTool) return false;
+  if (!_hasAnyKbAvailable(opts.ctx)) return false;
+  if (_looksLikeCodeTask(opts.userMessage)) return false;
+  return _isLikelyKnowledgeQuestion(opts.userMessage);
+}
 
 // ---- Approval gate helpers -------------------------------------------------
 
@@ -139,58 +184,6 @@ function sanitiseArgsPreview(args: Record<string, unknown>): Record<string, unkn
   return out;
 }
 
-// ---- Reflection helper ------------------------------------------------------
-
-type ReflectionResult = { sufficient: boolean; reasoning: string; missing?: string };
-
-/**
- * Calls the LLM (non-streaming, temperature=0) to decide whether the
- * accumulated tool results are sufficient to logically derive an answer to
- * the original question.  Fails open — any exception returns sufficient:true
- * so a single bad reflection call never blocks the agent.
- */
-async function _reflectOnToolResults(
-  question: string,
-  toolResults: string[],
-  client: OpenAI,
-  model: string,
-  extraBody: Record<string, unknown>,
-): Promise<ReflectionResult> {
-  const combined = toolResults.join("\n\n---\n\n").slice(0, 6000);
-  const prompt = [
-    "【原始问题】",
-    question,
-    "",
-    "【已检索到的信息】",
-    combined,
-    "",
-    "请判断：",
-    "1. 上述信息是否与原始问题直接相关？",
-    "2. 基于上述信息，能否进行逻辑推理并得出对原始问题的合理、完整回答？",
-    "",
-    "以 JSON 格式回复（只输出 JSON，无其他文字）：",
-    `{"sufficient": true, "reasoning": "简短说明", "missing": "若不充分则描述缺失信息，否则留空"}`,
-  ].join("\n");
-  try {
-    const resp = (await client.chat.completions.create({
-      model,
-      messages: [
-        { role: "system", content: "你是信息充分性评估助手，只输出 JSON，不输出任何其他内容。" },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0,
-      max_tokens: 256,
-      ...extraBody,
-    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming)) as OpenAI.Chat.ChatCompletion;
-    const text = resp.choices[0]?.message?.content ?? "";
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return { sufficient: true, reasoning: "parse_error" };
-    return JSON.parse(match[0]) as ReflectionResult;
-  } catch {
-    return { sufficient: true, reasoning: "reflection_error" };
-  }
-}
-
 // ---- Main entry -------------------------------------------------------------
 
 /**
@@ -229,6 +222,22 @@ async function _runLoop(
   const client = getLLMClient("chat");
   const chatExtraBody = getRoleExtraBody("chat");
 
+  // Build system prompt
+  const systemPrompt = promptBuilder.buildSystemPrompt(
+    config.systemPrompt,
+    skills,
+    memoryBlock,
+    profile,
+    ctx,
+    opts.evalMode,
+  );
+
+  // Compress history to fit within the configured context window before building messages.
+  const ctxMgr = new ContextManager(config.maxContextTokens);
+  const historyTokensBefore = ctxMgr.estimateTokens(opts.history);
+  const compressedHistory = ctxMgr.compress(opts.history);
+  const historyTokensAfter = ctxMgr.estimateTokens(compressedHistory);
+
   // ── Langfuse trace ────────────────────────────────────────────────────────
   let trace: LangfuseTraceClient | null = null;
   let loopSpan: LangfuseSpanClient | null = null;
@@ -244,27 +253,36 @@ async function _runLoop(
         ...(ctx.lessonId ? { lessonId: ctx.lessonId } : {}),
         model: config.model,
         maxIterations: config.maxIterations,
+        contextCompression: {
+          beforeMessages: opts.history.length,
+          afterMessages: compressedHistory.length,
+          droppedMessages: Math.max(0, opts.history.length - compressedHistory.length),
+          beforeTokens: historyTokensBefore,
+          afterTokens: historyTokensAfter,
+          limit: config.maxContextTokens,
+          ...(CONTEXT_DIFF_DEBUG
+            ? {
+                beforeDetail: _snapshotMsgsForContextDiff(opts.history),
+                afterDetail: _snapshotMsgsForContextDiff(compressedHistory),
+              }
+            : {}),
+        },
       },
     });
     try {
-      loopSpan = trace?.span({ name: "react_loop", input: { historyMessages: opts.history.length } }) ?? null;
+      loopSpan =
+        trace?.span({
+          name: "react_loop",
+          input: {
+            historyMessages: opts.history.length,
+            compressedHistoryMessages: compressedHistory.length,
+            historyTokensBefore,
+            historyTokensAfter,
+          },
+        }) ?? null;
     } catch { /* noop */ }
   }
   // ─────────────────────────────────────────────────────────────────────────
-
-  // Build system prompt
-  const systemPrompt = promptBuilder.buildSystemPrompt(
-    config.systemPrompt,
-    skills,
-    memoryBlock,
-    profile,
-    ctx,
-    opts.evalMode,
-  );
-
-  // Compress history to fit within the configured context window before building messages.
-  const ctxMgr = new ContextManager(config.maxContextTokens);
-  const compressedHistory = ctxMgr.compress(opts.history);
 
   // Prepare messages: system + (compressed) history + new user message
   const loopMsgs: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -304,11 +322,7 @@ async function _runLoop(
     : rawSchemas;
   let totalTokens: number | null = null;
   let streamError: string | undefined;
-
-  // Reflection-retry state
-  const MAX_REFLECTION_RETRIES = 2;
-  const initialLoopMsgs: OpenAI.Chat.ChatCompletionMessageParam[] = [...loopMsgs];
-  let reflectionRetry = 0;
+  const forceFirstKnowledgeQuery = _shouldForceFirstKnowledgeQuery(opts, schemas);
 
   // Emit trace start
   if (ctx.debugTrace) {
@@ -319,21 +333,13 @@ async function _runLoop(
 
   try {
     let gotFinalAnswer = false;
-    let allCollectedToolResults: string[] = [];
+    // Tracks how many citations have been emitted so far in this run so that
+    // each successive knowledge_query call's hits are numbered globally rather
+    // than restarting from [1].  This keeps #cite-N in LLM output aligned with
+    // the collectedCitations[] array the frontend builds from SSE events.
+    let citationIndexOffset = 0;
 
-    retryLoop: for (; reflectionRetry <= MAX_REFLECTION_RETRIES; reflectionRetry++) {
-      if (reflectionRetry > 0) {
-        loopMsgs.length = 0;
-        loopMsgs.push(...initialLoopMsgs);
-        allCollectedToolResults = [];
-        if (ctx.debugTrace) {
-          await writer.write(
-            sseData({ type: "trace", event: "reflection_retry", payload: { retry: reflectionRetry } }),
-          );
-        }
-      }
-
-      for (let iter = 0; iter < config.maxIterations; iter++) {
+    for (let iter = 0; iter < config.maxIterations; iter++) {
       const pendingTcs = new Map<number, PendingToolCall>();
       let assistantText = "";
       let iterUsage: { input?: number; output?: number; total?: number } | undefined;
@@ -349,13 +355,20 @@ async function _runLoop(
       } catch { /* noop */ }
 
       // Stream LLM response
-      log.debug({ iter, model: config.model, reflectionRetry }, "llm call");
+      log.debug({ iter, model: config.model }, "llm call");
       const llmCallStart = Date.now();
       const stream = await client.chat.completions.create({
         model: config.model,
         messages: loopMsgs,
         tools: schemas.length > 0 ? schemas : undefined,
-        tool_choice: schemas.length > 0 ? "auto" : undefined,
+        tool_choice:
+          schemas.length > 0
+            ? (
+                iter === 0 && forceFirstKnowledgeQuery
+                  ? { type: "function", function: { name: "knowledge_query" } }
+                  : "auto"
+              )
+            : undefined,
         stream: true,
         stream_options: { include_usage: true },
         // In eval mode use temperature=0 for deterministic, reproducible answers
@@ -413,7 +426,7 @@ async function _runLoop(
         // Final answer — exit loop
         finalAssistantText = assistantText;
         gotFinalAnswer = true;
-        break retryLoop;
+        break;
       }
 
       // Push assistant message with tool calls
@@ -450,6 +463,7 @@ async function _runLoop(
         let toolContent = "";
         let citations: ToolCitation[] = [];
         let success = true;
+        let toolMeta: Record<string, unknown> | undefined;
 
         // Langfuse tool span
         let toolSpan: LangfuseSpanClient | null = null;
@@ -494,12 +508,19 @@ async function _runLoop(
 
           if (success) {
             try {
-              const raw = await tool.execute(args, ctx);
+              const toolCtx = {
+                ...ctx,
+                onProgress: async (label: string) => {
+                  await writer.write(sseData({ type: "tool_progress", tool_call_id: tc.id, label }));
+                },
+              };
+              const raw = await tool.execute(args, toolCtx);
               if (typeof raw === "string") {
                 toolContent = raw;
               } else {
                 toolContent = raw.content;
                 citations = raw.citations ?? [];
+                toolMeta = raw.meta;
               }
             } catch (err) {
               toolContent = JSON.stringify({
@@ -554,23 +575,31 @@ async function _runLoop(
           sseData({
             type: "tool_result",
             name: tc.name,
+            tool_call_id: tc.id,
             success,
             duration_ms: durationMs,
             output: tc.name === "run_script"
               ? toolContent  // no truncation for run_script
               : toolContent.length > 500 ? `${toolContent.slice(0, 500)}...` : toolContent,
             ...(executionPayload ? { execution: executionPayload } : {}),
+            ...(toolMeta ? { meta: toolMeta } : {}),
           }),
         );
+
+        // Re-number hits in toolContent so that citation indices are globally
+        // monotonic across multiple knowledge_query calls within one agent run.
+        // E.g. second call's [1],[2],[3] becomes [6],[7],[8] if 5 were already
+        // emitted, matching the position in collectedCitations[] on the frontend.
+        if (citations.length > 0 && citationIndexOffset > 0) {
+          toolContent = toolContent.replace(/\[(\d+)\] 来源：/g, (_, n) => {
+            return `[${parseInt(n, 10) + citationIndexOffset}] 来源：`;
+          });
+        }
+        citationIndexOffset += citations.length;
 
         // Emit citations
         for (const c of citations) {
           await writer.write(sseData({ type: "citation", ...c }));
-        }
-
-        // Collect successful tool results for reflection
-        if (success && toolContent) {
-          allCollectedToolResults.push(`[${tc.name}]\n${toolContent.slice(0, 2000)}`);
         }
 
         // Add tool result to loop messages
@@ -587,37 +616,7 @@ async function _runLoop(
         );
       }
 
-      // ── Reflection: verify collected info can support an answer ─────────────────
-      if (allCollectedToolResults.length > 0) {
-        const reflection = await _reflectOnToolResults(
-          opts.userMessage,
-          allCollectedToolResults,
-          client,
-          config.model,
-          chatExtraBody as Record<string, unknown>,
-        );
-        if (ctx.debugTrace) {
-          await writer.write(
-            sseData({
-              type: "trace",
-              event: "reflection_result",
-              payload: {
-                sufficient: reflection.sufficient,
-                reasoning: reflection.reasoning,
-                missing: reflection.missing,
-                retry: reflectionRetry,
-              },
-            }),
-          );
-        }
-        if (!reflection.sufficient && reflectionRetry < MAX_REFLECTION_RETRIES) {
-          // Collected info cannot support an answer — reset and retry from scratch
-          continue retryLoop;
-        }
-      }
-    } // end inner for (iter)
-    break retryLoop; // maxIterations exhausted without reflection-triggered retry
-    } // end retryLoop
+    } // end for (iter)
 
     if (!gotFinalAnswer && !streamError) {
       streamError = "MAX_ITERATIONS_REACHED_NO_FINAL_ANSWER";
@@ -723,4 +722,16 @@ function _buildUserContent(opts: ReactLoopOptions): string {
   }
 
   return content;
+}
+
+function _snapshotMsgsForContextDiff(msgs: Message[]): Array<Record<string, unknown>> {
+  return msgs.map((m) => {
+    const item: Record<string, unknown> = {
+      role: m.role,
+      content: m.content,
+    };
+    if (m.tool_call_id) item.tool_call_id = m.tool_call_id;
+    if (m.tool_calls) item.tool_calls = m.tool_calls;
+    return item;
+  });
 }

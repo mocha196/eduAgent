@@ -417,7 +417,7 @@ _REVIEWER_SYSTEM = """\
 
 规则：
 1. 严格按 JSON 格式输出，不含其他文字或 markdown 代码块
-2. overall_score 为 0-1 浮点数，0.7 及以上视为通过
+2. overall_score 为 0-1 浮点数，0.85 及以上视为通过
 3. 每道题的 clarity、difficulty_match 也是 0-1 浮点数
 4. issues 为发现的具体问题列表（字符串数组），无问题时为空数组 []
 5. suggestion 为改进建议字符串，无建议时为 null
@@ -987,6 +987,21 @@ def generate_assignment(
                     topic_parts = (nlp["lessonNames"] or []) + (nlp["knowledgePoints"] or [])
                     topic_hint = "、".join(topic_parts[:4]) if topic_parts else ""
 
+                    # Persist extracted params so frontend can display them
+                    _db_update(
+                        pipe_conn,
+                        assignment_id,
+                        structured_params={
+                            "count": count,
+                            "lessonIds": [],
+                            "lessonNames": nlp["lessonNames"] or [],
+                            "knowledgePoints": nlp["knowledgePoints"] or [],
+                            "difficultyWeights": dw,
+                            "typeWeights": tw,
+                            "objectiveWeights": ow,
+                        },
+                    )
+
                 # ── Step 2: Retrieve entity candidates from course RAG ─────────
                 _db_update(pipe_conn, assignment_id, generation_phase="entity_retrieval")
                 candidates = await _retrieve_candidates(course_id, topic_hint, count)
@@ -1116,7 +1131,7 @@ def generate_assignment(
                     _db_update(pipe_conn, assignment_id, generation_phase="reviewing")
                     quality_report = await _run_reviewer(questions, blueprint)
                     score = float(quality_report.get("overall_score", 0))
-                    passed = quality_report.get("passed", False) or score >= PASS_SCORE
+                    passed = score >= PASS_SCORE
                     logger.info(
                         "Review round {}/{} — assignment={} score={:.3f} passed={}",
                         _round, MAX_ROUNDS, assignment_id, score, passed,

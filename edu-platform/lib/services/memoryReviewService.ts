@@ -57,6 +57,8 @@ export interface AnswerResult {
   isCorrect: boolean;
   correctAnswer: string;
   explanation: string;
+  /** The raw answer the user submitted (stored in DB). */
+  userAnswer: string;
 }
 
 export interface PendingSessionDto {
@@ -495,10 +497,29 @@ export async function answerQuestion(
     throw Object.assign(new Error("Session is closed"), { statusCode: 409 });
   }
 
-  // Grade
-  const { isCorrect, correctAnswer, feedback } = gradeObjectiveAnswer(question.answer, userAnswer);
+  // Grade — for SINGLE_CHOICE the stored answer may be a letter ("C") while the user
+  // submits the full option text ("C. 网络层"). Normalise before comparing and resolve
+  // the full option text for the response so the UI can highlight correctly.
+  let gradeUserAnswer = userAnswer;
+  let resolvedCorrectAnswer = question.answer;
 
-  // Update question record
+  if (question.type === MemoryReviewQuestionType.SINGLE_CHOICE) {
+    const opts = Array.isArray(question.optionsJson) ? (question.optionsJson as string[]) : [];
+    if (/^[A-Da-d]$/i.test(question.answer.trim()) && opts.length > 0) {
+      // Extract letter prefix from "X. Full text" submission
+      const m = gradeUserAnswer.trim().match(/^([A-Da-d])[.\s]/i);
+      if (m) gradeUserAnswer = m[1].toUpperCase();
+      // Resolve full option text for correct answer display
+      const fullOpt = opts.find((o) =>
+        o.trim().toUpperCase().startsWith(question.answer.trim().toUpperCase() + ".")
+      );
+      if (fullOpt) resolvedCorrectAnswer = fullOpt;
+    }
+  }
+
+  const { isCorrect } = gradeObjectiveAnswer(question.answer, gradeUserAnswer);
+
+  // Update question record (store original userAnswer, not the normalised one)
   await prisma.memoryReviewQuestion.update({
     where: { id: questionId },
     data: { userAnswer, isCorrect, answeredAt: new Date() },
@@ -532,7 +553,7 @@ export async function answerQuestion(
   // Update mastery (immediate, non-blocking)
   await updateMastery(userId, question.conceptId, question.conceptName, isCorrect);
 
-  return { isCorrect, correctAnswer, explanation: question.explanation };
+  return { isCorrect, correctAnswer: resolvedCorrectAnswer, explanation: question.explanation, userAnswer };
 }
 
 /** Increment or decrement mastery for the tested concept. */
@@ -597,4 +618,71 @@ export async function dismissSession(sessionId: string, userId: string): Promise
     data: { status: MemoryReviewSessionStatus.DISMISSED },
   });
   // Unanswered questions: mastery NOT updated (by design — only answeredAt triggers mastery write)
+}
+
+// ---------------------------------------------------------------------------
+// 8. Start or resume a session on-demand (triggered by user manually)
+// ---------------------------------------------------------------------------
+
+export type StartSessionResult =
+  | { status: "active"; session: PendingSessionDto }
+  | { status: "completed" }
+  | { status: "no_concepts" };
+
+/**
+ * Called when the user manually triggers a review from the UI.
+ * Priority:
+ *   1. Return any active (PENDING / IN_PROGRESS) session.
+ *   2. Re-activate today's DISMISSED session if still within TTL.
+ *   3. Create a brand-new session (clearing any stale dismissed/expired slot first).
+ *   4. Return "completed" if today's session is already done.
+ */
+export async function startSessionOnDemand(userId: string): Promise<StartSessionResult> {
+  // 1. Active session?
+  const active = await getPendingSession(userId);
+  if (active) return { status: "active", session: active };
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const todaySession = await prisma.memoryReviewSession.findUnique({
+    where: { userId_scheduledDate: { userId, scheduledDate: today } },
+    select: { id: true, status: true, expiresAt: true },
+  });
+
+  // 2. Today's session was completed
+  if (todaySession?.status === MemoryReviewSessionStatus.COMPLETED) {
+    return { status: "completed" };
+  }
+
+  // 3. Re-activate dismissed session (still within TTL)
+  if (
+    todaySession?.status === MemoryReviewSessionStatus.DISMISSED &&
+    todaySession.expiresAt > new Date()
+  ) {
+    // Determine IN_PROGRESS vs PENDING based on whether any question was answered
+    const answeredCount = await prisma.memoryReviewQuestion.count({
+      where: { sessionId: todaySession.id, answeredAt: { not: null } },
+    });
+    await prisma.memoryReviewSession.update({
+      where: { id: todaySession.id },
+      data: {
+        status:
+          answeredCount > 0
+            ? MemoryReviewSessionStatus.IN_PROGRESS
+            : MemoryReviewSessionStatus.PENDING,
+      },
+    });
+    const resumed = await getPendingSession(userId);
+    if (resumed) return { status: "active", session: resumed };
+  }
+
+  // 4. No valid session — delete stale slot if any, then generate fresh
+  if (todaySession) {
+    await prisma.memoryReviewSession.delete({ where: { id: todaySession.id } });
+  }
+  const result = await createDailySession(userId, today);
+  if (!result.sessionId) return { status: "no_concepts" };
+
+  const fresh = await getPendingSession(userId);
+  if (!fresh) return { status: "no_concepts" };
+  return { status: "active", session: fresh };
 }

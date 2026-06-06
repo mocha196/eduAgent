@@ -134,9 +134,9 @@ export async function DELETE(
 
       // Remove chat/QA session data
       await tx.qaLog.deleteMany({ where: { studentId: userId } });
-      await tx.courseChatSession.deleteMany({ where: { userId } });
-      await tx.qaCenterSession.deleteMany({ where: { userId } });
-      await tx.chatThreadTitleOverride.deleteMany({ where: { userId } });
+      await tx.courseChatSession.deleteMany({ where: { studentId: userId } });
+      await tx.qaCenterSession.deleteMany({ where: { studentId: userId } });
+      await tx.chatThreadTitleOverride.deleteMany({ where: { studentId: userId } });
 
       // Remove memory & profile data
       await tx.userMemoryFact.deleteMany({ where: { userId } });

@@ -1652,10 +1652,12 @@ def process_transcribe_and_index(
         ts_lines = parse_timestamped_transcript(transcript_text)
         if ts_lines:
             try:
+                _orig_stem = Path(original_filename).stem if original_filename else txt_path.stem
                 _, _json_path, summary_md_path = build_structured_summary_from_transcript_text(
                     transcript_text,
                     txt_path.stem,
                     work_parent,
+                    md_title=f"视频结构化摘要 · {_orig_stem}",
                 )
                 ingest_text = summary_md_path.read_text(encoding="utf-8")
                 logger.info(
@@ -2099,10 +2101,12 @@ def process_personal_transcribe_and_index(
         segments = parse_timestamped_transcript(raw_transcript)
         if segments:
             try:
+                _orig_stem = Path(original_filename).stem if original_filename else txt_path.stem
                 _, _json_path, summary_md_path = build_structured_summary_from_transcript_text(
                     raw_transcript,
                     txt_path.stem,
                     work_parent,
+                    md_title=f"视频结构化摘要 · {_orig_stem}",
                 )
                 ingest_text = summary_md_path.read_text(encoding="utf-8")
             except Exception as summ_exc:

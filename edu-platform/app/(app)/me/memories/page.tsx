@@ -1,12 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Brain, Trash2, AlertCircle, CheckCircle2, BookMarked, Lightbulb, RefreshCw, Bell } from "lucide-react";
+import { Brain, Trash2, AlertCircle, CheckCircle2, BookMarked, Lightbulb, RefreshCw, Bell, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import {
+  MemoryReviewCardModal,
+  type MemoryReviewSession,
+} from "@/components/MemoryReviewCardModal";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,11 +77,38 @@ export default function MemoriesPage() {
   const [busy, setBusy] = useState(false);
   const { notification, notify } = useNotify();
 
+  // ── On-demand review modal ────────────────────────────────────────────────
+  const [reviewSession, setReviewSession] = useState<MemoryReviewSession | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewStarting, setReviewStarting] = useState(false);
+
+  async function startReview() {
+    setReviewStarting(true);
+    try {
+      const res = await fetch("/api/v1/me/memory-reviews/start", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) { notify("error", "启动复习失败"); return; }
+      const data = (await res.json()) as
+        | { status: "active"; session: MemoryReviewSession }
+        | { status: "completed" }
+        | { status: "no_concepts" };
+      if (data.status === "completed") { notify("success", "今日复习已完成，明天再来！"); return; }
+      if (data.status === "no_concepts") { notify("error", "暂无可复习的知识点，先多和 AI 聊聊吧"); return; }
+      setReviewSession(data.session);
+      setReviewOpen(true);
+    } catch {
+      notify("error", "启动复习失败");
+    } finally {
+      setReviewStarting(false);
+    }
+  }
+
   // ── Review preference ─────────────────────────────────────────────────────
   const [pref, setPref] = useState<ReviewPreference | null>(null);
   const [prefBusy, setPrefBusy] = useState(false);
-  const [editLocalTime, setEditLocalTime] = useState("");
-  const [editTimezone, setEditTimezone] = useState("");
+  const [editLocalTime, setEditLocalTime] = useState("09:00");
 
   useEffect(() => {
     void (async () => {
@@ -89,7 +120,6 @@ export default function MemoriesPage() {
           const data = (await res.json()) as ReviewPreference;
           setPref(data);
           setEditLocalTime(data.localTime);
-          setEditTimezone(data.timezone);
         }
       } catch {
         // non-critical
@@ -112,7 +142,6 @@ export default function MemoriesPage() {
         const data = (await res.json()) as ReviewPreference;
         setPref(data);
         setEditLocalTime(data.localTime);
-        setEditTimezone(data.timezone);
         notify("success", "复习偏好已保存");
       } else {
         notify("error", "保存失败，请检查格式");
@@ -241,59 +270,29 @@ export default function MemoriesPage() {
             <Skeleton className="h-20 w-full rounded-lg" />
           ) : (
             <div className="space-y-4">
-              {/* Time + Timezone — always visible so users can configure before enabling */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Local time */}
-                <div className="space-y-1.5">
-                  <Label htmlFor="review-time" className="text-xs text-muted-foreground">
-                    希望收到通知的时间（HH:MM）
-                  </Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="review-time"
-                      placeholder="09:00"
-                      value={editLocalTime}
-                      onChange={(e) => setEditLocalTime(e.target.value)}
-                      className="h-8 text-sm"
-                      disabled={prefBusy}
-                      pattern="^\d{2}:\d{2}$"
-                    />
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-8 px-3 shrink-0"
-                      disabled={prefBusy || editLocalTime === pref.localTime}
-                      onClick={() => void savePref({ localTime: editLocalTime })}
-                    >
-                      保存
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Timezone */}
-                <div className="space-y-1.5">
-                  <Label htmlFor="review-tz" className="text-xs text-muted-foreground">
-                    时区（IANA 格式）
-                  </Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="review-tz"
-                      placeholder="Asia/Shanghai"
-                      value={editTimezone}
-                      onChange={(e) => setEditTimezone(e.target.value)}
-                      className="h-8 text-sm"
-                      disabled={prefBusy}
-                    />
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-8 px-3 shrink-0"
-                      disabled={prefBusy || editTimezone === pref.timezone}
-                      onClick={() => void savePref({ timezone: editTimezone })}
-                    >
-                      保存
-                    </Button>
-                  </div>
+              {/* Local time */}
+              <div className="space-y-1.5">
+                <Label htmlFor="review-time" className="text-xs text-muted-foreground">
+                  希望收到通知的时间
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="review-time"
+                    type="time"
+                    value={editLocalTime}
+                    onChange={(e) => setEditLocalTime(e.target.value)}
+                    className="h-8 text-sm w-32"
+                    disabled={prefBusy}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-3 shrink-0"
+                    disabled={prefBusy || editLocalTime === pref.localTime}
+                    onClick={() => void savePref({ localTime: editLocalTime })}
+                  >
+                    保存
+                  </Button>
                 </div>
               </div>
 
@@ -314,14 +313,25 @@ export default function MemoriesPage() {
                 </div>
                 {pref.enabled && (
                   <span className="text-xs text-muted-foreground">
-                    题目将于 {editLocalTime} 前约 15 分钟生成
+                    将于 {editLocalTime} 生成今日题目
                   </span>
                 )}
               </div>
 
               <p className="text-xs text-muted-foreground">
-                系统将在指定时间前约 15 分钟开始为你生成复习题，确保准时收到通知。每日生成 5 道题，巩固薄弱知识点。
+                系统将在指定时间为你生成复习题，每日 5 道题巩固薄弱知识点。
               </p>
+
+              {/* Manual start */}
+              <Button
+                size="sm"
+                className="w-full"
+                onClick={() => void startReview()}
+                disabled={reviewStarting}
+              >
+                <Play size={13} className="mr-1.5" />
+                {reviewStarting ? "生成中…" : "立即开始复习"}
+              </Button>
             </div>
           )}
         </section>
@@ -465,6 +475,18 @@ export default function MemoriesPage() {
           </>
         )}
       </div>
+
+      {/* On-demand review modal */}
+      {reviewSession && (
+        <MemoryReviewCardModal
+          session={reviewSession}
+          open={reviewOpen}
+          onClose={() => {
+            setReviewOpen(false);
+            setReviewSession(null);
+          }}
+        />
+      )}
     </div>
   );
 }

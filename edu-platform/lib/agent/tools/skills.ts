@@ -1,23 +1,36 @@
 /**
  * Skills tools: list_skills, view_skill
- * Reads from all configured skill sources via the SkillsLoader singleton.
+ * Reads from all configured skill sources via the SkillsLoader singleton,
+ * plus DB-managed AgentStyle records (enabled only).
  */
 
 import type { Tool } from "../types";
 import { getSkillsLoader } from "../skills-loader";
+import { prisma } from "@/lib/db";
 
 export const listSkillsTool: Tool = {
   name: "list_skills",
   description: "列出当前所有可用的教学技能（name + description 索引）。",
   parameters: { type: "object", properties: {}, required: [] },
   async execute(): Promise<string> {
-    const skills = getSkillsLoader().load();
-    if (skills.length === 0) return "（暂无已注册技能）";
-    const lines = skills.map((s) => {
+    const fileSkills = getSkillsLoader().load();
+    const dbStyles = await prisma.agentStyle.findMany({
+      where: { enabled: true },
+      orderBy: { createdAt: "asc" },
+      select: { name: true, description: true },
+    });
+    const dbNames = new Set(dbStyles.map((s) => s.name));
+    const lines: string[] = [];
+    for (const s of fileSkills) {
+      if (dbNames.has(s.name)) continue; // DB style overrides same-name file skill
       const subList = Object.keys(s.subFiles);
       const subNote = subList.length > 0 ? ` [sub-docs: ${subList.join(", ")}]` : "";
-      return `- **${s.name}** v${s.version} (${s.source}): ${s.description || "（无描述）"}${subNote}`;
-    });
+      lines.push(`- **${s.name}** v${s.version} (${s.source}): ${s.description || "（无描述）"}${subNote}`);
+    }
+    for (const s of dbStyles) {
+      lines.push(`- **${s.name}** v1.0.0 (db): ${s.description || "（无描述）"}`);
+    }
+    if (lines.length === 0) return "（暂无已注册技能）";
     return lines.join("\n");
   },
 };
@@ -53,7 +66,15 @@ export const viewSkillTool: Tool = {
     }
 
     const body = loader.getBody(name);
-    if (body === null) return JSON.stringify({ error: `技能 "${name}" 不存在` });
-    return body.slice(0, 8000);
+    if (body !== null) return body.slice(0, 8000);
+
+    // Fall back to DB-managed AgentStyle
+    const dbStyle = await prisma.agentStyle.findUnique({
+      where: { name },
+      select: { body: true, enabled: true },
+    });
+    if (!dbStyle || !dbStyle.enabled)
+      return JSON.stringify({ error: `技能 "${name}" 不存在` });
+    return dbStyle.body.slice(0, 8000);
   },
 };

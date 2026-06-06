@@ -33,7 +33,7 @@ function requireInternalKey(req: NextRequest): void {
  */
 
 /** Minutes before the user's preferred notification time to start generation. */
-const DISPATCH_LEAD_MIN = parseInt(process.env.MEMORY_REVIEW_LEAD_MINUTES ?? "15", 10);
+const DISPATCH_LEAD_MIN = parseInt(process.env.MEMORY_REVIEW_LEAD_MINUTES ?? "0", 10);
 
 export async function POST(req: NextRequest) {
   try {

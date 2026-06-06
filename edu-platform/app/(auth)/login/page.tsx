@@ -62,13 +62,13 @@ export default function LoginPage() {
       <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4">
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-foreground" htmlFor="username">
-            学号
+            学号/教职工号
           </label>
           <Input
             id="username"
             type="text"
             autoComplete="username"
-            placeholder="输入学号"
+            placeholder="输入学号/教职工号"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             disabled={loading}

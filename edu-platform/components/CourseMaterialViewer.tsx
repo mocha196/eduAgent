@@ -184,11 +184,14 @@ export default function CourseMaterialViewer({
     [],
   );
 
-  // Load PDF document when material is a native PDF and canvas is ready
+  // Load PDF document when material is a native PDF or an Office file with a ready preview
   useEffect(() => {
     if (!materialId || !material) return;
     const ft = material.file_type.toLowerCase();
-    if (ft !== "pdf") return;
+    const isOfficeReady =
+      isOfficeMaterialFileType(material.file_type) &&
+      material.preview_pdf_status === "READY";
+    if (ft !== "pdf" && !isOfficeReady) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -230,7 +233,7 @@ export default function CourseMaterialViewer({
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [materialId, material?.file_type, material?.id, renderPdfPage, apiBase]);
+  }, [materialId, material?.file_type, material?.preview_pdf_status, material?.id, renderPdfPage, apiBase]);
 
   // Re-render when page number changes
   useEffect(() => {
@@ -269,9 +272,8 @@ export default function CourseMaterialViewer({
   // always called unconditionally.  When `material` is null the early returns
   // below will fire first, so the default values here are never used in the JSX.
   const ft = material?.file_type.toLowerCase() ?? "";
-  const showPdfCanvas = ft === "pdf";
-  const showOfficePdfIframe =
-    !!office && material?.preview_pdf_status === "READY";
+  const showPdfCanvas =
+    ft === "pdf" || (!!office && material?.preview_pdf_status === "READY");
   const previewFailed =
     !!office && material?.preview_pdf_status === "FAILED";
   const previewPending =
@@ -292,6 +294,12 @@ export default function CourseMaterialViewer({
     material?.status === "READY" &&
     !!(material?.transcript || material?.video_summary);
 
+  // Safe base name for screenshot filenames (strip chars invalid in filenames)
+  const safeScreenshotBase = (material?.filename ?? "资料")
+    .replace(/\.[^/.]+$/, "")           // remove extension
+    .replace(/[\\/:*?"<>|]/g, "_")      // replace FS-unsafe chars
+    .slice(0, 60);                       // cap length
+
   // Screenshot availability per type
   const canScreenshot =
     !captureBusy &&
@@ -303,12 +311,7 @@ export default function CourseMaterialViewer({
       (isVideo && videoDataLoaded) ||
       previewFailed
     ) &&
-    !isAudio &&
-    !showOfficePdfIframe;
-
-  const safeScreenshotBase = (material?.filename ?? "")
-    .replace(/[/\\:*?"<>|]/g, "_")
-    .slice(0, 80);
+  !isAudio;
 
   /**
    * Capture the current page/frame as a File without side-effects.
@@ -476,9 +479,9 @@ export default function CourseMaterialViewer({
       </div>
 
       <div
-        ref={showPdfCanvas || showOfficePdfIframe || isVideo || isAudio ? undefined : textScrollRef}
+        ref={showPdfCanvas || isVideo || isAudio ? undefined : textScrollRef}
         className={
-          showPdfCanvas || showOfficePdfIframe || hasMediaContent
+          showPdfCanvas || hasMediaContent
             ? "flex-1 min-h-0 flex flex-col overflow-hidden"
             : "flex-1 min-h-0 overflow-auto"
         }
@@ -503,28 +506,7 @@ export default function CourseMaterialViewer({
           </div>
         )}
 
-        {/* Office → converted PDF iframe */}
-        {showOfficePdfIframe && (
-          <div className="flex-1 min-h-0 flex flex-col relative overflow-hidden">
-            {!pdfViewportReady && (
-              <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10 pointer-events-none">
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Loader2 size={14} className="animate-spin" />
-                  正在加载 PDF…
-                </div>
-              </div>
-            )}
-            <iframe
-              src={`${apiBase}/${materialId}/content`}
-              className="flex-1 w-full border-0"
-              style={{ minHeight: 0 }}
-              title={material.filename}
-              onLoad={() => setPdfViewportReady(true)}
-            />
-          </div>
-        )}
-
-        {/* Native PDF → pdfjs-dist canvas */}
+        {/* PDF (native or Office preview) → pdfjs-dist canvas */}
         {showPdfCanvas && (
           <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
             {pdfLoadError && (

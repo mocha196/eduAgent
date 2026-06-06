@@ -64,7 +64,7 @@ DEFAULT_OBJECTIVE_WEIGHTS: dict[str, float] = {
 # Zero values completely exclude that (objective, format) combination,
 # preventing nonsensical pairings regardless of user-supplied weights.
 OBJECTIVE_FORMAT_COMPATIBILITY: dict[str, dict[str, float]] = {
-    "knowledge":     {"single_choice": 0.5, "multi_choice": 0.1, "fill_blank": 0.4, "short_answer": 0.0},
+    "knowledge":     {"single_choice": 0.4, "multi_choice": 0.1, "fill_blank": 0.3, "short_answer": 0.2},
     "comprehension": {"single_choice": 0.3, "multi_choice": 0.0, "fill_blank": 0.2, "short_answer": 0.5},
     "application":   {"single_choice": 0.2, "multi_choice": 0.2, "fill_blank": 0.0, "short_answer": 0.6},
     "synthesis":     {"single_choice": 0.1, "multi_choice": 0.2, "fill_blank": 0.0, "short_answer": 0.7},

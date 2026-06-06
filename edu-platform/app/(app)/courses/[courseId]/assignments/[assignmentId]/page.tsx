@@ -15,6 +15,7 @@ import {
   FileQuestion,
   Plus,
   Users,
+  MessageSquare,
 } from "lucide-react";
 import {
   DndContext,
@@ -38,7 +39,7 @@ import { AddQuestionDialog } from "@/components/assignment/AddQuestionDialog";
 import { SubmissionForm } from "@/components/assignment/SubmissionForm";
 import { SubmissionResultView } from "@/components/assignment/SubmissionResultView";
 import { useNotify } from "@/hooks/useNotify";
-import type { AssignmentDetailDto, AssignmentStudentViewDto, QuestionItem, RegenerateQuestionBody } from "@/lib/dto/assignment.dto";
+import type { AssignmentDetailDto, AssignmentStudentViewDto, QuestionItem, RegenerateQuestionBody, StructuredGenerationParams } from "@/lib/dto/assignment.dto";
 import type { SubmissionDetailDto } from "@/lib/dto/submission.dto";
 import { AssignmentStatus } from "@prisma/client";
 
@@ -49,6 +50,104 @@ const STATUS_LABELS: Record<string, string> = {
   PUBLISHED: "已发布",
   ARCHIVED: "已归档",
 };
+
+const TYPE_LABELS: Record<string, string> = {
+  single_choice: "单选题",
+  multi_choice: "多选题",
+  fill_blank: "填空题",
+  short_answer: "简答题",
+};
+
+const OBJECTIVE_LABELS: Record<string, string> = {
+  knowledge: "记忆",
+  comprehension: "理解",
+  application: "应用",
+  synthesis: "综合",
+  innovation: "创新",
+};
+
+function GenerationParamsCard({ teacherRequest, structuredParams }: {
+  teacherRequest: string | null;
+  structuredParams: StructuredGenerationParams | null;
+}) {
+  if (!teacherRequest && !structuredParams) return null;
+  const sp = structuredParams;
+  const selectedTypes = sp ? Object.entries(sp.typeWeights).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a) : [];
+  const selectedObjs = sp ? Object.entries(sp.objectiveWeights).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a) : [];
+  return (
+    <div className="rounded-lg border bg-muted/30 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <MessageSquare size={14} className="text-blue-500" />
+        生成需求
+      </div>
+      {teacherRequest && (
+        <p className="text-xs text-muted-foreground border-l-2 border-primary/40 pl-3 italic">
+          {teacherRequest}
+        </p>
+      )}
+      {sp && (
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground">题目数量</span>
+            <span className="font-medium">{sp.count} 题</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-muted-foreground">难度</span>
+            <span className="font-medium">
+              简单 {Math.round((sp.difficultyWeights.easy ?? 0) * 100)}%
+              &nbsp;/&nbsp;中等 {Math.round((sp.difficultyWeights.medium ?? 0) * 100)}%
+              &nbsp;/&nbsp;困难 {Math.round((sp.difficultyWeights.hard ?? 0) * 100)}%
+            </span>
+          </div>
+          {selectedTypes.length > 0 && (
+            <div className="col-span-2 flex items-center gap-1.5">
+              <span className="text-muted-foreground shrink-0">题型</span>
+              <div className="flex flex-wrap gap-1">
+                {selectedTypes.map(([k]) => (
+                  <span key={k} className="rounded-full bg-primary/10 text-primary px-2 py-0.5 font-medium">
+                    {TYPE_LABELS[k] ?? k}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {selectedObjs.length > 0 && (
+            <div className="col-span-2 flex items-center gap-1.5">
+              <span className="text-muted-foreground shrink-0">认知目标</span>
+              <div className="flex flex-wrap gap-1">
+                {selectedObjs.map(([k]) => (
+                  <span key={k} className="rounded-full bg-secondary text-secondary-foreground px-2 py-0.5 font-medium">
+                    {OBJECTIVE_LABELS[k] ?? k}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {sp.lessonNames?.length > 0 && (
+            <div className="col-span-2 flex items-start gap-1.5">
+              <span className="text-muted-foreground shrink-0">课时范围</span>
+              <div className="flex flex-wrap gap-1">
+                {sp.lessonNames.map((name, i) => (
+                  <span key={i} className="rounded-full bg-muted text-muted-foreground px-2 py-0.5 font-medium">{name}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {sp.knowledgePoints?.length > 0 && (
+            <div className="col-span-2 flex items-start gap-1.5">
+              <span className="text-muted-foreground shrink-0">知识点</span>
+              <div className="flex flex-wrap gap-1">
+                {sp.knowledgePoints.map((kp, i) => (
+                  <span key={i} className="rounded-full bg-muted text-muted-foreground px-2 py-0.5 font-medium">{kp}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AssignmentDetailPage() {
   const { courseId, assignmentId } = useParams<{ courseId: string; assignmentId: string }>();
@@ -391,6 +490,12 @@ export default function AssignmentDetailPage() {
 
       {!loading && (assignment?.status === "DRAFT" || assignment?.status === "PUBLISHED") && (
         <>
+          {/* Teacher Request & Generation Params */}
+          <GenerationParamsCard
+            teacherRequest={assignment.teacherRequest}
+            structuredParams={assignment.structuredParams}
+          />
+
           {/* Quality Report */}
           {assignment.qualityReport && (
             <div className="rounded-lg border bg-muted/30 p-4 space-y-1">

@@ -43,6 +43,9 @@ export default function QaCenterPage() {
   const [threads, setThreads] = useState<ThreadRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<ThreadRow | null>(null);
+  // Keep-alive: threads that have been opened at least once stay mounted to avoid
+  // killing in-flight SSE streams when the user switches between conversation windows.
+  const [mountedThreads, setMountedThreads] = useState<ThreadRow[]>([]);
   const [listCollapsed, setListCollapsed] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -110,6 +113,9 @@ export default function QaCenterPage() {
     };
     setThreads((prev) => [row, ...prev.filter((t) => t.session_id !== row.session_id)]);
     setSelected(row);
+    setMountedThreads((prev) =>
+      prev.some((x) => x.session_id === row.session_id) ? prev : [...prev, row],
+    );
     setListCollapsed(false);
   };
 
@@ -124,6 +130,7 @@ export default function QaCenterPage() {
       alert("删除失败");
       return;
     }
+    setMountedThreads((prev) => prev.filter((x) => x.session_id !== selected.session_id));
     setSelected(null);
     void loadThreads();
   };
@@ -210,6 +217,11 @@ export default function QaCenterPage() {
                     onClick={() => {
                       setSelected(t);
                       setEditingTitle(false);
+                      setMountedThreads((prev) =>
+                        prev.some((x) => x.session_id === t.session_id)
+                          ? prev
+                          : [...prev, t],
+                      );
                     }}
                     className={cn(
                       "w-full text-left rounded-lg px-3 py-2.5 text-sm transition-colors",
@@ -291,7 +303,8 @@ export default function QaCenterPage() {
             </div>
           )}
 
-          <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 min-h-0 flex flex-col relative">
+            {/* Empty state — visible only when no thread is selected */}
             {!selected && (
               <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground text-sm px-6 text-center gap-3">
                 <MessageSquare className="h-12 w-12 opacity-30" />
@@ -301,21 +314,30 @@ export default function QaCenterPage() {
                 </Button>
               </div>
             )}
-            {selected?.kind === "global" && (
-              <ChatComponent
-                key={selected.session_id}
-                variant="qa_center"
-                sessionId={selected.session_id}
-                onSessionResolved={onSessionResolved}
-              />
-            )}
-            {selected?.kind === "course" && selected.course_id && (
-              <ChatComponent
-                key={selected.session_id}
-                courseId={selected.course_id}
-                hydrateSessionId={selected.session_id}
-              />
-            )}
+            {/* Keep-alive: render every mounted thread; hide non-active ones via CSS so
+                SSE streams are never interrupted by a tab switch. */}
+            {mountedThreads.map((thread) => (
+              <div
+                key={thread.session_id}
+                className={cn(
+                  "flex-1 min-h-0 flex flex-col",
+                  selected?.session_id !== thread.session_id && "hidden",
+                )}
+              >
+                {thread.kind === "global" ? (
+                  <ChatComponent
+                    variant="qa_center"
+                    sessionId={thread.session_id}
+                    onSessionResolved={onSessionResolved}
+                  />
+                ) : thread.course_id ? (
+                  <ChatComponent
+                    courseId={thread.course_id}
+                    hydrateSessionId={thread.session_id}
+                  />
+                ) : null}
+              </div>
+            ))}
           </div>
           </div>
 

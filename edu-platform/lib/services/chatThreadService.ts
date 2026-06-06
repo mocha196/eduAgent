@@ -155,6 +155,7 @@ export type ChatThreadMessage = {
   created_at: string;
   tool_calls: unknown[];
   citations: unknown[];
+  timeline_json?: unknown[];
 };
 
 export async function assertThreadAccess(
@@ -200,6 +201,7 @@ export async function getThreadMessages(
       createdAt: true,
       toolCalls: true,
       citations: true,
+      timelineJson: true,
     },
   });
   return rows.map((r) => ({
@@ -209,6 +211,9 @@ export async function getThreadMessages(
     created_at: r.createdAt.toISOString(),
     tool_calls: Array.isArray(r.toolCalls) ? r.toolCalls : [],
     citations: Array.isArray(r.citations) ? r.citations : [],
+    ...(Array.isArray(r.timelineJson) && r.timelineJson.length > 0
+      ? { timeline_json: r.timelineJson }
+      : {}),
   }));
 }
 

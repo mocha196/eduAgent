@@ -303,6 +303,7 @@ model QaLog {
   hitSources      String[]  @default([]) @map("hit_sources")
   toolCalls       Json?     @default("[]") @map("tool_calls")
   citations       Json?     @default("[]") @map("citations")
+  timelineJson    Json?     @map("timeline_json")
   metadata        Json?     @map("metadata")
   createdAt       DateTime  @default(now()) @map("created_at")
   deletedAt       DateTime? @map("deleted_at")

@@ -5,6 +5,12 @@ import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 import {
   Send,
@@ -118,6 +124,93 @@ function useCopyFeedback() {
 
 const CITATION_INLINE_MAX = 3;
 
+/**
+ * Pre-process markdown text before rendering:
+ * convert bare [N] citation markers (LLM academic style) into markdown links
+ * so they get picked up by the `a` component override and rendered as inline dashed citations.
+ * Regex skips [N](...) that are already markdown links.
+ */
+function preprocessCitationMarkers(text: string): string {
+  return text.replace(/\[(\d{1,3})\](?!\()/g, (_, n) => `[${n}](#cite-${n})`);
+}
+
+/** Inline cited-text span: dashed underline + hover tooltip + click-to-sidebar.
+ *  Bare numeric children (from [N]) are normalized to bracketed text like [N]
+ *  and rendered with the same dashed style as phrase citations. */
+function CitationLink({
+  n,
+  children,
+  citations,
+  onCitationClick,
+}: {
+  n: number;
+  children: React.ReactNode;
+  citations: Citation[];
+  onCitationClick: (c: Citation, idx: number) => void;
+}) {
+  const citation = citations[n - 1];
+  if (!citation) return <>{children}</>;
+
+  // Detect numeric citation markers and normalize them to bracketed text.
+  const childStr = typeof children === "string"
+    ? children
+    : Array.isArray(children)
+      ? (children as React.ReactNode[]).map((c) => (typeof c === "string" ? c : "")).join("")
+      : "";
+  const isBadge = /^\d+$/.test(childStr.trim());
+  const displayChildren = isBadge ? `[${n}]` : children;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className="border-b border-dashed border-primary/50 cursor-pointer hover:border-primary hover:text-primary transition-colors"
+          onClick={() => onCitationClick(citation, n - 1)}
+        >
+          {displayChildren}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent
+        side="top"
+        sideOffset={6}
+        className="max-w-[260px] p-3 space-y-1.5 bg-popover text-popover-foreground border border-border shadow-md rounded-lg z-50"
+      >
+        <p className="text-xs font-semibold leading-tight">{citation.source_label ?? `引用 ${n}`}</p>
+        {citation.chunk_text && (
+          <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-3">
+            {citation.chunk_text.slice(0, 120)}
+          </p>
+        )}
+        <p className="text-[10px] text-muted-foreground/60">点击查看详情</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Returns markdown components with an `a` override that renders `[text](#cite-N)` links
+ *  as inline citation spans (dashed underline + tooltip) instead of real anchors. */
+function makeCitationComponents(
+  citations: Citation[],
+  onCitationClick: (c: Citation, idx: number) => void,
+) {
+  return {
+    ...markdownComponents,
+    a({ href, children }: { href?: string; children?: React.ReactNode }) {
+      if (href?.startsWith("#cite-")) {
+        const n = parseInt(href.replace("#cite-", ""), 10);
+        if (!isNaN(n) && n > 0) {
+          return (
+            <CitationLink n={n} citations={citations} onCitationClick={onCitationClick}>
+              {children}
+            </CitationLink>
+          );
+        }
+      }
+      return <a href={href}>{children}</a>;
+    },
+  };
+}
+
 /** Horizontally-scrollable citation button bar with a pinned expand button. */
 function CitationScrollBar({
   citations,
@@ -212,12 +305,14 @@ export default function ChatComponent(props: ChatComponentProps) {
   const [imagePreview, setImagePreview] = useState<{ src: string; name: string } | null>(null);
   const { copiedId: copiedClientId, trigger: triggerCopyFeedback } = useCopyFeedback();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const {
     msgs,
     streaming,
     toolActivity,
     streamTimeline,
     busy,
+    isReflecting,
     citations,
     lastMeta,
     errorMsg,
@@ -234,6 +329,7 @@ export default function ChatComponent(props: ChatComponentProps) {
     respondToApproval,
   } = useChatStream(buildStreamConfig(props));
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isAtBottom = useRef(true);
   const emptyHint = props.emptyHint ?? defaultEmptyHint(props);
 
   const threadKey =
@@ -261,15 +357,29 @@ export default function ChatComponent(props: ChatComponentProps) {
   }, [addAttachment, props.variant]);
 
   useEffect(() => {
-    if (scrollRef.current) {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      isAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (isAtBottom.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [msgs, streaming, toolActivity, streamTimeline]);
 
   const handleSend = () => {
     if ((!input.trim() && pendingAttachments.length === 0) || busy) return;
+    isAtBottom.current = true;
     void sendMessage(input);
     setInput("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -351,7 +461,7 @@ export default function ChatComponent(props: ChatComponentProps) {
                   )}
 
                   {msg.role === "assistant" && (msg.toolActivity?.length ?? 0) > 0 && !msg.timeline?.length && (
-                    <ul className="m-0 mb-1.5 flex list-none flex-col gap-1.5 p-0 text-sm text-muted-foreground">
+                    <div className="mb-1.5 flex flex-col gap-1">
                       {msg.toolActivity!.map((row, ri) => {
                         if (row.execution) {
                           const fakeItem: Extract<MessageTimelineItem, { kind: "tool" }> & { execution: ExecutionPayload } = {
@@ -362,34 +472,30 @@ export default function ChatComponent(props: ChatComponentProps) {
                             success: row.success,
                             durationMs: row.durationMs,
                             execution: row.execution,
+                            input: row.input,
+                            output: row.output,
+                            meta: row.meta,
                           };
                           return <ExecutionTerminalBlock key={fakeItem.clientKey} item={fakeItem} />;
                         }
                         return (
-                        <li
+                        <ToolCallBlock
                           key={row.clientKey ?? `${msg.clientId}-tc-${ri}`}
-                          className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-1.5"
-                        >
-                          <span className="tabular-nums" aria-hidden>{toolEmoji(row.name)}</span>
-                          <span className="font-mono text-xs text-foreground/90">{row.name}</span>
-                          <span className="text-xs">
-                            <span className={
-                              row.success === false
-                                ? "text-destructive"
-                                : row.success === true
-                                  ? "text-emerald-600 dark:text-emerald-400"
-                                  : "text-muted-foreground"
-                            }>
-                              {row.success === false ? "✗" : row.success === true ? "✓" : "?"}
-                            </span>
-                            {typeof row.durationMs === "number" && (
-                              <span className="ml-1.5 opacity-80">{(row.durationMs / 1000).toFixed(1)}s</span>
-                            )}
-                          </span>
-                        </li>
+                          item={{
+                            kind: "tool",
+                            clientKey: row.clientKey ?? `${msg.clientId}-tc-${ri}`,
+                            name: row.name,
+                            status: row.status,
+                            success: row.success,
+                            durationMs: row.durationMs,
+                            input: row.input,
+                            output: row.output,
+                            meta: row.meta,
+                          }}
+                        />
                         );
                       })}
-                    </ul>
+                    </div>
                   )}
 
                   <div
@@ -437,15 +543,49 @@ export default function ChatComponent(props: ChatComponentProps) {
                         {msg.role === "user" ? (
                           <div className="whitespace-pre-wrap">{msg.text}</div>
                         ) : msg.timeline?.length ? (
-                          <AssistantTimeline items={msg.timeline} isLive={false} />
+                          <AssistantTimeline
+                            items={msg.timeline}
+                            isLive={false}
+                            citations={msg.citations ?? []}
+                            onCitationClick={(c, ci) => {
+                              window.dispatchEvent(
+                                new CustomEvent("edu:open-material-preview", {
+                                  detail: {
+                                    materialId: c.material_id,
+                                    chunkId: c.chunk_id,
+                                    sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                                    chunkText: c.chunk_text,
+                                    image_urls: c.image_urls,
+                                  },
+                                }),
+                              );
+                            }}
+                          />
                         ) : (
-                          <ReactMarkdown
-                            remarkPlugins={markdownRemarkPlugins}
-                            rehypePlugins={markdownRehypePlugins}
-                            components={markdownComponents}
-                          >
-                            {normalizeMathDelimiters(msg.text)}
-                          </ReactMarkdown>
+                          <TooltipProvider delayDuration={300}>
+                            <ReactMarkdown
+                              remarkPlugins={markdownRemarkPlugins}
+                              rehypePlugins={markdownRehypePlugins}
+                              components={makeCitationComponents(
+                                msg.citations ?? [],
+                                (c, ci) => {
+                                  window.dispatchEvent(
+                                    new CustomEvent("edu:open-material-preview", {
+                                      detail: {
+                                        materialId: c.material_id,
+                                        chunkId: c.chunk_id,
+                                        sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                                        chunkText: c.chunk_text,
+                                        image_urls: c.image_urls,
+                                      },
+                                    }),
+                                  );
+                                }
+                              )}
+                            >
+                              {normalizeMathDelimiters(preprocessCitationMarkers(msg.text))}
+                            </ReactMarkdown>
+                          </TooltipProvider>
                         )}
                       </div>
                     )}
@@ -579,7 +719,25 @@ export default function ChatComponent(props: ChatComponentProps) {
                 <div className="flex w-full justify-start">
                   <div className="flex min-w-0 w-full flex-col items-start">
                     <div className="rounded-none px-4 py-3 bg-transparent text-foreground prose prose-sm dark:prose-invert max-w-none [&_pre]:border-0 [&_.katex-display]:overflow-x-auto">
-                      <AssistantTimeline items={streamTimeline} isLive={true} />
+                      <AssistantTimeline
+                        items={streamTimeline}
+                        isLive={true}
+                        isReflecting={isReflecting}
+                        citations={citations}
+                        onCitationClick={(c, ci) => {
+                          window.dispatchEvent(
+                            new CustomEvent("edu:open-material-preview", {
+                              detail: {
+                                materialId: c.material_id,
+                                chunkId: c.chunk_id,
+                                sourceLabel: c.source_label ?? `引用 ${ci + 1}`,
+                                chunkText: c.chunk_text,
+                                image_urls: c.image_urls,
+                              },
+                            }),
+                          );
+                        }}
+                      />
                     </div>
                     {streaming.length > 0 && (
                       <div className="mt-1 flex opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
@@ -792,8 +950,14 @@ export default function ChatComponent(props: ChatComponentProps) {
               </Button>
             </div>
             <Textarea
+              ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                const el = e.target;
+                el.style.height = "auto";
+                el.style.height = `${el.scrollHeight}px`;
+              }}
               onKeyDown={handleKeyDown}
               placeholder="请输入..."
               className="min-h-[52px] max-h-48 resize-none border-0 shadow-none bg-transparent py-4 text-sm focus-visible:ring-0 flex-1"
@@ -862,12 +1026,193 @@ export default function ChatComponent(props: ChatComponentProps) {
  * Collapsible terminal output block shown after run_script executes.
  * Mirrors the "Executed" block style from Cursor/ChatGPT.
  */
-function ExecutionTerminalBlock({
+
+/** Friendly display labels for known tool names. */
+const TOOL_LABELS: Record<string, string> = {
+  knowledge_query: "知识库检索",
+  web_search: "网络搜索",
+  ollama_web_search: "网络搜索",
+  wikipedia_search: "维基百科搜索",
+  remember_fact: "记忆存储",
+  search_memory: "记忆检索",
+  get_course_info: "获取课程信息",
+  list_course_materials: "列出课程资料",
+  get_material_summary: "获取资料摘要",
+  delegate_task: "委派子任务",
+  read_attachment: "读取附件",
+  build_mindmap: "构建思维导图",
+  generate_quiz: "生成练习题",
+  parse_document: "解析文档",
+};
+
+/** Formats a single input value for display. */
+function formatInputValue(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return (v as unknown[]).join(", ");
+  return JSON.stringify(v);
+}
+
+/** Expandable tool call card for all non-script tools. */
+function ToolCallBlock({
   item,
+}: {
+  item: Extract<MessageTimelineItem, { kind: "tool" }>;
+}) {
+  const hasDetails =
+    (item.input !== undefined && Object.keys(item.input).length > 0) ||
+    (item.output !== undefined && item.output.trim().length > 0) ||
+    item.meta !== undefined;
+  const [open, setOpen] = useState(false);
+
+  const meta = item.meta;
+  const decomposed = meta?.decomposed === true;
+  const subQueries =
+    decomposed && Array.isArray(meta?.sub_queries) ? (meta.sub_queries as string[]) : [];
+  const rewritten = meta?.rewritten === true;
+  const rewrittenQuery =
+    typeof meta?.rewritten_query === "string" ? meta.rewritten_query : undefined;
+  const hitCount = typeof meta?.hit_count === "number" ? meta.hit_count : undefined;
+
+  const label = TOOL_LABELS[item.name] ?? item.name;
+
+  return (
+    <div className="my-1.5 rounded-md border border-border/60 bg-muted/40 overflow-hidden not-prose text-xs">
+      {/* Header row */}
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-2 px-2.5 py-1.5",
+          hasDetails && "cursor-pointer hover:bg-muted/60 transition-colors select-none",
+        )}
+        onClick={hasDetails ? () => setOpen((v) => !v) : undefined}
+        role={hasDetails ? "button" : undefined}
+        aria-expanded={hasDetails ? open : undefined}
+      >
+        <span className="tabular-nums" aria-hidden>
+          {toolEmoji(item.name)}
+        </span>
+        <span className="font-mono text-foreground/90">{label}</span>
+        {item.status === "running" ? (
+          <>
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" aria-label="执行中" />
+            {item.progressLabel && (
+              <span className="text-muted-foreground opacity-80 truncate max-w-[240px]">
+                {item.progressLabel}
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="flex items-center gap-1">
+            <span
+              className={
+                item.success === false
+                  ? "text-destructive"
+                  : item.success === true
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : "text-muted-foreground"
+              }
+            >
+              {item.success === false ? "✗" : item.success === true ? "✓" : "?"}
+            </span>
+            {typeof item.durationMs === "number" && (
+              <span className="ml-0.5 text-muted-foreground opacity-80">
+                {(item.durationMs / 1000).toFixed(1)}s
+              </span>
+            )}
+          </span>
+        )}
+        {/* Metadata badges */}
+        {decomposed && (
+          <span className="rounded bg-blue-100 dark:bg-blue-900/40 px-1.5 py-0.5 text-[10px] text-blue-700 dark:text-blue-300 font-medium">
+            子查询×{subQueries.length}
+          </span>
+        )}
+        {rewritten && !decomposed && (
+          <span className="rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300 font-medium">
+            查询改写
+          </span>
+        )}
+        {typeof hitCount === "number" && !decomposed && !rewritten && (
+          <span className="text-muted-foreground opacity-70">{hitCount} 条</span>
+        )}
+        {hasDetails && (
+          <span className="ml-auto shrink-0 text-muted-foreground">
+            {open ? (
+              <ChevronUp className="h-3.5 w-3.5" aria-hidden />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+            )}
+          </span>
+        )}
+      </div>
+
+      {/* Expandable details */}
+      {open && hasDetails && (
+        <div className="border-t border-border/40 bg-background/60 px-3 py-2.5 space-y-2.5 text-[11px] leading-relaxed">
+          {/* Input params */}
+          {item.input && Object.keys(item.input).length > 0 && (
+            <div>
+              <p className="text-muted-foreground font-medium mb-1 text-[10px] uppercase tracking-wide">
+                调用参数
+              </p>
+              <dl className="space-y-0.5">
+                {Object.entries(item.input).map(([k, v]) => (
+                  <div key={k} className="flex gap-2">
+                    <dt className="text-muted-foreground shrink-0 w-28 truncate font-mono">{k}</dt>
+                    <dd className="text-foreground/90 break-all">{formatInputValue(v)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          )}
+
+          {/* Sub-query decomposition */}
+          {decomposed && subQueries.length > 0 && (
+            <div>
+              <p className="text-muted-foreground font-medium mb-1 text-[10px] uppercase tracking-wide">
+                子查询分解
+              </p>
+              <ol className="space-y-0.5 list-decimal list-inside">
+                {subQueries.map((q, i) => (
+                  <li key={i} className="text-foreground/90">
+                    {q}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+
+          {/* Query rewrite */}
+          {rewritten && rewrittenQuery && (
+            <div>
+              <p className="text-muted-foreground font-medium mb-1 text-[10px] uppercase tracking-wide">
+                查询改写
+              </p>
+              <p className="text-foreground/90">{rewrittenQuery}</p>
+            </div>
+          )}
+
+          {/* Output */}
+          {item.output && item.output.trim().length > 0 && (
+            <div>
+              <p className="text-muted-foreground font-medium mb-1 text-[10px] uppercase tracking-wide">
+                调用结果
+              </p>
+              <pre className="whitespace-pre-wrap break-words text-foreground/80 max-h-48 overflow-auto bg-muted/40 rounded px-2 py-1.5 font-mono">
+                {item.output}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecutionTerminalBlock({  item,
 }: {
   item: Extract<MessageTimelineItem, { kind: "tool" }> & { execution: ExecutionPayload };
 }) {
-  const { execution, durationMs, success } = item;
+  const { execution, durationMs } = item;
   const [open, setOpen] = useState(execution.return_code !== 0);
   const [copied, setCopied] = useState(false);
 
@@ -953,9 +1298,15 @@ function ExecutionTerminalBlock({
 function AssistantTimeline({
   items,
   isLive,
+  isReflecting,
+  citations,
+  onCitationClick,
 }: {
   items: MessageTimelineItem[];
   isLive: boolean;
+  isReflecting?: boolean;
+  citations?: Citation[];
+  onCitationClick?: (c: Citation, idx: number) => void;
 }) {
   const lastItem = items.length > 0 ? items[items.length - 1] : undefined;
   // Show a thinking spinner when busy but no events have arrived yet,
@@ -965,7 +1316,11 @@ function AssistantTimeline({
     (items.length === 0 ||
       (lastItem?.kind === "tool" && lastItem.status === "done"));
 
+  // Determine the spinner label
+  const thinkingLabel = isReflecting ? "正在验证结果…" : "思考中…";
+
   return (
+    <TooltipProvider delayDuration={300}>
     <>
       {items.map((item, i) => {
         if (item.kind === "text") {
@@ -976,8 +1331,13 @@ function AssistantTimeline({
               <ReactMarkdown
                 remarkPlugins={markdownRemarkPlugins}
                 rehypePlugins={markdownRehypePlugins}
+                components={
+                  citations && onCitationClick
+                    ? makeCitationComponents(citations, onCitationClick)
+                    : markdownComponents
+                }
               >
-                {normalizeMathDelimiters(item.content)}
+                {normalizeMathDelimiters(preprocessCitationMarkers(item.content))}
               </ReactMarkdown>
               {isLastAndLive && (
                 <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
@@ -995,38 +1355,10 @@ function AssistantTimeline({
           );
         }
         return (
-          <div
+          <ToolCallBlock
             key={item.clientKey}
-            className="my-1.5 flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-1.5 not-prose"
-          >
-            <span className="tabular-nums" aria-hidden>{toolEmoji(item.name)}</span>
-            <span className="font-mono text-xs text-foreground/90">{item.name}</span>
-            {item.status === "running" ? (
-              <Loader2
-                className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70"
-                aria-label="执行中"
-              />
-            ) : (
-              <span className="text-xs">
-                <span
-                  className={
-                    item.success === false
-                      ? "text-destructive"
-                      : item.success === true
-                        ? "text-emerald-600 dark:text-emerald-400"
-                        : "text-muted-foreground"
-                  }
-                >
-                  {item.success === false ? "✗" : item.success === true ? "✓" : "?"}
-                </span>
-                {typeof item.durationMs === "number" && (
-                  <span className="ml-1.5 opacity-80">
-                    {(item.durationMs / 1000).toFixed(1)}s
-                  </span>
-                )}
-              </span>
-            )}
-          </div>
+            item={item}
+          />
         );
       })}
       {showThinking && (
@@ -1036,10 +1368,11 @@ function AssistantTimeline({
           aria-busy="true"
         >
           <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
-          <span>思考中…</span>
+          <span>{thinkingLabel}</span>
         </div>
       )}
     </>
+    </TooltipProvider>
   );
 }
 

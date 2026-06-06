@@ -837,7 +837,7 @@ flowchart TD
 
 #### 1. E-R 图
 
-系统共设计 19 个数据表，按业务域拆分为 6 个子图（跨域外键实体仅列名称，完整定义见对应子图）。
+系统共设计 23 个数据表，按业务域拆分为 7 个子图（跨域外键实体仅列名称，完整定义见对应子图）。
 
 ##### 子图 5-1a：用户与认证域
 
@@ -845,23 +845,34 @@ flowchart TD
 erDiagram
     User {
         uuid id PK
-        string username UK
-        string email UK
-        string passwordHash
+        varchar username UK
+        varchar passwordHash
         enum role "STUDENT|TEACHER|ADMIN"
-        string realName
-        bool qaCollectionEnabled
+        varchar realName
+        boolean isActive
         datetime createdAt
+        datetime updatedAt
     }
     RefreshToken {
         uuid id PK
         uuid userId FK
-        string tokenHash
+        varchar tokenHash
         datetime expiresAt
         datetime revokedAt
+        datetime createdAt
+    }
+    Notification {
+        uuid id PK
+        uuid userId FK
+        enum type
+        varchar title
+        text body
+        boolean isRead
+        datetime createdAt
     }
 
     User ||--o{ RefreshToken : "持有令牌"
+    User ||--o{ Notification : "接收通知"
 ```
 
 ##### 子图 5-1b：课程管理域
@@ -871,17 +882,22 @@ erDiagram
     Course {
         uuid id PK
         uuid teacherId FK
-        string name
-        enum status "DRAFT|PUBLISHED|ARCHIVED"
-        string shareCode UK
+        varchar name
+        text description
+        enum status "PUBLISHED"
+        varchar shareCode UK
+        boolean isDeleted
         datetime createdAt
+        datetime updatedAt
     }
     Lesson {
         uuid id PK
         uuid courseId FK
-        string title
+        varchar title
         int orderIndex
+        boolean isDeleted
         datetime createdAt
+        datetime updatedAt
     }
     CourseEnrollment {
         uuid id PK
@@ -889,19 +905,11 @@ erDiagram
         uuid studentId FK
         datetime enrolledAt
     }
-    CourseCollaborator {
-        uuid id PK
-        uuid courseId FK
-        uuid teacherId FK
-        datetime createdAt
-    }
 
     User ||--o{ Course : "教师创建"
     User ||--o{ CourseEnrollment : "学生选课"
-    User ||--o{ CourseCollaborator : "协作教师"
     Course ||--o{ Lesson : "包含课时"
     Course ||--o{ CourseEnrollment : "注册学生"
-    Course ||--o{ CourseCollaborator : "协作教师"
 ```
 
 ##### 子图 5-1c：教学材料域
@@ -912,24 +920,29 @@ erDiagram
         uuid id PK
         uuid courseId FK
         uuid lessonId FK
-        string originalFilename
-        string fileType
+        varchar originalFilename
+        varchar fileType
         int fileSize
-        string minioPath
+        varchar minioPath
+        enum previewPdfStatus "NA|PENDING|READY|FAILED"
         enum status "UPLOADED|PARSING|PARSED|INDEXING|READY|FAILED"
+        text statusMessage
         int indexedChunkCount
+        boolean isDeleted
         datetime createdAt
+        datetime updatedAt
     }
     MaterialImage {
         uuid id PK
         uuid materialId FK
         int pageIdx
-        string minioUrl
+        varchar minioUrl
+        datetime createdAt
     }
     ChunkPageMapping {
         uuid id PK
         uuid materialId FK
-        string chunkId
+        varchar chunkId UK
         int pageIdx
     }
 
@@ -947,39 +960,46 @@ erDiagram
         uuid id PK
         uuid courseId FK
         uuid studentId FK
-        string agentSessionId UK
+        varchar agentSessionId UK
         datetime createdAt
+        datetime deletedAt
     }
     QaCenterSession {
         uuid id PK
         uuid studentId FK
-        string agentSessionId UK
-        string title
+        varchar agentSessionId UK
+        varchar title
+        datetime createdAt
+        datetime deletedAt
+    }
+    ChatThreadTitleOverride {
+        uuid id PK
+        uuid studentId FK
+        varchar sessionId UK
+        varchar title
         datetime createdAt
     }
     QaLog {
         uuid id PK
         uuid courseId FK
         uuid studentId FK
-        uuid lessonId FK
-        string sessionId
+        varchar sessionId
         text question
         text answer
-        int questionTokens
-        int answerTokens
+        int totalTokens
         int executionTimeMs
-        string modelUsed
-        text toolCalls
-        text citations
+        varchar modelUsed
+        jsonb toolCalls
+        jsonb citations
         datetime createdAt
     }
 
-    User ||--o{ CourseChatSession : "发起会话"
+    User ||--o{ CourseChatSession : "发起课程会话"
     User ||--o{ QaCenterSession : "发起QA中心会话"
+    User ||--o{ ChatThreadTitleOverride : "自定义标题"
     User ||--o{ QaLog : "提出问题"
-    Course ||--o{ CourseChatSession : "聊天会话"
+    Course ||--o{ CourseChatSession : "所属课程"
     Course ||--o{ QaLog : "问答记录"
-    Lesson ||--o{ QaLog : "关联问答"
 ```
 
 ##### 子图 5-1e：AI 作业管理域
@@ -990,69 +1010,128 @@ erDiagram
         uuid id PK
         uuid courseId FK
         uuid createdBy FK
-        string title
+        varchar title
         enum status "GENERATING|FAILED|DRAFT|PUBLISHED|ARCHIVED"
-        text blueprint
-        text questions
-        text qualityReport
+        jsonb blueprint
+        jsonb questions
+        jsonb qualityReport
+        varchar generationPhase
         datetime deadline
         datetime publishedAt
+        datetime createdAt
+        datetime updatedAt
+    }
+    AssignmentSubmission {
+        uuid id PK
+        uuid assignmentId FK
+        uuid studentId FK
+        jsonb answers
+        enum status "SUBMITTED|GRADING|GRADED|RETURNED"
+        jsonb gradingResult
+        int totalScore
+        int maxScore
+        text teacherFeedback
+        datetime submittedAt
+        datetime gradedAt
     }
 
     Course ||--o{ Assignment : "课程作业"
     User ||--o{ Assignment : "创建作业"
+    Assignment ||--o{ AssignmentSubmission : "包含提交"
+    User ||--o{ AssignmentSubmission : "学生提交"
 ```
 
-##### 子图 5-1f：学习记忆与分析域
+##### 子图 5-1f：学习记忆与复习域
 
 ```mermaid
 erDiagram
     UserLearningProfile {
         uuid id PK
         uuid userId FK
-        text profile
+        jsonb profile
         datetime updatedAt
     }
     UserMemoryFact {
         uuid id PK
         uuid userId FK
-        string sessionId
-        string category
+        varchar sessionId
+        varchar category
         text content
         float confidence
-        text sourceJson
+        datetime timestamp
     }
     UserMemoryConcept {
         uuid id PK
         uuid userId FK
-        string name
+        varchar name UK
         float masteryLevel
-        text supportingFactIds
-        text relatedConcepts
+        datetime lastUpdated
     }
-    CronJob {
-        string id PK
-        uuid userId FK
-        text prompt
-        string schedule
-        string status
-        datetime nextRunAt
-    }
-    CronJobRun {
+    UserMemoryReviewPreference {
         uuid id PK
-        string jobId FK
-        string status
-        text output
-        text toolCalls
-        datetime startedAt
-        datetime finishedAt
+        uuid userId FK
+        boolean enabled
+        varchar localTime
+        varchar timezone
+    }
+    MemoryReviewSession {
+        uuid id PK
+        uuid userId FK
+        varchar scheduledDate
+        enum status "PENDING|IN_PROGRESS|COMPLETED|DISMISSED|EXPIRED"
+        int questionCount
+        datetime expiresAt
+        datetime createdAt
+    }
+    MemoryReviewQuestion {
+        uuid id PK
+        uuid sessionId FK
+        varchar conceptName
+        enum type "SINGLE_CHOICE|FILL_BLANK|TRUE_FALSE"
+        text stem
+        varchar answer
+        varchar userAnswer
+        boolean isCorrect
+        datetime answeredAt
     }
 
     User ||--o| UserLearningProfile : "拥有档案"
     User ||--o{ UserMemoryFact : "记忆事实"
     User ||--o{ UserMemoryConcept : "掌握概念"
-    User ||--o{ CronJob : "创建定时任务"
-    CronJob ||--o{ CronJobRun : "执行记录"
+    User ||--o| UserMemoryReviewPreference : "复习偏好"
+    User ||--o{ MemoryReviewSession : "每日复习"
+    MemoryReviewSession ||--o{ MemoryReviewQuestion : "包含题目"
+```
+
+##### 子图 5-1g：个人知识库域
+
+```mermaid
+erDiagram
+    PersonalMaterial {
+        uuid id PK
+        uuid userId FK
+        varchar originalFilename
+        varchar fileType
+        int fileSize
+        varchar minioPath
+        enum previewPdfStatus "NA|PENDING|READY|FAILED"
+        enum status "UPLOADED|PARSING|PARSED|INDEXING|READY|FAILED"
+        text statusMessage
+        int indexedChunkCount
+        boolean isDeleted
+        datetime createdAt
+        datetime updatedAt
+    }
+    PersonalKbSession {
+        uuid id PK
+        uuid userId FK
+        varchar agentSessionId UK
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    User ||--o{ PersonalMaterial : "上传个人材料"
+    User ||--o| PersonalKbSession : "个人知识库会话"
 ```
 
 ---
@@ -1196,6 +1275,47 @@ erDiagram
 | user_memory_concepts | 知识点掌握度 | userId, name（联合唯一），masteryLevel（0-1浮点） |
 | cron_jobs | 定时 Agent 任务 | userId, schedule（cron表达式），status，nextRunAt |
 | cron_job_runs | 定时任务执行记录 | jobId, status, output, toolCalls, startedAt |
+
+---
+
+### （四）技术选型与实现环境
+
+#### 1. 后端技术栈
+
+**（1）开发语言：TypeScript**
+
+本系统后端基于 **TypeScript 5.7** 构建，运行于 Node.js 运行时之上，借助 Next.js 15 App Router 的 API Routes 功能直接在 Web 框架中承载全部接口逻辑，无需独立维护后端服务进程。选择 TypeScript 的主要理由有三：其一，强类型系统可在编译期捕获接口契约不一致问题，在 Agent 工具调用、RAG 数据流转等多层异步链路中尤为关键；其二，前后端同构（monorepo）共享 DTO 类型定义，消除了接口序列化时的类型漂移风险；其三，Next.js 生态对 TypeScript 原生支持完善，Prisma ORM、tRPC 等主流库均提供自动类型推断，大幅降低了样板代码量。
+
+**（2）API 风格：RESTful**
+
+系统 API 遵循 RESTful 设计规范，以资源（Course、Material、Assignment 等）为中心组织 URL，通过 HTTP 方法（GET / POST / PATCH / DELETE）表达语义，状态码（200 / 201 / 400 / 401 / 403 / 404 / 409）传达处理结果。与 GraphQL 相比，RESTful 对于本系统的主要优势在于：前端 Next.js 路由与 API 路由天然契合，缓存策略（HTTP 缓存头、Redis 层）更直观，且与 Swagger/OpenAPI 工具链集成简便，便于后期接口文档生成与前后端联调。AI 问答等实时流式场景则单独采用 **SSE（Server-Sent Events）** 补充，避免 WebSocket 的额外维护成本。
+
+**（3）异步任务与定时调度**
+
+系统将两类耗时操作从请求链路中剥离：
+
+- **异步材料处理**：教学材料上传后，后端向 **Redis Stream**（`material:ingest:stream`）写入任务消息，Python RAG 服务以消费者组模式拉取并执行文本提取、向量化与知识图谱入库，全程状态（UPLOADED → PARSING → READY）写回 PostgreSQL，前端通过轮询感知进度。
+- **定时 Agent 任务**：`cron_jobs` 表存储用户定义的调度规则（标准 cron 表达式），Next.js 内置调度器按周期触发 ReAct Agent 执行个性化复习推送等任务，执行记录持久化至 `cron_job_runs` 表。
+
+---
+
+#### 2. 数据与存储技术选型
+
+**（1）关系型数据库：PostgreSQL 16**
+
+PostgreSQL 16 作为系统的核心持久化层，承载课程、用户、作业、QA 日志等全部强一致性业务数据，通过 **Prisma 6** ORM 进行类型安全的访问。选型理由：一是原生支持 `JSONB` 字段，直接存储学习档案（`UserLearningProfile`）、作业题目列表（`Assignment.questions`）等半结构化数据，避免额外引入文档数据库；二是完善的事务支持保障了多表写操作（如作业生成状态流转）的原子性；三是与 Prisma、pgvector 等现代工具链的生态成熟度最高，降低了运维和迁移风险。
+
+**（2）缓存服务：Redis 7**
+
+Redis 7 在系统中承担多项职责：Agent 会话消息历史以键 `agent:session:{id}` 存储，TTL 24 小时，避免高频读写冲击 PostgreSQL；课程列表等热点数据以固定 TTL 缓存，降低重复查询开销；凭证绑定失败次数与限流计数以原子操作维护，保障速率限制的准确性；材料处理任务通过 Redis Stream 异步分发，解耦上传请求与耗时的 RAG 处理流程。
+
+**（3）对象存储：MinIO**
+
+教学材料（PDF、Office 文档、视频、音频、图片）统一存储于 MinIO，对象路径格式为 `materials/{courseId}/{materialId}/{filename}`。MinIO 兼容 Amazon S3 协议，支持私有化部署，满足教育数据的本地化合规要求。系统通过预签名 URL（Presigned URL）向前端下发时效性访问凭证，避免将 MinIO 内部地址直接暴露。个人知识库材料同样使用独立桶（`personal-materials`）隔离存储。
+
+**（4）图数据库：Neo4j 5**
+
+RAG 知识图谱存储于 **Neo4j 5 Community**。选择图数据库而非关系数据库的核心理由在于数据模型的天然契合度：知识图谱中的实体（概念、章节）与关系（包含、依赖、相关）在图模型中以节点和边直接表达，遍历多跳关系（如"与运输层相关的所有概念及其依赖"）可通过 Cypher 查询一条语句完成；若改用关系表，同等查询需多次 JOIN，性能随跳数指数级下降。LightRAG 框架负责文本到图的自动抽取与更新，Neo4j 提供持久化存储与 Cypher 查询接口，二者配合实现课程知识的图结构化索引与语义检索增强。
 
 ---
 

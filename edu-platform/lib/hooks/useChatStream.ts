@@ -20,6 +20,14 @@ export type MessageTimelineItem =
       success?: boolean;
       durationMs?: number;
       execution?: ExecutionPayload;
+      /** Tool input arguments captured from the tool_call SSE event. */
+      input?: Record<string, unknown>;
+      /** Tool output text captured from the tool_result SSE event (truncated to 500 chars). */
+      output?: string;
+      /** Structured metadata from the tool (e.g. decomposition info for knowledge_query). */
+      meta?: Record<string, unknown>;
+      /** Real-time progress label emitted by the tool while running. */
+      progressLabel?: string;
     };
 
 export type ChatMessage = {
@@ -77,6 +85,9 @@ export type ToolActivityItem = {
   success?: boolean;
   durationMs?: number;
   execution?: ExecutionPayload;
+  input?: Record<string, unknown>;
+  output?: string;
+  meta?: Record<string, unknown>;
 };
 
 /** Pending tool-approval request emitted by the ReAct loop. */
@@ -173,6 +184,7 @@ type HydratedRow = {
   answer: string | null;
   tool_calls?: unknown[];
   citations?: unknown[];
+  timeline_json?: unknown[];
 };
 
 function logToMsgs(rows: HydratedRow[]): ChatMessage[] {
@@ -191,9 +203,13 @@ function logToMsgs(rows: HydratedRow[]): ChatMessage[] {
         role: "assistant",
         text: r.answer,
         ...(qaLogId ? { qaLogId } : {}),
-        toolActivity: Array.isArray(r.tool_calls)
-          ? (r.tool_calls as ToolActivityItem[])
-          : [],
+        ...(Array.isArray(r.timeline_json) && r.timeline_json.length > 0
+          ? { timeline: r.timeline_json as MessageTimelineItem[] }
+          : {
+              toolActivity: Array.isArray(r.tool_calls)
+                ? (r.tool_calls as ToolActivityItem[])
+                : [],
+            }),
         citations: Array.isArray(r.citations)
           ? (r.citations as Citation[])
           : [],
@@ -238,6 +254,7 @@ export function useChatStream(config: UseChatStreamConfig) {
   branchRecordsRef.current = branchRecords;
 
   const [pendingApproval, setPendingApproval] = useState<PendingApprovalState | null>(null);
+  const [isReflecting, setIsReflecting] = useState(false);
   const pendingApprovalRef = useRef<PendingApprovalState | null>(null);
   pendingApprovalRef.current = pendingApproval;
 
@@ -523,6 +540,13 @@ export function useChatStream(config: UseChatStreamConfig) {
                 tool_call_id?: string;
                 success?: boolean;
                 duration_ms?: number;
+                // tool call input arguments
+                input?: Record<string, unknown>;
+                // tool result output text and metadata
+                output?: string;
+                meta?: Record<string, unknown>;
+                // tool progress label (real-time, emitted during execution)
+                label?: string;
                 // approval fields
                 tool_name?: string;
                 args_preview?: Record<string, unknown>;
@@ -532,9 +556,12 @@ export function useChatStream(config: UseChatStreamConfig) {
                 // execution result (run_script)
                 execution?: ExecutionPayload;
                 full_code?: string;
+                // trace event subtype
+                event?: string;
               };
 
               if (event.type === "text" && event.content) {
+                setIsReflecting(false);
                 streamText += event.content;
                 setStreaming(streamText);
                 // Build interleaved timeline: merge consecutive text chunks
@@ -559,14 +586,39 @@ export function useChatStream(config: UseChatStreamConfig) {
                 ]);
                 const nextTl: MessageTimelineItem[] = [
                   ...streamTimelineRef.current,
-                  { kind: "tool", clientKey: id, name: event.name!, status: "running" },
+                  {
+                    kind: "tool",
+                    clientKey: id,
+                    name: event.name!,
+                    status: "running",
+                    ...(event.input ? { input: event.input as Record<string, unknown> } : {}),
+                  },
                 ];
                 streamTimelineRef.current = nextTl;
                 setStreamTimeline(nextTl);
+              } else if (event.type === "tool_progress" && event.tool_call_id && event.label) {
+                const progressKey = event.tool_call_id;
+                const label = event.label;
+                const tl = [...streamTimelineRef.current];
+                let idx = -1;
+                for (let i = tl.length - 1; i >= 0; i--) {
+                  const it = tl[i];
+                  if (it.kind === "tool" && it.clientKey === progressKey && it.status === "running") {
+                    idx = i;
+                    break;
+                  }
+                }
+                if (idx !== -1) {
+                  tl[idx] = { ...(tl[idx] as Extract<MessageTimelineItem, { kind: "tool" }>), progressLabel: label };
+                  streamTimelineRef.current = tl;
+                  setStreamTimeline([...tl]);
+                }
               } else if (event.type === "tool_result" && event.name) {
                 const toolName = event.name;
                 const toolCallId = typeof event.tool_call_id === "string" ? event.tool_call_id : undefined;
                 const execution = event.execution as ExecutionPayload | undefined;
+                const toolOutput = typeof event.output === "string" ? event.output : undefined;
+                const toolMeta = event.meta as Record<string, unknown> | undefined;
 
                 /** Find last running item matching by clientKey (preferred) then name. */
                 function findRunningIdx<T extends { clientKey: string; name: string; status: string }>(
@@ -610,6 +662,8 @@ export function useChatStream(config: UseChatStreamConfig) {
                     success: event.success,
                     durationMs: event.duration_ms,
                     ...(execution ? { execution } : {}),
+                    ...(toolOutput !== undefined ? { output: toolOutput } : {}),
+                    ...(toolMeta ? { meta: toolMeta } : {}),
                   };
                 }
                 streamTimelineRef.current = tl;
@@ -623,7 +677,10 @@ export function useChatStream(config: UseChatStreamConfig) {
                   image_urls: event.image_urls,
                 });
                 setCitations([...newCitations]);
+              } else if (event.type === "trace" && event.event === "reflecting") {
+                setIsReflecting(true);
               } else if (event.type === "done") {
+                setIsReflecting(false);
                 const meta: DoneMeta = {
                   type: "done",
                   tokens: event.tokens,
@@ -664,6 +721,7 @@ export function useChatStream(config: UseChatStreamConfig) {
             role: "assistant",
             text: streamText,
             ...(finalTimeline.length > 0 ? { timeline: finalTimeline } : {}),
+            ...(newCitations.length > 0 ? { citations: newCitations } : {}),
           };
           setMsgs((prev) => {
             const next = [...prev, assistantMsg];
@@ -673,8 +731,10 @@ export function useChatStream(config: UseChatStreamConfig) {
         }
         setStreaming("");
         setToolActivity([]);
+        setIsReflecting(false);
         streamTimelineRef.current = [];
         setStreamTimeline([]);
+        setCitations([]);
       } catch (e) {
         if ((e as { name?: string }).name !== "AbortError") {
           const msg = e instanceof Error ? e.message : "请求失败";
@@ -692,8 +752,10 @@ export function useChatStream(config: UseChatStreamConfig) {
         }
         setStreaming("");
         setToolActivity([]);
+        setIsReflecting(false);
         streamTimelineRef.current = [];
         setStreamTimeline([]);
+        setCitations([]);
       } finally {
         setBusy(false);
       }
@@ -914,6 +976,7 @@ export function useChatStream(config: UseChatStreamConfig) {
     toolActivity,
     streamTimeline,
     busy,
+    isReflecting,
     citations,
     lastMeta,
     errorMsg,

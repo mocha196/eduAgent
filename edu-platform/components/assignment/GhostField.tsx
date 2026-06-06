@@ -131,7 +131,7 @@ export function GhostField({
           style={{ fontFamily: "inherit" }}
         >
           <span className="invisible">{value}</span>
-          <span className="text-muted-foreground/50 select-none">{suggestion}</span>
+          <span className="text-muted-foreground opacity-50 select-none">{suggestion}</span>
         </div>
       )}
 
@@ -158,7 +158,7 @@ export function GhostField({
       )}
 
       {loading && (
-        <span className="absolute bottom-2 right-2 z-20 text-[10px] text-muted-foreground/50 pointer-events-none select-none">
+        <span className="absolute bottom-2 right-2 z-20 text-[10px] text-muted-foreground opacity-50 pointer-events-none select-none">
           AI…
         </span>
       )}

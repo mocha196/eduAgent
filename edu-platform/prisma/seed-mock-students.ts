@@ -15,7 +15,7 @@ import * as argon2 from "argon2";
 
 const prisma = new PrismaClient();
 
-const COURSE_ID = "f5ca8926-2c4d-475d-b60f-bb95991ef3cf";
+const COURSE_ID = "c8b8787f-9c7e-4f37-bab5-fb94a438d9cf"; // 计算机网络基础
 const MOCK_PASSWORD = "MockStudent@2026"; // meets 12-char policy
 const MOCK_COUNT = 30;
 

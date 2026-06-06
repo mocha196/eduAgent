@@ -15,6 +15,7 @@ import type { Message } from "./types";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ component: "context-manager" });
+const CONTEXT_DIFF_DEBUG = process.env.AGENT_CONTEXT_DIFF_DEBUG === "1";
 
 const CHARS_PER_TOKEN = 4;
 
@@ -32,6 +33,18 @@ export function estimateTokens(messages: Message[]): number {
     }
   }
   return total;
+}
+
+function snapshotMessages(messages: Message[]): Array<Record<string, unknown>> {
+  return messages.map((m) => {
+    const base: Record<string, unknown> = {
+      role: m.role,
+      content: m.content,
+    };
+    if (m.tool_call_id) base.tool_call_id = m.tool_call_id;
+    if (m.tool_calls) base.tool_calls = m.tool_calls;
+    return base;
+  });
 }
 
 export class ContextManager {
@@ -59,7 +72,8 @@ export class ContextManager {
     const limit = maxTokens ?? this.maxTokens;
     if (estimateTokens(messages) <= limit) return messages;
 
-    log.debug({ before: messages.length, tokensBefore: estimateTokens(messages), limit }, "context compress triggered");
+    const tokensBefore = estimateTokens(messages);
+    log.debug({ before: messages.length, tokensBefore, limit }, "context compress triggered");
 
     const system = messages[0]?.role === "system" ? [messages[0]] : [];
     const rest = messages[0]?.role === "system" ? messages.slice(1) : messages;
@@ -79,7 +93,24 @@ export class ContextManager {
       kept = rest.slice(-2);
     }
 
-    return [...system, ...kept];
+    const compressed = [...system, ...kept];
+    const tokensAfter = estimateTokens(compressed);
+    const logPayload: Record<string, unknown> = {
+      strategy: "sliding",
+      before: messages.length,
+      after: compressed.length,
+      dropped: Math.max(0, messages.length - compressed.length),
+      tokensBefore,
+      tokensAfter,
+      limit,
+    };
+    if (CONTEXT_DIFF_DEBUG) {
+      logPayload.beforeMessages = snapshotMessages(messages);
+      logPayload.afterMessages = snapshotMessages(compressed);
+    }
+    log.debug(logPayload, "context compress result");
+
+    return compressed;
   }
 
   /**
@@ -104,7 +135,8 @@ export class ContextManager {
     model: string,
     options?: { recentKeep?: number },
   ): Promise<{ messages: Message[]; didSummarize: boolean }> {
-    if (estimateTokens(messages) <= this.maxTokens) {
+    const tokensBefore = estimateTokens(messages);
+    if (tokensBefore <= this.maxTokens) {
       return { messages, didSummarize: false };
     }
 
@@ -141,8 +173,26 @@ export class ContextManager {
         { role: "user", content: `[对话历史摘要]\n${summaryText}${codeAppendix}` },
         { role: "assistant", content: "好的，我已了解之前的对话内容，我们继续。" },
       ];
+      const compressed = [...system, ...summaryMessages, ...recent];
+      const tokensAfter = estimateTokens(compressed);
+      const logPayload: Record<string, unknown> = {
+        strategy: "summary",
+        before: messages.length,
+        after: compressed.length,
+        dropped: Math.max(0, messages.length - compressed.length),
+        tokensBefore,
+        tokensAfter,
+        limit: this.maxTokens,
+        recentKeep,
+      };
+      if (CONTEXT_DIFF_DEBUG) {
+        logPayload.beforeMessages = snapshotMessages(messages);
+        logPayload.afterMessages = snapshotMessages(compressed);
+      }
+      log.debug(logPayload, "context summary compress result");
+
       return {
-        messages: [...system, ...summaryMessages, ...recent],
+        messages: compressed,
         didSummarize: true,
       };
     } catch (err) {

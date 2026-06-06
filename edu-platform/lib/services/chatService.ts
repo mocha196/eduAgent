@@ -32,6 +32,12 @@ type ToolCallRecord = {
   success?: boolean;
   durationMs?: number;
   execution?: ExecutionPayload;
+  /** Tool input arguments from the tool_call event. */
+  input?: Record<string, unknown>;
+  /** Tool output text from the tool_result event (truncated to 500 chars). */
+  output?: string;
+  /** Structured metadata from the tool (e.g. decomposition info for knowledge_query). */
+  meta?: Record<string, unknown>;
 };
 
 type PersistedCitation = {
@@ -56,6 +62,7 @@ export type B3SseEvent =
       type: "tool_call";
       name: string;
       tool_call_id?: string;
+      input?: Record<string, unknown>;
     }
   | {
       type: "tool_result";
@@ -64,6 +71,7 @@ export type B3SseEvent =
       duration_ms?: number;
       output?: string;
       execution?: ExecutionPayload;
+      meta?: Record<string, unknown>;
     }
   | {
       type: "done";
@@ -224,6 +232,7 @@ type PersistArgs = {
   b3?: Record<string, unknown>;
   toolCalls?: ToolCallRecord[];
   citations?: PersistedCitation[];
+  timelineJson?: unknown[];
 };
 
 async function maybePersistQaLog(a: PersistArgs): Promise<void> {
@@ -253,6 +262,7 @@ async function maybePersistQaLog(a: PersistArgs): Promise<void> {
       hitSources: Array.isArray(b3.hit_sources) ? (b3.hit_sources as string[]) : [],
       toolCalls: a.toolCalls ?? [],
       citations: a.citations ?? [],
+      timelineJson: a.timelineJson && a.timelineJson.length > 0 ? a.timelineJson : undefined,
     } as Parameters<typeof prisma.qaLog.create>[0]["data"],
   });
 }
@@ -272,6 +282,18 @@ export function createB3SseTransformFromAgent(
   const collectedToolCalls: ToolCallRecord[] = [];
   // pending: tool_call events waiting to be matched with a tool_result
   const pendingToolCalls = new Map<string, ToolCallRecord>();
+
+  // ── Timeline reconstruction (mirrors createB3PersistTransform logic) ──────
+  type TlTextItem = { kind: "text"; content: string };
+  type TlToolItem = {
+    kind: "tool"; clientKey: string; name: string; status: "running" | "done";
+    success?: boolean; durationMs?: number;
+    input?: Record<string, unknown>; output?: string; meta?: Record<string, unknown>;
+  };
+  type TlItem = TlTextItem | TlToolItem;
+  const timelineItems: TlItem[] = [];
+  const pendingTlIdx = new Map<string, number>(); // key -> index in timelineItems
+  // ──────────────────────────────────────────────────────────────────────────
 
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
@@ -335,12 +357,27 @@ export function createB3SseTransformFromAgent(
         if (content && eduMeta?.content_type === "text" && !isFinalTextFrame) {
           fullAnswer += content;
           controller.enqueue(sseDataLine({ type: "text", content }));
+          // Merge consecutive text tokens into a single timeline text item
+          const last = timelineItems[timelineItems.length - 1];
+          if (last && last.kind === "text") {
+            (last as TlTextItem).content += content;
+          } else {
+            timelineItems.push({ kind: "text", content });
+          }
         }
         const tcEv = toolCallEventFromAgentFrame(frame);
         if (tcEv) {
           controller.enqueue(sseDataLine(tcEv));
           const key = tcEv.tool_call_id ?? tcEv.name;
           pendingToolCalls.set(key, { name: tcEv.name, status: "done" });
+          // Push running tool item to timeline
+          const clientKey = tcEv.tool_call_id ?? `tl-${timelineItems.length}`;
+          const tlIdx = timelineItems.length;
+          timelineItems.push({
+            kind: "tool", clientKey, name: tcEv.name, status: "running",
+            ...(tcEv.input && typeof tcEv.input === "object" ? { input: tcEv.input as Record<string, unknown> } : {}),
+          });
+          pendingTlIdx.set(key, tlIdx);
         }
         const trEv = toolResultEventFromAgentFrame(frame);
         if (trEv) {
@@ -356,6 +393,23 @@ export function createB3SseTransformFromAgent(
             pendingToolCalls.delete(matchKey);
           } else {
             collectedToolCalls.push({ name: trEv.name, status: "done", success: trEv.success, durationMs: trEv.duration_ms });
+          }
+          // Update matching timeline tool item to done
+          let tlMatchKey: string | undefined;
+          for (const [k] of pendingTlIdx) {
+            const item = timelineItems[pendingTlIdx.get(k)!] as TlToolItem;
+            if (item.name === trEv.name) { tlMatchKey = k; break; }
+          }
+          if (tlMatchKey !== undefined) {
+            const tlIdx = pendingTlIdx.get(tlMatchKey)!;
+            pendingTlIdx.delete(tlMatchKey);
+            const toolItem = timelineItems[tlIdx] as TlToolItem;
+            timelineItems[tlIdx] = {
+              ...toolItem, status: "done",
+              success: trEv.success,
+              durationMs: trEv.duration_ms,
+              ...(trEv.output && typeof trEv.output === "string" ? { output: trEv.output as string } : {}),
+            };
           }
         }
         const traceEv = traceEventFromAgentFrame(frame);
@@ -391,12 +445,18 @@ export function createB3SseTransformFromAgent(
         for (const rec of pendingToolCalls.values()) {
           collectedToolCalls.push(rec);
         }
+        // Finalize any still-running timeline tool items
+        for (const tlIdx of pendingTlIdx.values()) {
+          const item = timelineItems[tlIdx] as TlToolItem;
+          timelineItems[tlIdx] = { ...item, status: "done" };
+        }
         await maybePersistQaLog({
           ...persistCtx,
           answer: fullAnswer,
           b3: lastB3,
           toolCalls: collectedToolCalls,
           citations: persistedCitations,
+          timelineJson: timelineItems.length > 0 ? timelineItems : undefined,
         });
       }
     },
@@ -433,8 +493,25 @@ function createB3PersistTransform(
   let fullAnswer = "";
   const collectedToolCalls: ToolCallRecord[] = [];
   const collectedCitations: PersistedCitation[] = [];
+  /** Pending tool_call input args keyed by tool_call_id or name, waiting to be matched with tool_result. */
+  const pendingInputs = new Map<string, Record<string, unknown>>();
   let totalTokens: number | null = null;
   let execTimeMs: number | null = null;
+
+  // ── Timeline reconstruction ──────────────────────────────────────────────
+  // We rebuild the same interleaved text+tool structure the client renders,
+  // so that refreshing the page shows an identical timeline.
+  type TlTextItem = { kind: "text"; content: string };
+  type TlToolItem = {
+    kind: "tool"; clientKey: string; name: string; status: "running" | "done";
+    success?: boolean; durationMs?: number;
+    input?: Record<string, unknown>; output?: string; meta?: Record<string, unknown>;
+  };
+  type TlItem = TlTextItem | TlToolItem;
+  const timelineItems: TlItem[] = [];
+  /** Maps tool_call_id (or name) → index into timelineItems for update on tool_result */
+  const pendingTlIdx = new Map<string, number>();
+  // ─────────────────────────────────────────────────────────────────────────
 
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
@@ -455,15 +532,73 @@ function createB3PersistTransform(
           continue;
         }
         if (ev.type === "text") {
-          fullAnswer += (ev.content as string) ?? "";
-        } else if (ev.type === "tool_result") {
-          collectedToolCalls.push({
+          const content = (ev.content as string) ?? "";
+          fullAnswer += content;
+          // Merge consecutive text tokens into a single text item
+          const last = timelineItems[timelineItems.length - 1];
+          if (last && last.kind === "text") {
+            (last as TlTextItem).content += content;
+          } else {
+            timelineItems.push({ kind: "text", content });
+          }
+        } else if (ev.type === "tool_call") {
+          // Store input args keyed by tool_call_id (preferred) or name
+          const pendingKey = (ev.tool_call_id as string | undefined) ?? (ev.name as string);
+          if (pendingKey && ev.input && typeof ev.input === "object") {
+            pendingInputs.set(pendingKey, ev.input as Record<string, unknown>);
+          }
+          // Push a running tool item and remember its index
+          const clientKey = (ev.tool_call_id as string | undefined) ?? `tl-${timelineItems.length}`;
+          const tlIdx = timelineItems.length;
+          timelineItems.push({
+            kind: "tool",
+            clientKey,
             name: ev.name as string,
+            status: "running",
+            ...(ev.input && typeof ev.input === "object"
+              ? { input: ev.input as Record<string, unknown> }
+              : {}),
+          });
+          if (pendingKey) pendingTlIdx.set(pendingKey, tlIdx);
+        } else if (ev.type === "tool_result") {
+          // Resolve stored input for this tool
+          const toolCallId = ev.tool_call_id as string | undefined;
+          const toolName = ev.name as string;
+          let resolvedInput: Record<string, unknown> | undefined;
+          if (toolCallId && pendingInputs.has(toolCallId)) {
+            resolvedInput = pendingInputs.get(toolCallId);
+            pendingInputs.delete(toolCallId);
+          } else if (pendingInputs.has(toolName)) {
+            resolvedInput = pendingInputs.get(toolName);
+            pendingInputs.delete(toolName);
+          }
+          collectedToolCalls.push({
+            name: toolName,
             status: "done",
             success: ev.success as boolean | undefined,
             durationMs: ev.duration_ms as number | undefined,
             execution: ev.execution as ExecutionPayload | undefined,
+            ...(resolvedInput ? { input: resolvedInput } : {}),
+            ...(ev.output && typeof ev.output === "string" ? { output: ev.output as string } : {}),
+            ...(ev.meta && typeof ev.meta === "object" ? { meta: ev.meta as Record<string, unknown> } : {}),
           });
+          // Update the matching timeline tool item to "done"
+          const matchKey = (toolCallId && pendingTlIdx.has(toolCallId))
+            ? toolCallId
+            : pendingTlIdx.has(toolName) ? toolName : undefined;
+          if (matchKey !== undefined) {
+            const tlIdx = pendingTlIdx.get(matchKey)!;
+            pendingTlIdx.delete(matchKey);
+            const toolItem = timelineItems[tlIdx] as TlToolItem;
+            timelineItems[tlIdx] = {
+              ...toolItem,
+              status: "done",
+              success: ev.success as boolean | undefined,
+              durationMs: ev.duration_ms as number | undefined,
+              ...(ev.output && typeof ev.output === "string" ? { output: ev.output as string } : {}),
+              ...(ev.meta && typeof ev.meta === "object" ? { meta: ev.meta as Record<string, unknown> } : {}),
+            };
+          }
         } else if (ev.type === "citation") {
           collectedCitations.push({
             chunk_id: ev.chunk_id as string | undefined,
@@ -479,6 +614,11 @@ function createB3PersistTransform(
       }
     },
     async flush() {
+      // Mark any still-running tool items as done (stream ended without a matching result)
+      for (const tlIdx of pendingTlIdx.values()) {
+        const item = timelineItems[tlIdx] as TlToolItem;
+        timelineItems[tlIdx] = { ...item, status: "done" };
+      }
       if (opts.persist) {
         try {
           const model = getChatModel().slice(0, 100);
@@ -499,6 +639,7 @@ function createB3PersistTransform(
               hitSources: [],
               toolCalls: collectedToolCalls,
               citations: collectedCitations,
+              timelineJson: timelineItems.length > 0 ? timelineItems : undefined,
               metadata: opts.traceId ? { langfuseTraceId: opts.traceId } : undefined,
             } as Parameters<typeof prisma.qaLog.create>[0]["data"],
           });

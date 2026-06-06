@@ -27,4 +27,11 @@ export const markdownComponents: Components = {
       </div>
     );
   },
+  blockquote({ children, ...props }) {
+    return (
+      <blockquote style={{ overflowX: "auto" }} {...props}>
+        {children}
+      </blockquote>
+    );
+  },
 };

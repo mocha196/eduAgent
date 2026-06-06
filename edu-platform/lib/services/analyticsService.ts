@@ -60,7 +60,7 @@ export async function getCourseAnalytics(
   >`
     SELECT question,
            COUNT(*)::int AS count,
-           AVG(response_quality)::float AS avg_quality
+           NULL::float AS avg_quality
     FROM qa_logs
     WHERE course_id = ${courseId}::uuid
       AND deleted_at IS NULL

@@ -241,9 +241,11 @@ export const knowledgeQueryTool: Tool = {
     };
 
     // ---- Phase 4: LLM-driven query decomposition -------------------------
+    await ctx.onProgress?.("正在分析查询…");
     const decomposition = await _decomposeQuery(question, ctx);
     let hits: HitItem[];
     if (decomposition.decompose) {
+      await ctx.onProgress?.(`正在分解为 ${decomposition.sub_queries.length} 个子查询并检索…`);
       const results = await Promise.all(
         decomposition.sub_queries.map((q) =>
           ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, { ...baseBody, question: q }),
@@ -251,6 +253,7 @@ export const knowledgeQueryTool: Tool = {
       );
       hits = _mergeHits(results.map((r) => r.hits));
     } else {
+      await ctx.onProgress?.("正在检索知识库…");
       const resp = await ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, {
         ...baseBody,
         question,
@@ -265,9 +268,12 @@ export const knowledgeQueryTool: Tool = {
 
     // ---- Phase 3: Adaptive query rewriting --------------------------------
     let rewritten = false;
+    let rewrittenQuery: string | undefined;
     if (lowConfidence) {
+      await ctx.onProgress?.("置信度不足，正在改写查询…");
       const newQuery = await _rewriteQuery(question, ctx);
       if (newQuery) {
+        await ctx.onProgress?.("正在以改写后的查询重新检索…");
         const retryResp = await ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, {
           ...baseBody,
           question: newQuery,
@@ -280,6 +286,7 @@ export const knowledgeQueryTool: Tool = {
           hits = retryResp.hits;
           lowConfidence = retryMax < RELEVANCE_THRESHOLD;
           rewritten = true;
+          rewrittenQuery = newQuery;
         }
       }
     }
@@ -291,7 +298,15 @@ export const knowledgeQueryTool: Tool = {
 
     const citations = _hitsToB3Citations(hits);
     log.debug({ hitCount: hits.length, lowConfidence, rewritten, durationMs: Date.now() - t0 }, "knowledge_query done");
-    return { content, citations };
+    const meta: Record<string, unknown> = {
+      decomposed: decomposition.decompose,
+      ...(decomposition.decompose ? { sub_queries: decomposition.sub_queries } : {}),
+      rewritten,
+      ...(rewritten && rewrittenQuery ? { rewritten_query: rewrittenQuery } : {}),
+      hit_count: hits.length,
+      max_score: hits.length > 0 ? Math.max(...hits.map((h) => h.relevance_score ?? 0)) : 0,
+    };
+    return { content, citations, meta };
   },
 };
 

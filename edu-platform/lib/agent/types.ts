@@ -44,6 +44,8 @@ export type ToolResult = {
   content: string;
   /** Optional citations emitted as SSE events */
   citations?: ToolCitation[];
+  /** Optional structured metadata emitted in the tool_result SSE event (e.g. decomposition info for knowledge_query). */
+  meta?: Record<string, unknown>;
 };
 
 export type ToolCategory = "read" | "write" | "external" | "dangerous";
@@ -106,6 +108,11 @@ export type TurnContext = {
   currentPageImage?: { presigned_url: string; mime_type: string; name: string } | null;
   /** When true, this turn is an automated eval run. Tools may use this to restrict behaviour (e.g. force sources="course"). */
   evalMode?: boolean;
+  /**
+   * Progress callback injected by the ReAct loop before tool execution.
+   * Tools call this to emit real-time status labels visible in the chat UI.
+   */
+  onProgress?: (label: string) => Promise<void>;
   /** Attachment metadata passed from the frontend for the current turn. Used by read_attachment tool. */
   attachments?: Array<{
     id: string;
@@ -147,8 +154,9 @@ export type AgentConfig = {
 export type B3SseEvent =
   | { type: "text"; content: string }
   | { type: "citation"; chunk_id?: string; material_id?: string; source_label?: string; chunk_text?: string }
-  | { type: "tool_call"; name: string; tool_call_id?: string }
-  | { type: "tool_result"; name: string; success?: boolean; duration_ms?: number }
+  | { type: "tool_call"; name: string; tool_call_id?: string; input?: Record<string, unknown> }
+  | { type: "tool_progress"; tool_call_id: string; label: string }
+  | { type: "tool_result"; name: string; success?: boolean; duration_ms?: number; output?: string; meta?: Record<string, unknown> }
   | { type: "done"; tokens?: number | null; exec_time_ms?: number | null; error?: string }
   | { type: "trace"; trace_id?: string; event?: string; turn_id?: string; ts?: string; payload?: Record<string, unknown> }
   | {
