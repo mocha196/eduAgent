@@ -24,7 +24,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import boto3
 import httpx
 import uvicorn
 from boto3 import Session as Boto3Session
@@ -66,9 +65,7 @@ async def _warmup_course_caches() -> None:
     try:
         with connect_sync() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id::text FROM courses WHERE status IN ('PUBLISHED', 'ARCHIVED')"
-                )
+                cur.execute("SELECT id::text FROM courses WHERE status = 'PUBLISHED'")
                 course_ids: list[str] = [row[0] for row in cur.fetchall()]
     except Exception as exc:  # noqa: BLE001
         logger.warning("Warmup: failed to fetch course IDs: {}", exc)

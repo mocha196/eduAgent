@@ -48,7 +48,6 @@ const STATUS_LABELS: Record<string, string> = {
   FAILED: "失败",
   DRAFT: "草稿",
   PUBLISHED: "已发布",
-  ARCHIVED: "已归档",
 };
 
 const TYPE_LABELS: Record<string, string> = {

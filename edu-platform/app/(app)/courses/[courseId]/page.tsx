@@ -35,14 +35,13 @@ type Lesson = {
 type Tab = "overview" | "materials" | "lessons" | "assignments";
 
 const ASSIGNMENT_STATUS_LABELS: Record<string, string> = {
-  GENERATING: "生成中", FAILED: "失败", DRAFT: "草稿", PUBLISHED: "已发布", ARCHIVED: "已归档",
+  GENERATING: "生成中", FAILED: "失败", DRAFT: "草稿", PUBLISHED: "已发布",
 };
 const ASSIGNMENT_STATUS_CLASSES: Record<string, string> = {
   GENERATING: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
   FAILED: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
   DRAFT: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300",
   PUBLISHED: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
-  ARCHIVED: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400",
 };
 const SUBMISSION_STATUS_META: Record<string, { label: string; cls: string }> = {
   SUBMITTED: { label: "待批改", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" },

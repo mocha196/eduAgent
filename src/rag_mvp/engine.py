@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from lightrag import LightRAG, QueryParam
-from loguru import logger
 from lightrag.utils import compute_mdhash_id
+from loguru import logger
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.utils import separate_content
 
@@ -22,7 +22,6 @@ from rag_mvp.multimodal_surrogate_chunks import (
 
 from .config import settings
 from .course_workspace import course_id_to_workspace
-from .mineru_cloud import MineruCloudError, parse_file_via_cloud
 from .embedding_factory import build_embedding_func
 from .llm import (
     _filtered_vision_model_func,
@@ -31,6 +30,7 @@ from .llm import (
     llm_model_func,
     vision_model_func,
 )
+from .mineru_cloud import MineruCloudError, parse_file_via_cloud
 from .postgres_env import ensure_postgres_env_from_database_url
 
 # ---------------------------------------------------------------------------
@@ -628,6 +628,7 @@ def query(
             (with MinerU parse + text LLM fallback if vision fails).
     """
     from typing import cast
+
     from lightrag import QueryParam
 
     _mode = cast(
@@ -722,6 +723,7 @@ async def _download_cdn_images_async(
     the item's img_path is cleared so raganything falls back to caption-only.
     """
     import hashlib as _hashlib
+
     import httpx
 
     cdn_items = [
@@ -1188,7 +1190,7 @@ def _get_lightrag_psycopg_dsn() -> str:
     Strips the ``schema`` query-param which psycopg does not understand.
     """
     import os as _os
-    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
     dsn = _os.environ.get("LIGHTRAG_PG_DSN", "").strip() or _os.environ.get("DATABASE_URL", "").strip()
     if not dsn:

@@ -498,6 +498,53 @@ async def _generate_scenario(entity_name: str, context: str, objective: str, _tr
         return ""
 
 
+class ObjectiveGenerationStrategy:
+    def __init__(self, objective: str) -> None:
+        self.objective = objective
+
+    async def enrich_context(
+        self,
+        entity_name: str,
+        context: str,
+        _trace: "Any | None" = None,
+    ) -> str:
+        return context
+
+    def build_prompt(
+        self,
+        entity_name: str,
+        context: str,
+        q_type: str,
+        difficulty: str,
+        focus: str,
+    ) -> str:
+        return _build_prompt(entity_name, context, q_type, self.objective, difficulty, focus)
+
+
+class ScenarioObjectiveStrategy(ObjectiveGenerationStrategy):
+    async def enrich_context(
+        self,
+        entity_name: str,
+        context: str,
+        _trace: "Any | None" = None,
+    ) -> str:
+        scenario = await _generate_scenario(entity_name, context, self.objective, _trace)
+        return f"{context}\n\n【情境/分析】\n{scenario}" if scenario else context
+
+
+_OBJECTIVE_STRATEGIES: dict[str, ObjectiveGenerationStrategy] = {
+    "knowledge": ObjectiveGenerationStrategy("knowledge"),
+    "comprehension": ObjectiveGenerationStrategy("comprehension"),
+    "application": ScenarioObjectiveStrategy("application"),
+    "synthesis": ScenarioObjectiveStrategy("synthesis"),
+    "innovation": ObjectiveGenerationStrategy("innovation"),
+}
+
+
+def _get_objective_strategy(objective: str) -> ObjectiveGenerationStrategy:
+    return _OBJECTIVE_STRATEGIES.get(objective, ObjectiveGenerationStrategy(objective))
+
+
 async def _generate_one(
     entity_name: str,
     context: str,
@@ -517,14 +564,9 @@ async def _generate_one(
       Stage 1 – generate a scenario or multi-entity analysis (natural language).
       Stage 2 – generate the structured question based on the enriched context.
     """
-    # Two-stage generation for application and synthesis
-    if objective in ("application", "synthesis"):
-        scenario = await _generate_scenario(entity_name, context, objective, _trace)
-        enriched_context = f"{context}\n\n【情境/分析】\n{scenario}" if scenario else context
-    else:
-        enriched_context = context
-
-    prompt = _build_prompt(entity_name, enriched_context, q_type, objective, difficulty, focus)
+    strategy = _get_objective_strategy(objective)
+    enriched_context = await strategy.enrich_context(entity_name, context, _trace)
+    prompt = strategy.build_prompt(entity_name, enriched_context, q_type, difficulty, focus)
     parsed = await _call_question_llm(entity_name, q_type, prompt, _SYSTEM_PROMPT, _trace)
     if parsed is None:
         return None

@@ -427,7 +427,7 @@ export async function getAssignmentAnalytics(
   const assignments = await prisma.assignment.findMany({
     where: {
       courseId,
-      status: { in: ["PUBLISHED", "ARCHIVED"] },
+      status: { in: ["PUBLISHED"] },
       ...(assignmentId ? { id: assignmentId } : {}),
     },
     select: { id: true, title: true, questions: true },

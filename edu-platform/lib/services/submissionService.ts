@@ -2,13 +2,21 @@ import { after } from "next/server";
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/http/api-error";
 import { assertTeacherOfCourse, assertUuid, getCourseIfMember } from "@/lib/course-access";
-import { getLLMClient, getRoleConfig, getMemoryModel } from "@/lib/agent/llm-registry";
+import { getLLMClient, getMemoryModel } from "@/lib/agent/llm-registry";
 import { MemoryExtractor, type SubmissionMemoryContext } from "@/lib/agent/memory/memory-extractor";
 import { memoryStore } from "@/lib/agent/memory/memory-store";
 import { runWithUserLlm } from "@/lib/agent/user-llm-store";
-import { createStandaloneTrace, flushLangfuse, recordGeneration } from "@/lib/agent/tracing/langfuse-tracer";
-import { AssignmentStatus, SubmissionStatus, UserRole } from "@prisma/client";
+import { SubmissionStatus, UserRole } from "@prisma/client";
 import { createNotification, createBulkNotifications } from "@/lib/services/notificationService";
+import {
+  assertCanOverrideSubmissionGrades,
+  assertCanReadStudentGrading,
+  assertCanResubmitSubmission,
+  assertCanReturnSubmission,
+  assertCanSubmitAssignment,
+  shouldSkipAutoGrading,
+} from "@/lib/domain/submission-lifecycle";
+import { gradingStrategyRegistry } from "@/lib/services/grading/grading-strategies";
 import type {
   GradingResultDto,
   OverrideGradesBody,
@@ -71,96 +79,6 @@ function toDetail(row: {
   };
 }
 
-/** Auto-grade objective questions (single/multi choice). All-or-nothing. */
-function gradeObjective(question: QuestionItem, studentAnswer: string): QuestionGradeItem {
-  const correct =
-    studentAnswer.trim().toLowerCase() === question.answer.trim().toLowerCase();
-  return {
-    questionId: question.id,
-    score: correct ? question.score : 0,
-    maxScore: question.score,
-    isCorrect: correct,
-    feedback: correct ? "回答正确。" : `正确答案为：${question.answer}`,
-    source: "AUTO",
-    correctAnswer: question.answer,
-  };
-}
-
-/** AI-grade subjective questions (fill_blank / short_answer) via LLM_AUXILIARY_MODEL. */
-async function gradeSubjective(
-  question: QuestionItem,
-  studentAnswer: string,
-): Promise<QuestionGradeItem> {
-  const config = getRoleConfig("grading");
-  const client = getLLMClient("grading");
-  const trace = createStandaloneTrace({
-    name: "teaching.grade_subjective",
-    metadata: { questionId: question.id, type: question.type, model: config.model },
-  });
-
-  const prompt = `你是一位严谨的教育工作者，请根据以下信息对学生答案进行评分。
-
-题目：${question.question}
-题型：${question.type === "fill_blank" ? "填空题" : "简答题"}
-参考答案：${question.answer}
-答案解析：${question.explanation}
-满分：${question.score}分
-
-学生答案：${studentAnswer}
-
-请按以下JSON格式返回评分结果（不要包含其他内容）：
-{"score": <0到${question.score}之间的数字>, "feedback": "<简洁的中文评语，说明得分原因>"}`;
-
-  try {
-    const resp = await client.chat.completions.create({
-      model: config.model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-      max_tokens: 256,
-    });
-    const raw = resp.choices[0]?.message?.content ?? "";
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]) as { score: number; feedback: string };
-      const score = Math.max(0, Math.min(question.score, Number(parsed.score) || 0));
-      recordGeneration(trace, {
-        name: "grade_subjective_llm",
-        model: config.model,
-        input: [{ role: "user", content: prompt }],
-        output: { score, feedback: parsed.feedback },
-        usage: {
-          promptTokens: resp.usage?.prompt_tokens,
-          completionTokens: resp.usage?.completion_tokens,
-          totalTokens: resp.usage?.total_tokens,
-        },
-      });
-      void flushLangfuse();
-      return {
-        questionId: question.id,
-        score,
-        maxScore: question.score,
-        isCorrect: score >= question.score,
-        feedback: parsed.feedback ?? "",
-        source: "AI",
-        correctAnswer: question.answer,
-      };
-    }
-  } catch {
-    // Fall through to partial-credit fallback
-  }
-
-  // Fallback: give half credit
-  return {
-    questionId: question.id,
-    score: Math.floor(question.score / 2),
-    maxScore: question.score,
-    isCorrect: null,
-    feedback: "AI 评分失败，已给予参考分值，请教师手动复核。",
-    source: "AI",
-    correctAnswer: question.answer,
-  };
-}
-
 // ── Public service functions ─────────────────────────────────────────────────
 
 /** Student submits (or re-submits before deadline) answers for a published assignment. */
@@ -183,20 +101,13 @@ export async function submitAssignment(
     where: { id: assignmentId, courseId },
   });
   if (!assignment) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
-  if (assignment.status !== AssignmentStatus.PUBLISHED) {
-    throw new ApiError(400, "NOT_PUBLISHED", "Assignment is not published");
-  }
-  if (assignment.deadline && new Date() > assignment.deadline) {
-    throw new ApiError(403, "DEADLINE_PASSED", "Submission deadline has passed");
-  }
+  assertCanSubmitAssignment(assignment.status, assignment.deadline);
 
   // Check if there's an existing RETURNED submission (cannot re-submit after grading returned)
   const existing = await prisma.assignmentSubmission.findUnique({
     where: { assignmentId_studentId: { assignmentId, studentId } },
   });
-  if (existing?.status === SubmissionStatus.RETURNED) {
-    throw new ApiError(409, "ALREADY_RETURNED", "Your submission has already been returned; re-submission is not allowed");
-  }
+  assertCanResubmitSubmission(existing?.status);
 
   const submission = await prisma.assignmentSubmission.upsert({
     where: { assignmentId_studentId: { assignmentId, studentId } },
@@ -260,7 +171,7 @@ export async function triggerGrading(submissionId: string): Promise<void> {
     include: { assignment: true },
   });
   if (!submission) return;
-  if (submission.status === SubmissionStatus.RETURNED) return;
+  if (shouldSkipAutoGrading(submission.status)) return;
 
   // Mark as GRADING
   await prisma.assignmentSubmission.update({
@@ -276,23 +187,16 @@ export async function triggerGrading(submissionId: string): Promise<void> {
   const questionGrades: QuestionGradeItem[] = await runWithUserLlm(
     submission.studentId,
     async () => {
-  const grades: QuestionGradeItem[] = [];
+      const grades: QuestionGradeItem[] = [];
 
-  for (const question of questions) {
-    const studentAnswer =
-      answers.find((a) => a.questionId === question.id)?.answer ?? "";
-
-    if (
-      question.type === "single_choice" ||
-      question.type === "multi_choice"
-    ) {
-      grades.push(gradeObjective(question, studentAnswer));
-    } else {
-      grades.push(await gradeSubjective(question, studentAnswer));
-    }
-  }
-  return grades;
-  }, // end runWithUserLlm
+      for (const question of questions) {
+        const studentAnswer =
+          answers.find((a) => a.questionId === question.id)?.answer ?? "";
+        const strategy = gradingStrategyRegistry.get(question.type);
+        grades.push(await strategy.grade(question, studentAnswer));
+      }
+      return grades;
+    }, // end runWithUserLlm
   );
 
   const totalScore = questionGrades.reduce((s, g) => s + g.score, 0);
@@ -339,6 +243,8 @@ export async function getMySubmission(
   if (row.status !== SubmissionStatus.RETURNED) {
     detail.gradingResult = null;
     detail.teacherFeedback = null;
+  } else {
+    assertCanReadStudentGrading(row.status);
   }
   return detail;
 }
@@ -416,12 +322,7 @@ export async function overrideGrades(
     include: { student: { select: { realName: true, username: true } } },
   });
   if (!row) throw new ApiError(404, "NOT_FOUND", "Submission not found");
-  if (
-    row.status !== SubmissionStatus.GRADED &&
-    row.status !== SubmissionStatus.RETURNED
-  ) {
-    throw new ApiError(400, "NOT_GRADED", "Submission has not been graded yet");
-  }
+  assertCanOverrideSubmissionGrades(row.status);
 
   const existing = (row.gradingResult as unknown as GradingResultDto) ?? {
     totalScore: 0,
@@ -477,9 +378,7 @@ export async function returnSubmission(
     include: { student: { select: { realName: true, username: true } } },
   });
   if (!row) throw new ApiError(404, "NOT_FOUND", "Submission not found");
-  if (row.status !== SubmissionStatus.GRADED && row.status !== SubmissionStatus.RETURNED) {
-    throw new ApiError(400, "NOT_GRADED", "Submission must be in GRADED status to return");
-  }
+  assertCanReturnSubmission(row.status);
 
   const saved = await prisma.assignmentSubmission.update({
     where: { id: submissionId },

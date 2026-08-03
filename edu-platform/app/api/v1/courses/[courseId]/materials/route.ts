@@ -60,6 +60,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (!(file instanceof File)) {
       throw new ApiError(400, "VALIDATION_ERROR", "multipart field 'file' is required");
     }
+    
     const lessonRaw = form.get("lesson_id");
     const textOnlyRaw = form.get("text_only");
     const skipKgRaw = form.get("skip_kg");

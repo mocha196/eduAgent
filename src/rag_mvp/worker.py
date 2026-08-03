@@ -11,21 +11,9 @@ import redis
 from dotenv import load_dotenv
 from loguru import logger
 
-from rag_mvp.logging_setup import configure_logging
 from rag_mvp.db import connect_sync
-from rag_mvp.material_processor import (
-    process_convert_preview,
-    process_delete_material,
-    process_index_only,
-    process_parse_and_index,
-    process_personal_convert_preview,
-    process_personal_delete_material,
-    process_personal_index_only,
-    process_personal_parse_and_index,
-    process_personal_transcribe_and_index,
-    process_repair_preview,
-    process_transcribe_and_index,
-)
+from rag_mvp.logging_setup import configure_logging
+from rag_mvp.task_handlers import get_task_handler
 from rag_mvp.worker_async_loop import start_worker_async_loop, stop_worker_async_loop
 
 
@@ -133,45 +121,10 @@ def _process_one(conn: Any, r: redis.Redis, fields: dict[str, str]) -> None:
     op = fields.get("operation")
     text_only = _parse_bool_field(fields.get("text_only"), default=True)
     skip_kg = _parse_bool_field(fields.get("skip_kg"), default=True)
-    if op == "assignment.generate":
-        from rag_mvp.assignment_gen import generate_assignment
-        import json as _json
-        assignment_id = (fields.get("assignment_id") or "").strip()
-        course_id = (fields.get("course_id") or "").strip()
-        teacher_request = fields.get("teacher_request", "")
-        if not assignment_id or not course_id:
-            raise ValueError("missing assignment_id or course_id")
-        structured_params_raw = (fields.get("structured_params") or "").strip()
-        structured_params = _json.loads(structured_params_raw) if structured_params_raw else None
-        generate_assignment(assignment_id, course_id, teacher_request, conn, structured_params=structured_params)
-        return
-    material_id = (fields.get("material_id") or "").strip()
-    if not material_id:
-        raise ValueError("missing material_id")
-    if op == "parse_and_index":
-        process_parse_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
-    elif op == "index_only":
-        process_index_only(conn, material_id, text_only=text_only, skip_kg=skip_kg)
-    elif op == "delete_material":
-        process_delete_material(conn, material_id)
-    elif op == "repair_preview":
-        process_repair_preview(conn, material_id)
-    elif op == "convert_preview":
-        process_convert_preview(conn, material_id, text_only=text_only, skip_kg=skip_kg)
-    elif op == "transcribe_and_index":
-        process_transcribe_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
-    elif op == "personal_parse_and_index":
-        process_personal_parse_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
-    elif op == "personal_convert_preview":
-        process_personal_convert_preview(conn, material_id, text_only=text_only, skip_kg=skip_kg)
-    elif op == "personal_delete_material":
-        process_personal_delete_material(conn, material_id)
-    elif op == "personal_transcribe_and_index":
-        process_personal_transcribe_and_index(conn, material_id, text_only=text_only, skip_kg=skip_kg, r=r)
-    elif op == "personal_index_only":
-        process_personal_index_only(conn, material_id, text_only=text_only, skip_kg=skip_kg)
-    else:
+    handler = get_task_handler(op)
+    if handler is None:
         raise ValueError(f"unknown operation: {op!r}")
+    handler(conn, r, fields, text_only, skip_kg)
 
 
 def _handle_entries(

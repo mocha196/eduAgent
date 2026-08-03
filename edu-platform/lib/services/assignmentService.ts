@@ -3,6 +3,14 @@ import { getRedis } from "@/lib/redis";
 import { ApiError } from "@/lib/http/api-error";
 import { assertTeacherOfCourse, assertUuid, getCourseIfMember } from "@/lib/course-access";
 import { createNotification, createBulkNotifications } from "@/lib/services/notificationService";
+import {
+  assertAssignmentIsPublished,
+  assertCanAddAssignmentQuestion,
+  assertCanEditAssignment,
+  assertCanPreviewAssignmentQuestion,
+  assertCanPublishAssignment,
+  assertCanRegenerateAssignmentQuestion,
+} from "@/lib/domain/assignment-lifecycle";
 
 import { AssignmentStatus, UserRole } from "@prisma/client";
 import type {
@@ -193,8 +201,7 @@ export async function patchAssignment(
     where: { id: assignmentId, courseId },
   });
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
-  if (existing.status !== AssignmentStatus.DRAFT)
-    throw new ApiError(409, "CONFLICT", "Only DRAFT assignments can be edited");
+  assertCanEditAssignment(existing.status);
 
   const updated = await prisma.assignment.update({
     where: { id: assignmentId },
@@ -224,8 +231,7 @@ export async function publishAssignment(
     where: { id: assignmentId, courseId },
   });
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
-  if (existing.status !== AssignmentStatus.DRAFT)
-    throw new ApiError(409, "CONFLICT", "Only DRAFT assignments can be published");
+  assertCanPublishAssignment(existing.status);
 
   const updated = await prisma.assignment.update({
     where: { id: assignmentId },
@@ -277,8 +283,7 @@ export async function regenerateQuestion(
   body: RegenerateQuestionBody,
 ): Promise<QuestionItem> {
   const assignment = await getAssignment(teacherId, role, courseId, assignmentId);
-  if (assignment.status !== AssignmentStatus.DRAFT)
-    throw new ApiError(409, "CONFLICT", "Can only regenerate questions for DRAFT assignments");
+  assertCanRegenerateAssignmentQuestion(assignment.status);
 
   const ragBase = (process.env.RAG_SERVICE_URL ?? "http://localhost:8001").replace(/\/+$/, "");
   const ragKey = process.env.RAG_SERVICE_API_KEY?.trim();
@@ -351,8 +356,7 @@ export async function previewTeacherQuestion(
   body: Omit<CompleteQuestionBody, "score">,
 ): Promise<QuestionItem> {
   const assignment = await getAssignment(teacherId, role, courseId, assignmentId);
-  if (assignment.status !== AssignmentStatus.DRAFT)
-    throw new ApiError(409, "CONFLICT", "Can only preview questions for DRAFT assignments");
+  assertCanPreviewAssignmentQuestion(assignment.status);
 
   const ragBase = (process.env.RAG_SERVICE_URL ?? "http://localhost:8001").replace(/\/+$/, "");
   const ragKey = process.env.RAG_SERVICE_API_KEY?.trim();
@@ -389,8 +393,7 @@ export async function completeTeacherQuestion(
   body: CompleteQuestionBody,
 ): Promise<QuestionItem> {
   const assignment = await getAssignment(teacherId, role, courseId, assignmentId);
-  if (assignment.status !== AssignmentStatus.DRAFT)
-    throw new ApiError(409, "CONFLICT", "Can only add questions to DRAFT assignments");
+  assertCanAddAssignmentQuestion(assignment.status);
 
   const ragBase = (process.env.RAG_SERVICE_URL ?? "http://localhost:8001").replace(/\/+$/, "");
   const ragKey = process.env.RAG_SERVICE_API_KEY?.trim();
@@ -491,6 +494,7 @@ export async function getAssignmentForStudent(
     where: { id: assignmentId, courseId, status: AssignmentStatus.PUBLISHED },
   });
   if (!a) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
+  assertAssignmentIsPublished(a.status);
 
   const questions = Array.isArray(a.questions)
     ? (a.questions as unknown as QuestionItem[]).map<StudentQuestionItem>((q) => ({

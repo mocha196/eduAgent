@@ -26,17 +26,18 @@ import shutil
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import boto3
+import psycopg
 import redis
 from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
-import psycopg
 from psycopg import sql
+
 try:
     import requests as _requests
 except ImportError:  # pragma: no cover
@@ -62,7 +63,6 @@ from rag_mvp.engine import (
     ingest_text_into_personal_async,
     ingest_text_into_personal_sync,
     parse_file,
-
 )
 from rag_mvp.worker_async_loop import is_worker_async_loop_started, run_worker_coroutine
 
@@ -251,7 +251,7 @@ class MaterialCancelledError(Exception):
     """Raised when a cancel signal is detected during processing."""
 
 
-def _is_cancel_requested(r: "redis.Redis", material_id: str) -> bool:
+def _is_cancel_requested(r: redis.Redis, material_id: str) -> bool:
     """Return True if the Next.js cancel API has set the interrupt key."""
     try:
         return bool(r.exists(_cancel_redis_key(material_id)))
@@ -260,7 +260,7 @@ def _is_cancel_requested(r: "redis.Redis", material_id: str) -> bool:
         return False
 
 
-def _raise_if_cancelled(r: "redis.Redis", material_id: str, checkpoint: str) -> None:
+def _raise_if_cancelled(r: redis.Redis, material_id: str, checkpoint: str) -> None:
     """Raise MaterialCancelledError if a cancel signal is present."""
     if _is_cancel_requested(r, material_id):
         logger.info(
@@ -285,7 +285,7 @@ def _enqueue_parse_and_index_task(
             "task_id": str(uuid4()),
             "material_id": material_id,
             "operation": "parse_and_index",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "text_only": "true" if text_only else "false",
             "skip_kg": "true" if skip_kg else "false",
         },
@@ -306,7 +306,7 @@ def _enqueue_convert_preview_task(
             "task_id": str(uuid4()),
             "material_id": material_id,
             "operation": "convert_preview",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "text_only": "true" if text_only else "false",
             "skip_kg": "true" if skip_kg else "false",
         },
@@ -548,10 +548,9 @@ def _claim_material_for_index_retry(
     conn: psycopg.Connection, material_id: str
 ) -> dict[str, Any] | None:
     """Atomically move FAILED material to INDEXING for index-only retry."""
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 UPDATE materials m
                 SET status = 'INDEXING', updated_at = NOW(), status_message = NULL
                 FROM (
@@ -563,16 +562,16 @@ def _claim_material_for_index_retry(
                 RETURNING m.course_id::text, m.original_filename,
                           m.minio_path::text, m.file_type::text
                 """,
-                (material_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    "course_id": row[0],
-                    "original_filename": row[1],
-                    "minio_path": row[2],
-                    "file_type": row[3],
-                }
+            (material_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "course_id": row[0],
+                "original_filename": row[1],
+                "minio_path": row[2],
+                "file_type": row[3],
+            }
     return None
 
 
@@ -612,10 +611,9 @@ def _try_claim_convert_preview_row(
     conn: psycopg.Connection, material_id: str
 ) -> tuple[str, str | None] | None:
     """Lock UPLOADED + office + PENDING for Phase-1 conversion (SKIP LOCKED)."""
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 UPDATE materials m
                 SET updated_at = NOW()
                 FROM (
@@ -629,11 +627,11 @@ def _try_claim_convert_preview_row(
                 WHERE m.id = s.id
                 RETURNING m.minio_path::text, m.original_filename
                 """,
-                (material_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                return (str(row[0]), row[1])
+            (material_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return (str(row[0]), row[1])
     return None
 
 
@@ -643,10 +641,9 @@ def _claim_material_for_parse(
     """Atomically move material to PARSING when eligible; return row dict or None if skip."""
     stale = _material_stale_seconds()
     ex: tuple[Any, ...] | None = None
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 UPDATE materials m
                 SET status = 'PARSING', updated_at = NOW()
                 FROM (
@@ -668,24 +665,24 @@ def _claim_material_for_parse(
                 WHERE m.id = s.id
                 RETURNING m.course_id::text, m.minio_path, m.file_type, m.original_filename
                 """,
-                (material_id, stale),
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    "course_id": row[0],
-                    "minio_path": row[1],
-                    "file_type": row[2],
-                    "original_filename": row[3],
-                }
-            cur.execute(
-                """
+            (material_id, stale),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "course_id": row[0],
+                "minio_path": row[1],
+                "file_type": row[2],
+                "original_filename": row[3],
+            }
+        cur.execute(
+            """
                 SELECT course_id::text, minio_path, file_type, status::text, is_deleted
                 FROM materials WHERE id = %s::uuid
                 """,
-                (material_id,),
-            )
-            ex = cur.fetchone()
+            (material_id,),
+        )
+        ex = cur.fetchone()
     if ex is None:
         logger.error("Material {} not found", material_id)
         return None
@@ -783,16 +780,15 @@ def _upload_material_images_to_minio(
         logger.debug("No images found to upload for material {}", material_id)
         return
 
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            """
                 INSERT INTO material_images (id, material_id, page_idx, minio_url, created_at)
                 VALUES (gen_random_uuid(), %s::uuid, %s, %s, NOW())
                 ON CONFLICT DO NOTHING
                 """,
-                [(material_id, pg, url) for pg, url in uploaded],
-            )
+            [(material_id, pg, url) for pg, url in uploaded],
+        )
     logger.info("Uploaded {} images to MinIO for material {}", len(uploaded), material_id)
 
 
@@ -810,6 +806,7 @@ def _record_chunk_page_mappings(
     LightRAG uses when storing chunks in lightrag_vdb_chunks.
     """
     from lightrag.utils import compute_mdhash_id
+
     from rag_mvp.multimodal_surrogate_chunks import content_item_to_surrogate_text
 
     _VISUAL_TYPES = frozenset({"image", "table", "equation", "chart"})
@@ -838,16 +835,15 @@ def _record_chunk_page_mappings(
         logger.debug("No visual chunk-page mappings found for material {}", material_id)
         return
 
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            """
                 INSERT INTO chunk_page_mappings (id, material_id, chunk_id, page_idx)
                 VALUES (gen_random_uuid(), %s::uuid, %s, %s)
                 ON CONFLICT (material_id, chunk_id) DO UPDATE SET page_idx = EXCLUDED.page_idx
                 """,
-                mappings,
-            )
+            mappings,
+        )
     logger.info("Recorded {} chunk-page mappings for material {}", len(mappings), material_id)
 
 
@@ -1060,15 +1056,14 @@ def _generate_and_save_document_summary(
             logger.info("Document summary: empty result for material {}", material_id)
             return
 
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute(
-                    sql.SQL(
-                        "UPDATE {table} SET document_summary = %s, updated_at = NOW() "
-                        "WHERE id = %s::uuid AND is_deleted = false"
-                    ).format(table=sql.Identifier(table)),
-                    (summary, material_id),
-                )
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {table} SET document_summary = %s, updated_at = NOW() "
+                    "WHERE id = %s::uuid AND is_deleted = false"
+                ).format(table=sql.Identifier(table)),
+                (summary, material_id),
+            )
         logger.info(
             "Document summary saved for material {} ({} chars)", material_id, len(summary)
         )
@@ -1333,7 +1328,7 @@ def process_convert_preview(
             material_id,
         )
         return
-    minio_path_claimed, original_filename = claimed
+    minio_path_claimed, _original_filename = claimed
     work_parent = Path(tempfile.mkdtemp(prefix="edu_cvprev_"))
     suffix = Path(minio_path_claimed).suffix or ".bin"
     local_file = work_parent / f"{material_id}{suffix}"
@@ -1376,7 +1371,7 @@ def process_parse_and_index(
     *,
     text_only: bool = True,
     skip_kg: bool = True,
-    r: "redis.Redis | None" = None,
+    r: redis.Redis | None = None,
 ) -> None:
     """DB is source of truth; parse via engine.parse_file; ingest via LightRAG insert only."""
     # Checkpoint 0: before claiming the row — skip entirely if already cancelled.
@@ -1502,24 +1497,23 @@ def process_index_only(
 
 
 def process_delete_material(conn: psycopg.Connection, material_id: str) -> None:
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 SELECT course_id::text, is_deleted
                 FROM materials WHERE id = %s::uuid
                 """,
-                (material_id,),
+            (material_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            logger.error("delete_material: material {} not found", material_id)
+            return
+        course_id, is_deleted = row[0], row[1]
+        if not is_deleted:
+            raise RuntimeError(
+                f"delete_material: material {material_id} expected is_deleted=true",
             )
-            row = cur.fetchone()
-            if not row:
-                logger.error("delete_material: material {} not found", material_id)
-                return
-            course_id, is_deleted = row[0], row[1]
-            if not is_deleted:
-                raise RuntimeError(
-                    f"delete_material: material {material_id} expected is_deleted=true",
-                )
     _delete_material_rag_dispatch(course_id, material_id)
     logger.info("Deleted LightRAG document for material {} (course {})", material_id, course_id)
 
@@ -1588,7 +1582,7 @@ def process_transcribe_and_index(
     *,
     text_only: bool = True,
     skip_kg: bool = True,
-    r: "redis.Redis | None" = None,
+    r: redis.Redis | None = None,
 ) -> None:
     """Transcribe a video/audio file with Whisper, build a structured summary, then ingest into LightRAG.
 
@@ -1770,10 +1764,9 @@ def _claim_personal_material_for_parse(
     conn: psycopg.Connection, material_id: str
 ) -> dict[str, Any] | None:
     stale = _material_stale_seconds()
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 UPDATE personal_materials m
                 SET status = 'PARSING', updated_at = NOW()
                 FROM (
@@ -1795,16 +1788,16 @@ def _claim_personal_material_for_parse(
                 WHERE m.id = s.id
                 RETURNING m.user_id::text, m.minio_path, m.file_type, m.original_filename
                 """,
-                (material_id, stale),
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    "user_id": row[0],
-                    "minio_path": row[1],
-                    "file_type": row[2],
-                    "original_filename": row[3],
-                }
+            (material_id, stale),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "user_id": row[0],
+                "minio_path": row[1],
+                "file_type": row[2],
+                "original_filename": row[3],
+            }
     logger.info("personal_parse: material {} not claimable", material_id)
     return None
 
@@ -1939,21 +1932,19 @@ def _run_personal_material_download_parse_and_ingest(
                 try:
                     pdf_file = _convert_to_pdf(local_file, work_parent / "pdf_out")
                     _upload_preview_pdf_with_verify(pdf_file, preview_key)
-                    with conn.transaction():
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                """UPDATE personal_materials SET preview_pdf_status = 'READY',
+                    with conn.transaction(), conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE personal_materials SET preview_pdf_status = 'READY',
                                    updated_at = NOW() WHERE id = %s::uuid""",
-                                (material_id,),
-                            )
+                            (material_id,),
+                        )
                 except Exception:
-                    with conn.transaction():
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                """UPDATE personal_materials SET preview_pdf_status = 'FAILED',
+                    with conn.transaction(), conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE personal_materials SET preview_pdf_status = 'FAILED',
                                    updated_at = NOW() WHERE id = %s::uuid""",
-                                (material_id,),
-                            )
+                            (material_id,),
+                        )
                     raise
                 local_file = pdf_file
 
@@ -2019,7 +2010,7 @@ def process_personal_parse_and_index(
     *,
     text_only: bool = True,
     skip_kg: bool = True,
-    r: "redis.Redis | None" = None,
+    r: redis.Redis | None = None,
 ) -> None:
     if r is not None and _is_cancel_requested(r, material_id):
         logger.info("personal_parse_and_index: cancel signal before claim for {}", material_id)
@@ -2064,7 +2055,7 @@ def process_personal_transcribe_and_index(
     *,
     text_only: bool = True,
     skip_kg: bool = True,
-    r: "redis.Redis | None" = None,
+    r: redis.Redis | None = None,
 ) -> None:
     """Transcribe a personal video/audio file and ingest into the user's personal KB."""
     from rag_mvp.video_transcribe import transcribe_media_to_txt_file
@@ -2173,7 +2164,7 @@ def _enqueue_personal_parse_and_index_task(
             "task_id": str(uuid4()),
             "material_id": material_id,
             "operation": "personal_parse_and_index",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "text_only": "true" if text_only else "false",
             "skip_kg": "true" if skip_kg else "false",
         },
@@ -2358,7 +2349,7 @@ def process_personal_index_only(
             shutil.rmtree(stem_dir, ignore_errors=True)
         logger.success("Re-indexed personal material {} ({} chunks)", material_id, n)
     except Exception as exc:
-        logger.exception("personal_index_only failed for material {}", material_id)
+        logger.exception("personal_index_only failed for material {}， exception: {}", material_id, str(exc))
         with conn.transaction():
             update_personal_material_status(
                 conn, material_id, "FAILED", str(exc)[:2000], expect_status_in=("INDEXING",),

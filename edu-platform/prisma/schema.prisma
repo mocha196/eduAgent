@@ -38,7 +38,6 @@ enum AssignmentStatus {
   FAILED
   DRAFT
   PUBLISHED
-  ARCHIVED
 }
 
 enum SubmissionStatus {
