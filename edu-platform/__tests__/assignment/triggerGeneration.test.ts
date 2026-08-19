@@ -11,6 +11,7 @@ const {
   assignmentDeleteMock,
   assignmentFindFirstMock,
   assignmentUpdateMock,
+  assignmentUpdateManyMock,
   xAddMock,
   getRedisMock,
 } = vi.hoisted(() => ({
@@ -19,6 +20,7 @@ const {
   assignmentDeleteMock: vi.fn(),
   assignmentFindFirstMock: vi.fn(),
   assignmentUpdateMock: vi.fn(),
+  assignmentUpdateManyMock: vi.fn(),
   xAddMock: vi.fn(),
   getRedisMock: vi.fn(),
 }));
@@ -36,6 +38,7 @@ vi.mock("@/lib/db", () => ({
       delete: assignmentDeleteMock,
       findFirst: assignmentFindFirstMock,
       update: assignmentUpdateMock,
+      updateMany: assignmentUpdateManyMock,
     },
   },
 }));
@@ -175,11 +178,13 @@ describe("patchAssignment state machine (TC-ASSIGN-002)", () => {
 
   it("DRAFT status can be patched - should call update", async () => {
     const draftAssignment = makeAssignment(AssignmentStatus.DRAFT);
-    assignmentFindFirstMock.mockResolvedValue(draftAssignment);
-    assignmentUpdateMock.mockResolvedValue({
+    assignmentFindFirstMock
+      .mockResolvedValueOnce(draftAssignment)
+      .mockResolvedValueOnce({
       ...draftAssignment,
       title: "Updated Title",
-    });
+      });
+    assignmentUpdateManyMock.mockResolvedValue({ count: 1 });
 
     const { patchAssignment } = await import("@/lib/services/assignmentService");
 
@@ -192,7 +197,11 @@ describe("patchAssignment state machine (TC-ASSIGN-002)", () => {
     );
 
     expect(result.id).toBe(ASSIGNMENT_ID);
-    expect(assignmentUpdateMock).toHaveBeenCalled();
+    expect(assignmentUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: AssignmentStatus.DRAFT }),
+      }),
+    );
   });
 });
 
@@ -216,12 +225,14 @@ describe("publishAssignment state machine (TC-ASSIGN-002)", () => {
 
   it("DRAFT status can be published - returns PUBLISHED status", async () => {
     const draftAssignment = makeAssignment(AssignmentStatus.DRAFT);
-    assignmentFindFirstMock.mockResolvedValue(draftAssignment);
-    assignmentUpdateMock.mockResolvedValue({
+    assignmentFindFirstMock
+      .mockResolvedValueOnce(draftAssignment)
+      .mockResolvedValueOnce({
       ...draftAssignment,
       status: AssignmentStatus.PUBLISHED,
       publishedAt: new Date(),
-    });
+      });
+    assignmentUpdateManyMock.mockResolvedValue({ count: 1 });
 
     const { publishAssignment } = await import("@/lib/services/assignmentService");
 
@@ -233,7 +244,7 @@ describe("publishAssignment state machine (TC-ASSIGN-002)", () => {
     );
 
     expect(result.status).toBe(AssignmentStatus.PUBLISHED);
-    expect(assignmentUpdateMock).toHaveBeenCalledWith(
+    expect(assignmentUpdateManyMock).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: AssignmentStatus.PUBLISHED }),
       }),

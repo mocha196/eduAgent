@@ -64,6 +64,26 @@ describe("ToolRegistry", () => {
       type: "object",
       properties: { count: { type: "integer" } },
       required: ["count"],
+      additionalProperties: false,
     });
+  });
+
+  it("业务规则：注册时应编译可复用的运行时校验器", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "calculate",
+      description: "计算",
+      parameters: {
+        type: "object",
+        properties: { count: { type: "integer", minimum: 1, maximum: 20 } },
+        required: ["count"],
+      },
+      execute: async () => "ok",
+    });
+
+    const validator = registry.getValidator("calculate");
+    expect(validator?.safeParse({ count: 2 }).success).toBe(true);
+    expect(validator?.safeParse({ count: 0 }).success).toBe(false);
+    expect(validator?.safeParse({ count: 2, hidden: true }).success).toBe(false);
   });
 });

@@ -2,6 +2,10 @@
  * Core types for the TS Agent (Phase 3B).
  */
 
+import type { B3CitationEvent } from "./b3-protocol";
+
+export type { B3SseEvent } from "./b3-protocol";
+
 // ---- Message ----------------------------------------------------------------
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
@@ -28,16 +32,8 @@ export type ToolCall = {
 
 export type JSONSchema = Record<string, unknown>;
 
-/** Rich result from a tool that wants to emit citation events */
-export type ToolCitation = {
-  chunk_id?: string;
-  material_id?: string;
-  source_label?: string;
-  chunk_text?: string;
-  /** Full chunk text for evaluation (up to 1500 chars). Not shown in UI. */
-  eval_text?: string;
-  image_urls?: Array<{ page_idx: number; url: string }>;
-};
+/** Rich result from a tool that wants to emit citation events. */
+export type ToolCitation = Omit<B3CitationEvent, "type">;
 
 export type ToolResult = {
   /** Text returned to the LLM */
@@ -148,25 +144,3 @@ export type AgentConfig = {
    */
   approvalMode?: "require_user" | "auto";
 };
-
-// ---- SSE output (B3 protocol) -----------------------------------------------
-
-export type B3SseEvent =
-  | { type: "text"; content: string }
-  | { type: "citation"; chunk_id?: string; material_id?: string; source_label?: string; chunk_text?: string }
-  | { type: "tool_call"; name: string; tool_call_id?: string; input?: Record<string, unknown> }
-  | { type: "tool_progress"; tool_call_id: string; label: string }
-  | { type: "tool_result"; name: string; success?: boolean; duration_ms?: number; output?: string; meta?: Record<string, unknown> }
-  | { type: "done"; tokens?: number | null; exec_time_ms?: number | null; error?: string }
-  | { type: "trace"; trace_id?: string; event?: string; turn_id?: string; ts?: string; payload?: Record<string, unknown> }
-  | {
-      type: "require_approval";
-      tool_call_id: string;
-      tool_name: string;
-      /** Sanitised preview of tool arguments (values truncated to 120 chars). */
-      args_preview: Record<string, unknown>;
-      /** Opaque Redis key the frontend must echo back to /api/v1/chat/approval */
-      approval_key: string;
-      reason: string;
-    }
-  | { type: "approval_resolved"; tool_call_id: string; approved: boolean };

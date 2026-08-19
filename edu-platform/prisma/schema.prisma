@@ -369,6 +369,13 @@ model AssignmentSubmission {
 
   status SubmissionStatus @default(SUBMITTED) @map("status")
 
+  /// Unique token owned by the currently running grading attempt. Re-submission
+  /// clears it so a stale grader cannot commit results for older answers.
+  gradingToken String? @map("grading_token") @db.Uuid
+
+  /// Optimistic concurrency version for teacher-side grading mutations.
+  version Int @default(1)
+
   /// {totalScore, maxScore, questionGrades: [{questionId, score, maxScore, isCorrect, feedback, source}]}
   gradingResult Json? @map("grading_result")
 
@@ -576,9 +583,12 @@ model Notification {
   metadata  Json?            @map("metadata")
   isRead    Boolean          @default(false) @map("is_read")
   createdAt DateTime         @default(now()) @map("created_at")
+  /// Optional business idempotency key (unique per user).
+  dedupKey  String?          @map("dedup_key") @db.VarChar(255)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, isRead, createdAt(sort: Desc)])
+  @@unique([userId, dedupKey])
   @@map("notifications")
 }

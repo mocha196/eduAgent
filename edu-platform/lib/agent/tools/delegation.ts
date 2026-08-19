@@ -25,6 +25,8 @@ export const delegateTaskTool: Tool = {
     properties: {
       task: {
         type: "string",
+        minLength: 1,
+        maxLength: 4000,
         description: "自然语言描述的子任务，要求明确、可独立完成",
       },
       allowed_tools: {

@@ -37,10 +37,14 @@ export const runScriptTool: Tool = {
       },
       code: {
         type: "string",
+        minLength: 1,
+        maxLength: 8000,
         description: "要执行的脚本源码，最长 8000 字符。",
       },
       timeout_sec: {
         type: "number",
+        minimum: 5,
+        maximum: 60,
         description: "执行超时秒数，默认 30，最大 60。",
       },
     },

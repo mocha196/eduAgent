@@ -43,7 +43,7 @@ export const viewSkillTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      name: { type: "string", description: "技能名称（来自 list_skills）" },
+      name: { type: "string", minLength: 1, description: "技能名称（来自 list_skills）" },
       file: {
         type: "string",
         description:

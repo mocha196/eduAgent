@@ -166,7 +166,7 @@ export const knowledgeQueryTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      question: { type: "string", description: "要查询的自然语言问题" },
+      question: { type: "string", minLength: 1, maxLength: 2000, description: "要查询的自然语言问题" },
       mode: {
         type: "string",
         enum: ["naive", "mix", "hybrid", "local", "global"],
@@ -180,10 +180,16 @@ export const knowledgeQueryTool: Tool = {
           "必填。字符串：personal | course | all | enrolled_courses；或数组：[course, personal]。",
         oneOf: [
           { type: "string", enum: ["personal", "course", "all", "enrolled_courses"] },
-          { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2 },
+          {
+            type: "array",
+            items: { type: "string", enum: ["course", "personal"] },
+            minItems: 1,
+            maxItems: 2,
+            uniqueItems: true,
+          },
         ],
       },
-      top_k: { type: "integer", description: "返回最大片段数（默认 5，范围 1–20）" },
+      top_k: { type: "integer", minimum: 1, maximum: 20, description: "返回最大片段数（默认 5，范围 1–20）" },
     },
     required: ["question", "sources"],
   },

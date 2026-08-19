@@ -10,6 +10,23 @@ import { logger } from "@/lib/logger";
 const log = logger.child({ component: "session-store" });
 const TTL_SECONDS = 24 * 60 * 60;
 
+// Keep the existing JSON representation while making append atomic across
+// Node processes. Redis executes Lua scripts as a single operation.
+const APPEND_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+local messages = {}
+if current then
+  local ok, decoded = pcall(cjson.decode, current)
+  if ok and type(decoded) == 'table' then messages = decoded end
+end
+local additions = cjson.decode(ARGV[1])
+for i = 1, #additions do
+  messages[#messages + 1] = additions[i]
+end
+redis.call('SET', KEYS[1], cjson.encode(messages), 'EX', ARGV[2])
+return #messages
+`;
+
 function _key(sessionId: string): string {
   return `agent:session:${sessionId}`;
 }
@@ -33,10 +50,11 @@ export class SessionStore {
 
   async append(sessionId: string, messages: Message[]): Promise<void> {
     const redis = await getRedis();
-    const existing = await this.get(sessionId);
-    const merged = [...existing, ...messages];
-    await redis.set(_key(sessionId), JSON.stringify(merged), { EX: TTL_SECONDS });
-    log.debug({ sessionId, addedCount: messages.length, totalCount: merged.length }, "session append");
+    const totalCount = await redis.eval(APPEND_SCRIPT, {
+      keys: [_key(sessionId)],
+      arguments: [JSON.stringify(messages), String(TTL_SECONDS)],
+    });
+    log.debug({ sessionId, addedCount: messages.length, totalCount }, "session append");
   }
 
   async set(sessionId: string, messages: Message[]): Promise<void> {

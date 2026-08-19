@@ -104,7 +104,11 @@ describe("createReActStream", () => {
     toolRegistry.register({
       name: "knowledge_query",
       description: "查询",
-      parameters: { type: "object", properties: {} },
+      parameters: {
+        type: "object",
+        properties: { question: { type: "string" } },
+        required: ["question"],
+      },
       execute: executeMock,
     });
 
@@ -132,10 +136,6 @@ describe("createReActStream", () => {
           { choices: [{ delta: {} }], usage: { total_tokens: 12 } },
         ]),
       )
-      // reflection call (non-streaming): returns "sufficient: true"
-      .mockResolvedValueOnce({
-        choices: [{ message: { content: '{"sufficient":true,"reasoning":"info_ok"}' } }],
-      })
       .mockResolvedValueOnce(
         makeStream([
           { choices: [{ delta: { content: "结论：TCP 通过三次握手建立连接。" } }] },
@@ -202,7 +202,11 @@ describe("createReActStream", () => {
     toolRegistry.register({
       name: "delegate_task",
       description: "危险委派",
-      parameters: { type: "object", properties: {} },
+      parameters: {
+        type: "object",
+        properties: { task: { type: "string" } },
+        required: ["task"],
+      },
       requiresApproval: true,
       execute: dangerousExecute,
     });

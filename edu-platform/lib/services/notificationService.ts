@@ -41,19 +41,32 @@ export async function createNotification(params: {
   title: string;
   body: string;
   metadata?: Record<string, unknown>;
+  dedupKey?: string;
 }): Promise<NotificationDto> {
-  const row = await prisma.notification.create({
-    data: {
-      userId: params.userId,
-      type: params.type,
-      title: params.title,
-      body: params.body,
-      metadata: (params.metadata ?? undefined) as object | undefined,
-    },
-  });
+  const data = {
+    userId: params.userId,
+    type: params.type,
+    title: params.title,
+    body: params.body,
+    metadata: (params.metadata ?? undefined) as object | undefined,
+    dedupKey: params.dedupKey,
+  };
+  let row;
+  let created = true;
+  try {
+    row = await prisma.notification.create({ data });
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (!params.dedupKey || code !== "P2002") throw error;
+    created = false;
+    row = await prisma.notification.findFirst({
+      where: { userId: params.userId, dedupKey: params.dedupKey },
+    });
+    if (!row) throw error;
+  }
   const dto = toDto(row);
   // Best-effort real-time push; failures are logged inside publishNotification.
-  void publishNotification(params.userId, dto as NotificationPayload);
+  if (created) void publishNotification(params.userId, dto as NotificationPayload);
   return dto;
 }
 
@@ -64,8 +77,24 @@ export async function createBulkNotifications(params: {
   title: string;
   body: string;
   metadata?: Record<string, unknown>;
+  dedupKey?: string;
 }): Promise<void> {
   if (params.userIds.length === 0) return;
+  if (params.dedupKey) {
+    await Promise.all(
+      params.userIds.map((userId) =>
+        createNotification({
+          userId,
+          type: params.type,
+          title: params.title,
+          body: params.body,
+          metadata: params.metadata,
+          dedupKey: params.dedupKey,
+        }),
+      ),
+    );
+    return;
+  }
   // createMany is faster but doesn't return rows; publish separately.
   await prisma.notification.createMany({
     data: params.userIds.map((userId) => ({

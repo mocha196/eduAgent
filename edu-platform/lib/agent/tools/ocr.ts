@@ -18,10 +18,12 @@ export const parseDocumentTool: Tool = {
     properties: {
       filename: {
         type: "string",
+        minLength: 1,
         description: "文件名（含扩展名，如 lecture.pdf）",
       },
       base64_content: {
         type: "string",
+        minLength: 1,
         description: "文件内容的 base64 编码字符串（标准 base64，不含 data URI 前缀）",
       },
     },

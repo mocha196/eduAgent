@@ -81,10 +81,14 @@ export const analyzeImageTool: Tool = {
       image_urls: {
         type: "array",
         items: { type: "string" },
+        minItems: 1,
+        maxItems: 10,
         description: "要分析的图片 URL 列表（presigned URL 或 data URI）",
       },
       question: {
         type: "string",
+        minLength: 1,
+        maxLength: 2000,
         description: "对图片提出的具体问题，例如：「图中有哪些网络节点？」「图中的公式是什么？」",
       },
     },

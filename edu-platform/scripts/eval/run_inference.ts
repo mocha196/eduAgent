@@ -35,6 +35,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, resolve } from "path";
 import { SignJWT } from "jose";
+import { parseB3SseEventJson } from "../../lib/agent/b3-protocol";
 
 // ---------------------------------------------------------------------------
 // Load .env (edu-platform/.env or repo-root .env)
@@ -187,19 +188,6 @@ async function getOrGenerateToken(): Promise<string> {
 // ---------------------------------------------------------------------------
 // SSE chat endpoint
 // ---------------------------------------------------------------------------
-interface SseEvent {
-  type: string;
-  content?: string;
-  name?: string;
-  input?: unknown;
-  output?: unknown;
-  success?: boolean;
-  duration_ms?: number;
-  tokens?: number;
-  exec_time_ms?: number;
-  error?: string;
-}
-
 async function callChatEndpoint(
   baseUrl: string,
   courseId: string,
@@ -244,11 +232,9 @@ async function callChatEndpoint(
     if (!line.startsWith("data: ")) continue;
     const payload = line.slice(6).trim();
     if (!payload || payload === "[DONE]") continue;
-    let evt: SseEvent;
-    try {
-      evt = JSON.parse(payload);
-    } catch {
-      if (verbose) console.error(`  [sse] JSON parse failed: ${payload.slice(0, 120)}`);
+    const evt = parseB3SseEventJson(payload);
+    if (!evt) {
+      if (verbose) console.error(`  [sse] invalid B3 event: ${payload.slice(0, 120)}`);
       continue;
     }
     if (evt.type === "text") {

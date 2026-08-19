@@ -203,8 +203,8 @@ export async function patchAssignment(
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
   assertCanEditAssignment(existing.status);
 
-  const updated = await prisma.assignment.update({
-    where: { id: assignmentId },
+  const changed = await prisma.assignment.updateMany({
+    where: { id: assignmentId, courseId, status: AssignmentStatus.DRAFT },
     data: {
       ...(body.title !== undefined && { title: body.title }),
       ...(body.description !== undefined && { description: body.description }),
@@ -215,6 +215,11 @@ export async function patchAssignment(
       ...(body.questions !== undefined && { questions: body.questions as any }),
     },
   });
+  if (changed.count === 0) {
+    throw new ApiError(409, "CONFLICT", "Assignment changed or is no longer editable");
+  }
+  const updated = await prisma.assignment.findFirst({ where: { id: assignmentId, courseId } });
+  if (!updated) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
   return toDetail(updated);
 }
 
@@ -233,13 +238,18 @@ export async function publishAssignment(
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
   assertCanPublishAssignment(existing.status);
 
-  const updated = await prisma.assignment.update({
-    where: { id: assignmentId },
+  const changed = await prisma.assignment.updateMany({
+    where: { id: assignmentId, courseId, status: AssignmentStatus.DRAFT },
     data: {
       status: AssignmentStatus.PUBLISHED,
       publishedAt: new Date(),
     },
   });
+  if (changed.count === 0) {
+    throw new ApiError(409, "CONFLICT", "Assignment is no longer publishable");
+  }
+  const updated = await prisma.assignment.findFirst({ where: { id: assignmentId, courseId } });
+  if (!updated) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
 
   // Best-effort: notify teacher + enrolled students asynchronously.
   void (async () => {
@@ -257,6 +267,7 @@ export async function publishAssignment(
         title: "作业已发布",
         body: `《${updated.title}》已成功发布。`,
         metadata: meta,
+        dedupKey: `assignment-published:${assignmentId}`,
       });
       if (studentIds.length > 0) {
         void createBulkNotifications({
@@ -265,6 +276,7 @@ export async function publishAssignment(
           title: "新作业已发布",
           body: `《${course.name}》有新作业《${updated.title}》，请尽快完成。`,
           metadata: meta,
+          dedupKey: `assignment-published:${assignmentId}`,
         });
       }
     } catch {

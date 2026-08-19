@@ -1,5 +1,12 @@
 import { prisma } from "@/lib/db";
-import type { ExecutionPayload } from "@/lib/agent/react-loop";
+import {
+  parseB3SseEventJson,
+  type B3CitationEvent,
+  type B3SseEvent,
+  type ExecutionPayload,
+} from "@/lib/agent/b3-protocol";
+
+export type { B3SseEvent } from "@/lib/agent/b3-protocol";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const px = prisma as any;
@@ -40,63 +47,10 @@ type ToolCallRecord = {
   meta?: Record<string, unknown>;
 };
 
-type PersistedCitation = {
-  chunk_id?: string;
-  material_id?: string;
-  source_label?: string;
-  chunk_text?: string;
-  image_urls?: Array<{ page_idx: number; url: string }>;
-};
-
-export type B3SseEvent =
-  | { type: "text"; content: string }
-  | {
-      type: "citation";
-      chunk_id?: string;
-      material_id?: string;
-      source_label?: string;
-      chunk_text?: string;
-      image_urls?: Array<{ page_idx: number; url: string }>;
-    }
-  | {
-      type: "tool_call";
-      name: string;
-      tool_call_id?: string;
-      input?: Record<string, unknown>;
-    }
-  | {
-      type: "tool_result";
-      name: string;
-      success?: boolean;
-      duration_ms?: number;
-      output?: string;
-      execution?: ExecutionPayload;
-      meta?: Record<string, unknown>;
-    }
-  | {
-      type: "done";
-      tokens?: number | null;
-      exec_time_ms?: number | null;
-      error?: string;
-    }
-  | {
-      type: "trace";
-      trace_id?: string;
-      event?: string;
-      turn_id?: string;
-      ts?: string;
-      payload?: Record<string, unknown>;
-    }
-  | {
-      type: "require_approval";
-      tool_call_id: string;
-      tool_name: string;
-      args_preview: Record<string, unknown>;
-      approval_key: string;
-      reason: string;
-      full_code?: string;
-    }
-  | { type: "approval_resolved"; tool_call_id: string; approved: boolean };
+type PersistedCitation = Pick<
+  B3CitationEvent,
+  "chunk_id" | "material_id" | "source_label" | "chunk_text" | "image_urls"
+>;
 
 const enc = new TextEncoder();
 
@@ -525,14 +479,10 @@ function createB3PersistTransform(
         const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
         if (!dataLine) continue;
         const jsonStr = dataLine.slice("data: ".length);
-        let ev: { type: string; [k: string]: unknown };
-        try {
-          ev = JSON.parse(jsonStr) as typeof ev;
-        } catch {
-          continue;
-        }
+        const ev = parseB3SseEventJson(jsonStr);
+        if (!ev) continue;
         if (ev.type === "text") {
-          const content = (ev.content as string) ?? "";
+          const content = ev.content;
           fullAnswer += content;
           // Merge consecutive text tokens into a single text item
           const last = timelineItems[timelineItems.length - 1];
@@ -543,27 +493,25 @@ function createB3PersistTransform(
           }
         } else if (ev.type === "tool_call") {
           // Store input args keyed by tool_call_id (preferred) or name
-          const pendingKey = (ev.tool_call_id as string | undefined) ?? (ev.name as string);
-          if (pendingKey && ev.input && typeof ev.input === "object") {
-            pendingInputs.set(pendingKey, ev.input as Record<string, unknown>);
+          const pendingKey = ev.tool_call_id ?? ev.name;
+          if (ev.input) {
+            pendingInputs.set(pendingKey, ev.input);
           }
           // Push a running tool item and remember its index
-          const clientKey = (ev.tool_call_id as string | undefined) ?? `tl-${timelineItems.length}`;
+          const clientKey = ev.tool_call_id ?? `tl-${timelineItems.length}`;
           const tlIdx = timelineItems.length;
           timelineItems.push({
             kind: "tool",
             clientKey,
-            name: ev.name as string,
+            name: ev.name,
             status: "running",
-            ...(ev.input && typeof ev.input === "object"
-              ? { input: ev.input as Record<string, unknown> }
-              : {}),
+            ...(ev.input ? { input: ev.input } : {}),
           });
-          if (pendingKey) pendingTlIdx.set(pendingKey, tlIdx);
+          pendingTlIdx.set(pendingKey, tlIdx);
         } else if (ev.type === "tool_result") {
           // Resolve stored input for this tool
-          const toolCallId = ev.tool_call_id as string | undefined;
-          const toolName = ev.name as string;
+          const toolCallId = ev.tool_call_id;
+          const toolName = ev.name;
           let resolvedInput: Record<string, unknown> | undefined;
           if (toolCallId && pendingInputs.has(toolCallId)) {
             resolvedInput = pendingInputs.get(toolCallId);
@@ -575,12 +523,12 @@ function createB3PersistTransform(
           collectedToolCalls.push({
             name: toolName,
             status: "done",
-            success: ev.success as boolean | undefined,
-            durationMs: ev.duration_ms as number | undefined,
-            execution: ev.execution as ExecutionPayload | undefined,
+            success: ev.success,
+            durationMs: ev.duration_ms,
+            execution: ev.execution,
             ...(resolvedInput ? { input: resolvedInput } : {}),
-            ...(ev.output && typeof ev.output === "string" ? { output: ev.output as string } : {}),
-            ...(ev.meta && typeof ev.meta === "object" ? { meta: ev.meta as Record<string, unknown> } : {}),
+            ...(ev.output !== undefined ? { output: ev.output } : {}),
+            ...(ev.meta ? { meta: ev.meta } : {}),
           });
           // Update the matching timeline tool item to "done"
           const matchKey = (toolCallId && pendingTlIdx.has(toolCallId))
@@ -593,19 +541,19 @@ function createB3PersistTransform(
             timelineItems[tlIdx] = {
               ...toolItem,
               status: "done",
-              success: ev.success as boolean | undefined,
-              durationMs: ev.duration_ms as number | undefined,
-              ...(ev.output && typeof ev.output === "string" ? { output: ev.output as string } : {}),
-              ...(ev.meta && typeof ev.meta === "object" ? { meta: ev.meta as Record<string, unknown> } : {}),
+              success: ev.success,
+              durationMs: ev.duration_ms,
+              ...(ev.output !== undefined ? { output: ev.output } : {}),
+              ...(ev.meta ? { meta: ev.meta } : {}),
             };
           }
         } else if (ev.type === "citation") {
           collectedCitations.push({
-            chunk_id: ev.chunk_id as string | undefined,
-            material_id: ev.material_id as string | undefined,
-            source_label: ev.source_label as string | undefined,
-            chunk_text: ev.chunk_text as string | undefined,
-            image_urls: ev.image_urls as Array<{ page_idx: number; url: string }> | undefined,
+            chunk_id: ev.chunk_id,
+            material_id: ev.material_id,
+            source_label: ev.source_label,
+            chunk_text: ev.chunk_text,
+            image_urls: ev.image_urls,
           });
         } else if (ev.type === "done") {
           totalTokens = typeof ev.tokens === "number" ? ev.tokens : null;
@@ -1351,4 +1299,3 @@ export async function personalKbChatSseResponse(
   });
   }); // end runWithUserLlm
 }
-

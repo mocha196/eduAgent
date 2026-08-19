@@ -378,6 +378,7 @@ def _convert_to_pdf(local_file: Path, out_dir: Path) -> Path:
         capture_output=True,
         text=True,
         timeout=120,
+        check=False
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -580,10 +581,9 @@ def _claim_material_for_preview_repair(
     material_id: str,
 ) -> dict[str, Any] | None:
     """Claim Office material with preview PENDING and return source object metadata."""
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 UPDATE materials m
                 SET updated_at = NOW(), status_message = NULL
                 FROM (
@@ -597,13 +597,13 @@ def _claim_material_for_preview_repair(
                 WHERE m.id = s.id
                 RETURNING m.minio_path::text
                 """,
-                (material_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    "minio_path": row[0],
-                }
+            (material_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "minio_path": row[0],
+            }
     return None
 
 
@@ -1082,7 +1082,7 @@ def _run_material_download_parse_and_ingest(
     original_filename: str | None,
     text_only: bool,
     skip_kg: bool,
-    r: "redis.Redis | None" = None,
+    r: redis.Redis | None = None,
 ) -> None:
     """MinIO → parse → LightRAG. Row must already be ``PARSING``."""
     work_parent = Path(tempfile.mkdtemp(prefix="edu_mat_"))
@@ -1806,10 +1806,9 @@ def _claim_personal_material_for_index_retry(
     conn: psycopg.Connection, material_id: str
 ) -> dict[str, Any] | None:
     """Atomically move FAILED personal material to INDEXING for index-only retry."""
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
                 UPDATE personal_materials m
                 SET status = 'INDEXING', updated_at = NOW(), status_message = NULL
                 FROM (
@@ -1821,16 +1820,16 @@ def _claim_personal_material_for_index_retry(
                 RETURNING m.user_id::text, m.original_filename,
                           m.minio_path::text, m.file_type::text
                 """,
-                (material_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    "user_id": row[0],
-                    "original_filename": row[1],
-                    "minio_path": row[2],
-                    "file_type": row[3],
-                }
+            (material_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "user_id": row[0],
+                "original_filename": row[1],
+                "minio_path": row[2],
+                "file_type": row[3],
+            }
     return None
 
 
@@ -1908,7 +1907,7 @@ def _run_personal_material_download_parse_and_ingest(
     original_filename: str | None,
     text_only: bool,
     skip_kg: bool,
-    r: "redis.Redis | None" = None,
+    r: redis.Redis | None = None,
 ) -> None:
     """MinIO → parse → personal LightRAG. Row must already be PARSING."""
     work_parent = Path(tempfile.mkdtemp(prefix="edu_pmat_"))
@@ -2245,7 +2244,7 @@ def process_personal_convert_preview(
         import subprocess
         result = subprocess.run(
             ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(work_parent), str(local_src)],
-            capture_output=True, timeout=300,
+            capture_output=True, timeout=300,check=False
         )
         if result.returncode != 0:
             raise RuntimeError(

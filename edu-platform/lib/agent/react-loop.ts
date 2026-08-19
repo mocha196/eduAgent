@@ -19,49 +19,16 @@ import type { LearnerProfile } from "./memory/types";
 import { ContextManager } from "./context-manager";
 import { createTurnTrace, flushLangfuse } from "./tracing/langfuse-tracer";
 import type { LangfuseTraceClient, LangfuseSpanClient, LangfuseGenerationClient } from "langfuse";
+import type { B3SseEvent, ExecutionPayload } from "./b3-protocol";
+import { executeToolCall } from "./tool-executor";
+
+export type { ExecutionPayload } from "./b3-protocol";
 
 // ---- B3 SSE helpers ---------------------------------------------------------
 
 const _enc = new TextEncoder();
 
-export type ExecutionPayload = {
-  language: "python" | "javascript";
-  command: string;
-  stdout: string;
-  stderr: string;
-  return_code: number;
-};
-
-type B3Event =
-  | { type: "text"; content: string }
-  | ({ type: "citation" } & ToolCitation)
-  | { type: "tool_call"; name: string; tool_call_id?: string; input?: Record<string, unknown> }
-  | { type: "tool_progress"; tool_call_id: string; label: string }
-  | {
-      type: "tool_result";
-      name: string;
-      tool_call_id?: string;
-      success?: boolean;
-      duration_ms?: number;
-      output?: string;
-      execution?: ExecutionPayload;
-      meta?: Record<string, unknown>;
-    }
-  | { type: "done"; tokens?: number | null; exec_time_ms?: number | null; error?: string }
-  | { type: "trace"; event: string; payload?: Record<string, unknown> }
-  | {
-      type: "require_approval";
-      tool_call_id: string;
-      tool_name: string;
-      args_preview: Record<string, unknown>;
-      approval_key: string;
-      reason: string;
-      /** Full code for run_script (not sanitised/truncated) */
-      full_code?: string;
-    }
-  | { type: "approval_resolved"; tool_call_id: string; approved: boolean };
-
-function sseData(ev: B3Event): Uint8Array {
+function sseData(ev: B3SseEvent): Uint8Array {
   return _enc.encode(`data: ${JSON.stringify(ev)}\n\n`);
 }
 
@@ -320,6 +287,12 @@ async function _runLoop(
         };
       })
     : rawSchemas;
+  const allowedToolNames = opts.allowedTools
+    ? new Set(opts.allowedTools)
+    : undefined;
+  const schemaByToolName = new Map(
+    schemas.map((schema) => [schema.function.name, schema.function.parameters]),
+  );
   let totalTokens: number | null = null;
   let streamError: string | undefined;
   const forceFirstKnowledgeQuery = _shouldForceFirstKnowledgeQuery(opts, schemas);
@@ -445,8 +418,11 @@ async function _runLoop(
         // Parse args before emitting so they are included in the tool_call SSE event
         let args: Record<string, unknown> = {};
         try {
-          args = JSON.parse(tc.args) as Record<string, unknown>;
-        } catch { /* empty args */ }
+          const parsed = JSON.parse(tc.args) as unknown;
+          if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            args = parsed as Record<string, unknown>;
+          }
+        } catch { /* executor reports INVALID_JSON below */ }
 
         await writer.write(
           sseData({ type: "tool_call", name: tc.name, tool_call_id: tc.id, input: args }),
@@ -472,26 +448,40 @@ async function _runLoop(
         } catch { /* noop */ }
 
         const tool = toolRegistry.get(tc.name);
-        if (!tool) {
-          toolContent = JSON.stringify({ error: `Tool "${tc.name}" not found in registry` });
-          success = false;
-        } else {
-          // ---- Approval gate ------------------------------------------------
-          const needsApproval =
-            tool.requiresApproval === true &&
-            (config.approvalMode ?? "require_user") === "require_user";
+        const toolCtx = {
+          ...ctx,
+          onProgress: async (label: string) => {
+            await writer.write(sseData({ type: "tool_progress", tool_call_id: tc.id, label }));
+          },
+        };
+        const execution = await executeToolCall({
+          registry: toolRegistry,
+          toolName: tc.name,
+          rawArguments: tc.args,
+          ctx: toolCtx,
+          allowedToolNames,
+          // Eval mode exposes a context-specific knowledge_query contract with
+          // `sources` removed; validate against exactly what the model saw.
+          parametersOverride:
+            opts.evalMode && tc.name === "knowledge_query"
+              ? schemaByToolName.get(tc.name)
+              : undefined,
+          beforeExecute: async (validatedTool, validatedArgs) => {
+            const needsApproval =
+              validatedTool.requiresApproval === true &&
+              (config.approvalMode ?? "require_user") === "require_user";
+            if (!needsApproval) return { allowed: true };
 
-          if (needsApproval) {
             const approvalKey = await createApprovalRecord(ctx.sessionId, tc.id, ctx.userId);
-            const approvalEvent: B3Event = {
+            const approvalEvent: B3SseEvent = {
               type: "require_approval",
               tool_call_id: tc.id,
               tool_name: tc.name,
-              args_preview: sanitiseArgsPreview(args),
+              args_preview: sanitiseArgsPreview(validatedArgs),
               approval_key: approvalKey,
-              reason: tool.approvalReason ?? "此操作需要您的确认。",
-              ...(tc.name === "run_script" && typeof args.code === "string"
-                ? { full_code: args.code }
+              reason: validatedTool.approvalReason ?? "此操作需要您的确认。",
+              ...(tc.name === "run_script" && typeof validatedArgs.code === "string"
+                ? { full_code: validatedArgs.code }
                 : {}),
             };
             await writer.write(sseData(approvalEvent));
@@ -499,36 +489,21 @@ async function _runLoop(
             await writer.write(
               sseData({ type: "approval_resolved", tool_call_id: tc.id, approved }),
             );
-            if (!approved) {
-              toolContent = JSON.stringify({ error: "用户拒绝了此操作。" });
-              success = false;
-            }
-          }
-          // -------------------------------------------------------------------
+            return approved
+              ? { allowed: true }
+              : { allowed: false, message: "用户拒绝了此操作。" };
+          },
+        });
 
-          if (success) {
-            try {
-              const toolCtx = {
-                ...ctx,
-                onProgress: async (label: string) => {
-                  await writer.write(sseData({ type: "tool_progress", tool_call_id: tc.id, label }));
-                },
-              };
-              const raw = await tool.execute(args, toolCtx);
-              if (typeof raw === "string") {
-                toolContent = raw;
-              } else {
-                toolContent = raw.content;
-                citations = raw.citations ?? [];
-                toolMeta = raw.meta;
-              }
-            } catch (err) {
-              toolContent = JSON.stringify({
-                error: err instanceof Error ? err.message : String(err),
-              });
-              success = false;
-            }
-          }
+        if (execution.ok) {
+          args = execution.args;
+          toolContent = execution.result.content;
+          citations = execution.result.citations ?? [];
+          toolMeta = execution.result.meta;
+        } else {
+          success = false;
+          if (execution.args) args = execution.args;
+          toolContent = JSON.stringify({ error: execution.error });
         }
 
         const durationMs = Date.now() - toolStart;

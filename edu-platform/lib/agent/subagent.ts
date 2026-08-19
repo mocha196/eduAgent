@@ -8,6 +8,8 @@ import { getRoleExtraBody } from "./llm-registry";
 import { createStandaloneTrace, flushLangfuse, recordGeneration } from "./tracing/langfuse-tracer";
 import type { Tool, TurnContext } from "./types";
 import { logger } from "@/lib/logger";
+import { ToolRegistry } from "./tool-registry";
+import { executeToolCall } from "./tool-executor";
 
 const log = logger.child({ component: "subagent" });
 
@@ -51,15 +53,10 @@ export async function runSubAgent(
   const allowedTools = config.allowedTools.filter(
     (t) => !RECURSION_BLACKLIST.has(t.name),
   );
-
-  const openaiTools = allowedTools.map((t) => ({
-    type: "function" as const,
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    },
-  }));
+  const toolRegistry = new ToolRegistry();
+  for (const tool of allowedTools) toolRegistry.register(tool);
+  const allowedToolNames = new Set(allowedTools.map((tool) => tool.name));
+  const openaiTools = toolRegistry.getSchemas();
 
   const subModel = config.model ?? model;
   const t0 = Date.now();
@@ -118,28 +115,16 @@ export async function runSubAgent(
         const tcAny = tc as any;
         const fnName: string = tcAny.function?.name ?? "";
         const fnArgs: string = tcAny.function?.arguments ?? "";
-        const tool = allowedTools.find((t) => t.name === fnName);
-        if (!tool) {
-          messages.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: `Error: tool "${fnName}" not found`,
-          });
-          continue;
-        }
-        let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(fnArgs) as Record<string, unknown>;
-        } catch {
-          // use empty args
-        }
-        let result: string;
-        try {
-          const raw = await tool.execute(args, config.ctx ?? ({} as TurnContext));
-          result = typeof raw === "string" ? raw : JSON.stringify(raw);
-        } catch (err) {
-          result = `Error: ${err instanceof Error ? err.message : String(err)}`;
-        }
+        const execution = await executeToolCall({
+          registry: toolRegistry,
+          toolName: fnName,
+          rawArguments: fnArgs,
+          ctx: config.ctx ?? ({} as TurnContext),
+          allowedToolNames,
+        });
+        const result = execution.ok
+          ? execution.result.content
+          : JSON.stringify({ error: execution.error });
         messages.push({
           role: "tool",
           tool_call_id: tc.id,

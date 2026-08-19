@@ -39,6 +39,7 @@ export const readAttachmentTool: Tool = {
     properties: {
       attachment_id: {
         type: "string",
+        minLength: 1,
         description: "附件 ID，来自附件列表中的 id 字段。",
       },
     },

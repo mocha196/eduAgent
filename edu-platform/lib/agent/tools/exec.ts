@@ -41,10 +41,12 @@ export const execSkillScriptTool: Tool = {
     properties: {
       skill: {
         type: "string",
+        minLength: 1,
         description: "技能名称，如 pptx（必须与 list_skills 返回的名称一致）",
       },
       script: {
         type: "string",
+        minLength: 1,
         description:
           "脚本路径（相对于该 skill 的 scripts/ 目录），如 thumbnail.py、office/unpack.py；" +
           "或 Python 模块调用形式，如 -m markitdown",
@@ -77,6 +79,8 @@ export const execSkillScriptTool: Tool = {
       },
       timeout_sec: {
         type: "number",
+        minimum: 1,
+        maximum: 300,
         description: "执行超时秒数，默认 60，最大 300。",
       },
     },

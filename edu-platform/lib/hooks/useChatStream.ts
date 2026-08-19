@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ExecutionPayload } from "@/lib/agent/react-loop";
+import {
+  parseB3SseEventJson,
+  type B3CitationEvent,
+  type B3SseEvent,
+  type ExecutionPayload,
+} from "@/lib/agent/b3-protocol";
 
 export type { ExecutionPayload };
 
@@ -63,19 +68,11 @@ export type BranchRecord = {
   activeIdx: number;
 };
 
-export type Citation = {
-  chunk_id?: string;
-  material_id?: string;
-  source_label?: string;
-  chunk_text?: string;
-  image_urls?: Array<{ page_idx: number; url: string }>;
-};
-export type DoneMeta = {
-  type: "done";
-  tokens?: number;
-  exec_time_ms?: number;
-  error?: string;
-};
+export type Citation = Pick<
+  B3CitationEvent,
+  "chunk_id" | "material_id" | "source_label" | "chunk_text" | "image_urls"
+>;
+export type DoneMeta = Extract<B3SseEvent, { type: "done" }>;
 
 /** In-flight tool row for the current assistant turn (not persisted). */
 export type ToolActivityItem = {
@@ -525,40 +522,8 @@ export function useChatStream(config: UseChatStreamConfig) {
             const raw = part.slice(6).trim();
             if (!raw) continue;
             try {
-              const event = JSON.parse(raw) as {
-                type: string;
-                content?: string;
-                chunk_id?: string;
-                material_id?: string;
-                source_label?: string;
-                chunk_text?: string;
-                image_urls?: Array<{ page_idx: number; url: string }>;
-                tokens?: number;
-                exec_time_ms?: number;
-                error?: string;
-                name?: string;
-                tool_call_id?: string;
-                success?: boolean;
-                duration_ms?: number;
-                // tool call input arguments
-                input?: Record<string, unknown>;
-                // tool result output text and metadata
-                output?: string;
-                meta?: Record<string, unknown>;
-                // tool progress label (real-time, emitted during execution)
-                label?: string;
-                // approval fields
-                tool_name?: string;
-                args_preview?: Record<string, unknown>;
-                approval_key?: string;
-                reason?: string;
-                approved?: boolean;
-                // execution result (run_script)
-                execution?: ExecutionPayload;
-                full_code?: string;
-                // trace event subtype
-                event?: string;
-              };
+              const event = parseB3SseEventJson(raw);
+              if (!event) continue;
 
               if (event.type === "text" && event.content) {
                 setIsReflecting(false);
@@ -616,9 +581,9 @@ export function useChatStream(config: UseChatStreamConfig) {
               } else if (event.type === "tool_result" && event.name) {
                 const toolName = event.name;
                 const toolCallId = typeof event.tool_call_id === "string" ? event.tool_call_id : undefined;
-                const execution = event.execution as ExecutionPayload | undefined;
-                const toolOutput = typeof event.output === "string" ? event.output : undefined;
-                const toolMeta = event.meta as Record<string, unknown> | undefined;
+                const execution = event.execution;
+                const toolOutput = event.output;
+                const toolMeta = event.meta;
 
                 /** Find last running item matching by clientKey (preferred) then name. */
                 function findRunningIdx<T extends { clientKey: string; name: string; status: string }>(
@@ -691,12 +656,12 @@ export function useChatStream(config: UseChatStreamConfig) {
                 if (event.error) setErrorMsg(event.error);
               } else if (event.type === "require_approval") {
                 const state: PendingApprovalState = {
-                  toolCallId: event.tool_call_id ?? "",
-                  toolName: event.tool_name ?? "",
-                  argsPreview: event.args_preview ?? {},
-                  approvalKey: event.approval_key ?? "",
-                  reason: event.reason ?? "此操作需要您的确认。",
-                  fullCode: typeof event.full_code === "string" ? event.full_code : undefined,
+                  toolCallId: event.tool_call_id,
+                  toolName: event.tool_name,
+                  argsPreview: event.args_preview,
+                  approvalKey: event.approval_key,
+                  reason: event.reason,
+                  fullCode: event.full_code,
                 };
                 pendingApprovalRef.current = state;
                 setPendingApproval(state);

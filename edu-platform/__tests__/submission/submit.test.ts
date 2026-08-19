@@ -14,12 +14,14 @@ const {
   getCourseIfMemberMock,
   assignmentFindFirstMock,
   submissionFindUniqueMock,
-  submissionUpsertMock,
+  submissionCreateMock,
+  submissionUpdateManyMock,
 } = vi.hoisted(() => ({
   getCourseIfMemberMock: vi.fn(),
   assignmentFindFirstMock: vi.fn(),
   submissionFindUniqueMock: vi.fn(),
-  submissionUpsertMock: vi.fn(),
+  submissionCreateMock: vi.fn(),
+  submissionUpdateManyMock: vi.fn(),
 }));
 
 vi.mock("@/lib/course-access", () => ({
@@ -35,7 +37,8 @@ vi.mock("@/lib/db", () => ({
     },
     assignmentSubmission: {
       findUnique: submissionFindUniqueMock,
-      upsert: submissionUpsertMock,
+      create: submissionCreateMock,
+      updateMany: submissionUpdateManyMock,
     },
   },
 }));
@@ -97,7 +100,7 @@ describe("submitAssignment", () => {
     vi.clearAllMocks();
     getCourseIfMemberMock.mockResolvedValue({ id: COURSE_ID });
     submissionFindUniqueMock.mockResolvedValue(null);
-    submissionUpsertMock.mockResolvedValue({
+    submissionCreateMock.mockResolvedValue({
       id: "sub-uuid-001",
       assignmentId: ASSIGNMENT_ID,
       studentId: STUDENT_ID,
@@ -130,7 +133,7 @@ describe("submitAssignment", () => {
     );
 
     expect(result.status).toBe(SubmissionStatus.SUBMITTED);
-    expect(submissionUpsertMock).toHaveBeenCalledOnce();
+    expect(submissionCreateMock).toHaveBeenCalledOnce();
   });
 
   it("TC-SUB-001: unpublished assignment (DRAFT) should throw 400", async () => {
@@ -152,7 +155,7 @@ describe("submitAssignment", () => {
       ),
     ).rejects.toMatchObject({ status: 400 });
 
-    expect(submissionUpsertMock).not.toHaveBeenCalled();
+    expect(submissionCreateMock).not.toHaveBeenCalled();
   });
 
   it("TC-SUB-001: past deadline should throw 403 DEADLINE_PASSED", async () => {

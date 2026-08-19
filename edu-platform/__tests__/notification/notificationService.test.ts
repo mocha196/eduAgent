@@ -10,12 +10,14 @@ const {
   notifCreateMock,
   notifCreateManyMock,
   notifFindManyMock,
+  notifFindFirstMock,
   notifCountMock,
   notifUpdateManyMock,
 } = vi.hoisted(() => ({
   notifCreateMock: vi.fn(),
   notifCreateManyMock: vi.fn(),
   notifFindManyMock: vi.fn(),
+  notifFindFirstMock: vi.fn(),
   notifCountMock: vi.fn(),
   notifUpdateManyMock: vi.fn(),
 }));
@@ -30,6 +32,7 @@ vi.mock("@/lib/db", () => ({
       create: notifCreateMock,
       createMany: notifCreateManyMock,
       findMany: notifFindManyMock,
+      findFirst: notifFindFirstMock,
       count: notifCountMock,
       updateMany: notifUpdateManyMock,
     },
@@ -130,6 +133,24 @@ describe("createNotification", () => {
         body: "body",
       }),
     ).resolves.toBeDefined();
+  });
+
+  it("deduplicates by business key and does not publish an existing row again", async () => {
+    const duplicate = Object.assign(new Error("duplicate"), { code: "P2002" });
+    notifCreateMock.mockRejectedValue(duplicate);
+    notifFindFirstMock.mockResolvedValue(makeDbRow());
+
+    const { createNotification } = await import("@/lib/services/notificationService");
+    const result = await createNotification({
+      userId: USER_ID,
+      type: NotificationType.ASSIGNMENT_PUBLISHED,
+      title: "作业已发布",
+      body: "body",
+      dedupKey: "assignment-published:a1",
+    });
+
+    expect(result.id).toBe(NOTIF_ID);
+    expect(publishNotificationMock).not.toHaveBeenCalled();
   });
 });
 

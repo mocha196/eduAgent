@@ -2,16 +2,24 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SkillEntry } from "@/lib/agent/skills-loader";
 import type { TurnContext } from "@/lib/agent/types";
 
-const { mockLoader } = vi.hoisted(() => ({
+const { mockLoader, mockAgentStyle } = vi.hoisted(() => ({
   mockLoader: {
     load: vi.fn<() => SkillEntry[]>(),
     getBody: vi.fn<(name: string) => string | null>(),
     getSubFile: vi.fn<(skillName: string, fileName: string) => string | null>(),
   },
+  mockAgentStyle: {
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
+  },
 }));
 
 vi.mock("@/lib/agent/skills-loader", () => ({
   getSkillsLoader: () => mockLoader,
+}));
+
+vi.mock("@/lib/db", () => ({
+  prisma: { agentStyle: mockAgentStyle },
 }));
 
 import { listSkillsTool, viewSkillTool } from "@/lib/agent/tools/skills";
@@ -33,6 +41,8 @@ describe("skills tools", () => {
     mockLoader.load.mockReset();
     mockLoader.getBody.mockReset();
     mockLoader.getSubFile.mockReset();
+    mockAgentStyle.findMany.mockReset().mockResolvedValue([]);
+    mockAgentStyle.findUnique.mockReset().mockResolvedValue(null);
   });
 
   // ---- list_skills ----------------------------------------------------------

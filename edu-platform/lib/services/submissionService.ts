@@ -6,7 +6,7 @@ import { getLLMClient, getMemoryModel } from "@/lib/agent/llm-registry";
 import { MemoryExtractor, type SubmissionMemoryContext } from "@/lib/agent/memory/memory-extractor";
 import { memoryStore } from "@/lib/agent/memory/memory-store";
 import { runWithUserLlm } from "@/lib/agent/user-llm-store";
-import { SubmissionStatus, UserRole } from "@prisma/client";
+import { Prisma, SubmissionStatus, UserRole } from "@prisma/client";
 import { createNotification, createBulkNotifications } from "@/lib/services/notificationService";
 import {
   assertCanOverrideSubmissionGrades,
@@ -14,9 +14,9 @@ import {
   assertCanResubmitSubmission,
   assertCanReturnSubmission,
   assertCanSubmitAssignment,
-  shouldSkipAutoGrading,
 } from "@/lib/domain/submission-lifecycle";
 import { gradingStrategyRegistry } from "@/lib/services/grading/grading-strategies";
+import { randomUUID } from "crypto";
 import type {
   GradingResultDto,
   OverrideGradesBody,
@@ -109,24 +109,51 @@ export async function submitAssignment(
   });
   assertCanResubmitSubmission(existing?.status);
 
-  const submission = await prisma.assignmentSubmission.upsert({
-    where: { assignmentId_studentId: { assignmentId, studentId } },
-    create: {
-      assignmentId,
-      studentId,
-      answers: body.answers as unknown as import("@prisma/client").Prisma.InputJsonValue,
-      status: SubmissionStatus.SUBMITTED,
-    },
-    update: {
-      answers: body.answers as unknown as import("@prisma/client").Prisma.InputJsonValue,
-      status: SubmissionStatus.SUBMITTED,
-      gradingResult: undefined,
-      teacherFeedback: null,
-      gradedAt: null,
-      returnedAt: null,
-    },
-    include: { student: { select: { realName: true, username: true } } },
-  });
+  const answerData = body.answers as unknown as import("@prisma/client").Prisma.InputJsonValue;
+  let submission;
+  if (existing) {
+    // The status/version predicates close the gap between the earlier lifecycle
+    // check and this write (for example, a teacher returning the grade now).
+    const changed = await prisma.assignmentSubmission.updateMany({
+      where: {
+        id: existing.id,
+        version: existing.version,
+        status: { not: SubmissionStatus.RETURNED },
+      },
+      data: {
+        answers: answerData,
+        status: SubmissionStatus.SUBMITTED,
+        gradingToken: null,
+        version: { increment: 1 },
+        gradingResult: Prisma.DbNull,
+        totalScore: null,
+        maxScore: null,
+        teacherFeedback: null,
+        submittedAt: new Date(),
+        gradedAt: null,
+        returnedAt: null,
+      },
+    });
+    if (changed.count === 0) {
+      throw new ApiError(409, "CONFLICT", "Submission changed; refresh and retry");
+    }
+    submission = await prisma.assignmentSubmission.findUnique({
+      where: { id: existing.id },
+      include: { student: { select: { realName: true, username: true } } },
+    });
+  } else {
+    try {
+      submission = await prisma.assignmentSubmission.create({
+        data: { assignmentId, studentId, answers: answerData, status: SubmissionStatus.SUBMITTED },
+        include: { student: { select: { realName: true, username: true } } },
+      });
+    } catch (error) {
+      // A concurrent first submission may have won the unique constraint.
+      if ((error as { code?: string } | null)?.code !== "P2002") throw error;
+      throw new ApiError(409, "CONFLICT", "Submission was created concurrently; retry");
+    }
+  }
+  if (!submission) throw new ApiError(409, "CONFLICT", "Submission changed; retry");
 
   // Trigger AI grading asynchronously after response is sent
   after(async () => {
@@ -153,6 +180,7 @@ export async function submitAssignment(
           title: "学生提交了作业",
           body: `${studentName} 提交了《${assignment.title}》的作业。`,
           metadata: { courseId, assignmentId, submissionId: submission.id, courseName: course.name },
+          dedupKey: `submission-received:${submission.id}:${submission.version}`,
         });
       }
     } catch {
@@ -166,18 +194,24 @@ export async function submitAssignment(
 
 /** Trigger AI grading for a submission (idempotent). */
 export async function triggerGrading(submissionId: string): Promise<void> {
-  const submission = await prisma.assignmentSubmission.findUnique({
-    where: { id: submissionId },
+  const gradingToken = randomUUID();
+  // Atomically claim this submission. A concurrent grader observes count=0.
+  const claimed = await prisma.assignmentSubmission.updateMany({
+    where: { id: submissionId, status: SubmissionStatus.SUBMITTED },
+    data: {
+      status: SubmissionStatus.GRADING,
+      gradingToken,
+      version: { increment: 1 },
+    },
+  });
+  if (claimed.count === 0) return;
+
+  const submission = await prisma.assignmentSubmission.findFirst({
+    where: { id: submissionId, status: SubmissionStatus.GRADING, gradingToken },
     include: { assignment: true },
   });
+  // A re-submission may have invalidated the claim between claim and fetch.
   if (!submission) return;
-  if (shouldSkipAutoGrading(submission.status)) return;
-
-  // Mark as GRADING
-  await prisma.assignmentSubmission.update({
-    where: { id: submissionId },
-    data: { status: SubmissionStatus.GRADING },
-  });
 
   const questions = Array.isArray(submission.assignment.questions)
     ? (submission.assignment.questions as unknown as QuestionItem[])
@@ -204,10 +238,14 @@ export async function triggerGrading(submissionId: string): Promise<void> {
 
   const gradingResult: GradingResultDto = { totalScore, maxScore, questionGrades };
 
-  await prisma.assignmentSubmission.update({
-    where: { id: submissionId },
+  // Commit only if this attempt still owns the row. Re-submission clears the
+  // token, while return/other lifecycle changes alter the status.
+  await prisma.assignmentSubmission.updateMany({
+    where: { id: submissionId, status: SubmissionStatus.GRADING, gradingToken },
     data: {
       status: SubmissionStatus.GRADED,
+      gradingToken: null,
+      version: { increment: 1 },
       gradingResult: gradingResult as unknown as import("@prisma/client").Prisma.InputJsonValue,
       totalScore,
       maxScore,
@@ -350,15 +388,27 @@ export async function overrideGrades(
     questionGrades: updatedGrades,
   };
 
-  const saved = await prisma.assignmentSubmission.update({
-    where: { id: submissionId },
+  const changed = await prisma.assignmentSubmission.updateMany({
+    where: {
+      id: submissionId,
+      version: row.version,
+      status: { in: [SubmissionStatus.GRADED, SubmissionStatus.RETURNED] },
+    },
     data: {
       gradingResult: updated as unknown as import("@prisma/client").Prisma.InputJsonValue,
       totalScore,
       teacherFeedback: body.teacherFeedback ?? row.teacherFeedback,
+      version: { increment: 1 },
     },
+  });
+  if (changed.count === 0) {
+    throw new ApiError(409, "CONFLICT", "Submission changed; refresh and retry");
+  }
+  const saved = await prisma.assignmentSubmission.findFirst({
+    where: { id: submissionId, assignmentId },
     include: { student: { select: { realName: true, username: true } } },
   });
+  if (!saved) throw new ApiError(404, "NOT_FOUND", "Submission not found");
   return toDetail(saved);
 }
 
@@ -380,11 +430,27 @@ export async function returnSubmission(
   if (!row) throw new ApiError(404, "NOT_FOUND", "Submission not found");
   assertCanReturnSubmission(row.status);
 
-  const saved = await prisma.assignmentSubmission.update({
-    where: { id: submissionId },
-    data: { status: SubmissionStatus.RETURNED, returnedAt: new Date() },
+  const changed = await prisma.assignmentSubmission.updateMany({
+    where: {
+      id: submissionId,
+      status: { in: [SubmissionStatus.GRADED, SubmissionStatus.RETURNED] },
+      version: row.version,
+    },
+    data: {
+      status: SubmissionStatus.RETURNED,
+      gradingToken: null,
+      returnedAt: new Date(),
+      version: { increment: 1 },
+    },
+  });
+  if (changed.count === 0) {
+    throw new ApiError(409, "CONFLICT", "Submission changed; refresh and retry");
+  }
+  const saved = await prisma.assignmentSubmission.findFirst({
+    where: { id: submissionId, assignmentId },
     include: { student: { select: { realName: true, username: true } } },
   });
+  if (!saved) throw new ApiError(404, "NOT_FOUND", "Submission not found");
 
   // Notify the student and extract memory facts now that teacher has reviewed (non-blocking)
   void (async () => {
@@ -400,6 +466,7 @@ export async function returnSubmission(
           title: "成绩已返回",
           body: `《${assignment.title}》的批改结果已发布，请查看。`,
           metadata: { courseId, assignmentId, submissionId, courseName: assignment.course.name },
+          dedupKey: `grade-returned:${submissionId}`,
         });
       }
     } catch {
@@ -479,7 +546,12 @@ export async function batchReturnSubmissions(
 
   const result = await prisma.assignmentSubmission.updateMany({
     where: { assignmentId, status: SubmissionStatus.GRADED },
-    data: { status: SubmissionStatus.RETURNED, returnedAt: new Date() },
+    data: {
+      status: SubmissionStatus.RETURNED,
+      gradingToken: null,
+      returnedAt: new Date(),
+      version: { increment: 1 },
+    },
   });
 
   // Notify each student and extract memory facts asynchronously
@@ -497,6 +569,7 @@ export async function batchReturnSubmissions(
         title: "成绩已返回",
         body: `《${assignment.title}》的批改结果已发布，请查看。`,
         metadata: { courseId, assignmentId, courseName: assignment.course.name },
+        dedupKey: `grade-returned:${assignmentId}`,
       });
       const questions = Array.isArray(assignment.questions)
         ? (assignment.questions as unknown as QuestionItem[])

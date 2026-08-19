@@ -5,10 +5,12 @@ const {
   getMock,
   setMock,
   delMock,
+  evalMock,
 } = vi.hoisted(() => ({
   getMock: vi.fn(),
   setMock: vi.fn(),
   delMock: vi.fn(),
+  evalMock: vi.fn(),
 }));
 
 vi.mock("@/lib/redis", () => ({
@@ -16,6 +18,7 @@ vi.mock("@/lib/redis", () => ({
     get: getMock,
     set: setMock,
     del: delMock,
+    eval: evalMock,
   })),
 }));
 
@@ -26,6 +29,7 @@ describe("SessionStore", () => {
     getMock.mockReset();
     setMock.mockReset();
     delMock.mockReset();
+    evalMock.mockReset();
   });
 
   it("业务规则：会话不存在时读取历史应返回空数组", async () => {
@@ -54,20 +58,23 @@ describe("SessionStore", () => {
 
   it("业务规则：append 应保留原顺序并写入 24h TTL", async () => {
     // given
-    const existing: Message[] = [{ role: "user", content: "Q1" }];
     const incoming: Message[] = [{ role: "assistant", content: "A1" }];
-    getMock.mockResolvedValueOnce(JSON.stringify(existing));
+    evalMock.mockResolvedValueOnce(2);
     const store = new SessionStore();
 
     // when
     await store.append("sess-1", incoming);
 
     // then
-    expect(setMock).toHaveBeenCalledWith(
-      "agent:session:sess-1",
-      JSON.stringify([...existing, ...incoming]),
-      { EX: 24 * 60 * 60 },
+    expect(evalMock).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('SET'"),
+      {
+        keys: ["agent:session:sess-1"],
+        arguments: [JSON.stringify(incoming), String(24 * 60 * 60)],
+      },
     );
+    expect(getMock).not.toHaveBeenCalled();
+    expect(setMock).not.toHaveBeenCalled();
   });
 
   it("业务规则：reset 应删除对应会话键", async () => {

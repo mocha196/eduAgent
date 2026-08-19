@@ -27,7 +27,7 @@ export const rememberFactTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      fact_content: { type: "string", description: "要记录的事实内容（简洁，50 字以内）" },
+      fact_content: { type: "string", minLength: 1, maxLength: 50, description: "要记录的事实内容（简洁，50 字以内）" },
       category: {
         type: "string",
         enum: [
@@ -42,6 +42,8 @@ export const rememberFactTool: Tool = {
       },
       confidence: {
         type: "number",
+        minimum: 0,
+        maximum: 1,
         description: "置信度 0–1（默认 0.85）",
       },
     },
@@ -89,8 +91,8 @@ export const searchMemoryTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      keyword: { type: "string", description: "搜索关键词" },
-      limit: { type: "integer", description: "返回最大条数（默认 10）" },
+      keyword: { type: "string", minLength: 1, description: "搜索关键词" },
+      limit: { type: "integer", minimum: 1, maximum: 30, description: "返回最大条数（默认 10）" },
     },
     required: ["keyword"],
   },

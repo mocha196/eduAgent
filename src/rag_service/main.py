@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from loguru import logger
 from pydantic import BaseModel, Field
+
 from rag_mvp.logging_setup import configure_logging
 
 load_dotenv()
@@ -63,10 +64,9 @@ async def _warmup_course_caches() -> None:
     from rag_mvp.engine import get_course_rag_anything
 
     try:
-        with connect_sync() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id::text FROM courses WHERE status = 'PUBLISHED'")
-                course_ids: list[str] = [row[0] for row in cur.fetchall()]
+        with connect_sync() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id::text FROM courses WHERE status = 'PUBLISHED'")
+            course_ids: list[str] = [row[0] for row in cur.fetchall()]
     except Exception as exc:  # noqa: BLE001
         logger.warning("Warmup: failed to fetch course IDs: {}", exc)
         return
@@ -136,13 +136,12 @@ def _fetch_chunk_page_mappings(chunk_ids: list[str]) -> dict[str, int]:
     try:
         from rag_mvp.db import connect_sync
 
-        with connect_sync() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT chunk_id, page_idx FROM chunk_page_mappings WHERE chunk_id = ANY(%s)",
-                    (chunk_ids,),
-                )
-                return {row[0]: row[1] for row in cur.fetchall()}
+        with connect_sync() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT chunk_id, page_idx FROM chunk_page_mappings WHERE chunk_id = ANY(%s)",
+                (chunk_ids,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
     except Exception as exc:  # noqa: BLE001
         logger.warning("chunk_page_mappings lookup failed: {}", exc)
         return {}
@@ -190,17 +189,16 @@ def _fetch_material_titles(material_ids: list[str]) -> dict[str, str]:
     try:
         from rag_mvp.db import connect_sync
 
-        with connect_sync() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with connect_sync() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     SELECT id::text, original_filename
                     FROM materials
                     WHERE id = ANY(%s::uuid[]) AND NOT is_deleted
                     """,
-                    (material_ids,),
-                )
-                return {row[0]: row[1] for row in cur.fetchall()}
+                (material_ids,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
     except Exception as exc:  # noqa: BLE001
         logger.warning("material_titles lookup failed: {}", exc)
         return {}
@@ -213,21 +211,20 @@ def _fetch_material_images(material_ids: list[str]) -> dict[str, list[dict[str, 
     try:
         from rag_mvp.db import connect_sync
 
-        with connect_sync() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with connect_sync() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     SELECT material_id::text, page_idx, minio_url
                     FROM material_images
                     WHERE material_id = ANY(%s::uuid[])
                     ORDER BY material_id, page_idx
                     """,
-                    (material_ids,),
-                )
-                result: dict[str, list[dict[str, Any]]] = {}
-                for mid, page_idx, minio_url in cur.fetchall():
-                    result.setdefault(mid, []).append({"page_idx": page_idx, "url": minio_url})
-                return result
+                (material_ids,),
+            )
+            result: dict[str, list[dict[str, Any]]] = {}
+            for mid, page_idx, minio_url in cur.fetchall():
+                result.setdefault(mid, []).append({"page_idx": page_idx, "url": minio_url})
+            return result
     except Exception as exc:  # noqa: BLE001
         logger.warning("material_images lookup failed: {}", exc)
         return {}
@@ -387,12 +384,12 @@ _quiz_lock = threading.Lock()
 def rag_generate_quiz(
     body: GenerateQuizRequest, _auth: None = Depends(_require_key)
 ) -> GenerateQuizResponse:
+    from rag_mvp.config import settings
+    from rag_mvp.course_workspace import course_id_to_workspace
     from rag_mvp.question_gen import (
         DEFAULT_TYPE_WEIGHTS,
         generate,
     )
-    from rag_mvp.course_workspace import course_id_to_workspace
-    from rag_mvp.config import settings
 
     # Resolve course working_dir so question_gen reads the right graphml
     ws = course_id_to_workspace(body.course_id)
@@ -445,7 +442,7 @@ class BuildMindmapResponse(BaseModel):
 def rag_build_mindmap(
     body: BuildMindmapRequest, _auth: None = Depends(_require_key)
 ) -> BuildMindmapResponse:
-    from rag_mvp.mindmap import build_structure_mindmap, build_llm_mindmap
+    from rag_mvp.mindmap import build_llm_mindmap, build_structure_mindmap
 
     build_fn = build_llm_mindmap if body.refine else build_structure_mindmap
     try:
@@ -481,8 +478,9 @@ class ParseDocumentResponse(BaseModel):
 
 def _extract_text_pypdf(data: bytes) -> tuple[str, int]:
     """Fast text extraction from PDF using pypdf (no MinerU required)."""
-    from pypdf import PdfReader
     import io
+
+    from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
     pages = len(reader.pages)
