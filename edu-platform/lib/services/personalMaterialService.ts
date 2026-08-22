@@ -141,7 +141,6 @@ export async function uploadPersonalMaterialStream(params: {
   contentLength: number;
   body: ReadableStream<Uint8Array> | Readable;
   textOnly?: boolean;
-  skipKg?: boolean;
 }): Promise<PersonalMaterialCreatedDto> {
   try {
     getMinioConfig();
@@ -212,7 +211,6 @@ export async function uploadPersonalMaterialStream(params: {
   }
 
   const textOnly = params.textOnly ?? true;
-  const skipKg = params.skipKg ?? true;
   const operation = isOfficeMaterialFileType(fileType)
     ? ("personal_convert_preview" as const)
     : isVideoOrAudio(fileType)
@@ -225,7 +223,6 @@ export async function uploadPersonalMaterialStream(params: {
     operation,
     created_at: new Date().toISOString(),
     text_only: textOnly,
-    skip_kg: skipKg,
   };
   try {
     await enqueueWithRetry(task);
@@ -367,7 +364,6 @@ export async function retryPersonalMaterialIndex(
   userId: string,
   materialId: string,
   textOnly?: boolean,
-  skipKg?: boolean,
 ): Promise<void> {
   assertUuid(materialId, "material_id");
   if (!getRedisUrl()) {
@@ -393,7 +389,6 @@ export async function retryPersonalMaterialIndex(
     operation: "personal_index_only",
     created_at: new Date().toISOString(),
     text_only: textOnly ?? true,
-    skip_kg: skipKg ?? true,
   };
   await enqueueWithRetry(task);
 }

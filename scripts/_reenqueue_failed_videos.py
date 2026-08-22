@@ -29,7 +29,6 @@ for (mid,) in rows:
         "operation": "transcribe_and_index",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "text_only": "true",
-        "skip_kg": "true",
     })
     print(f"Enqueued transcribe_and_index for material {mid}")
 

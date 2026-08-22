@@ -1,4 +1,4 @@
-"""Single long-lived asyncio loop for edu-rag-worker (LightRAG global locks are loop-bound).
+"""Single long-lived asyncio loop for edu-rag-worker.
 
 Course ingest/delete and assignment generation must run on this loop when the worker
 has started it, instead of calling ``asyncio.run`` per Redis task.

@@ -2,7 +2,7 @@
 
 Sets up:
   - DB connections for creating eval courses + user
-  - LightRAG text-ingest helpers (naive vs full)
+  - vector RAG text-ingest helpers (naive vs full)
   - Path constants
   - Logging
 """
@@ -49,7 +49,7 @@ _bootstrap()
 
 # ---------------------------------------------------------------------------
 # Deterministic IDs for eval infrastructure
-# (these are fixed, so re-runs reuse the same DB rows and LightRAG workspace)
+# (these are fixed, so re-runs reuse the same DB rows and vector RAG workspace)
 # RFC 4122–compliant UUIDs: third group starts with 4 (v4), fourth with 8 (variant 1)
 # so they pass the strict UUID regex in edu-platform/lib/course-access.ts
 # ---------------------------------------------------------------------------
@@ -59,10 +59,8 @@ EVAL_STUDENT_USERNAME = "eval_student"
 EVAL_STUDENT_EMAIL    = "eval_student@eval.internal"
 
 # Eval course IDs
-COURSE_GRAPHRAG_NAIVE = "c0000001-0000-4000-8000-000000000000"
-COURSE_GRAPHRAG_FULL  = "c0000002-0000-4000-8000-000000000000"
+COURSE_VECTOR_BASELINE = "c0000001-0000-4000-8000-000000000000"
 COURSE_FRAMES         = "c0000003-0000-4000-8000-000000000000"
-COURSE_EDU_BENCH      = "c0000011-0000-4000-8000-000000000000"  # PolyU GraphRAG-Bench CS textbooks
 # For ragas_custom, use the actual production course. Pass via EVAL_RAGAS_COURSE_ID env var.
 
 # ---------------------------------------------------------------------------
@@ -149,8 +147,7 @@ def setup_eval_db(eval_password: str = "eval_password_not_used_123!") -> None:
             )
             # Courses
             courses = [
-                (COURSE_GRAPHRAG_NAIVE, "Eval: GraphRAG-Bench Naive RAG"),
-                (COURSE_GRAPHRAG_FULL,  "Eval: GraphRAG-Bench Full LightRAG"),
+                (COURSE_VECTOR_BASELINE, "Eval: vector RAG baseline"),
                 (COURSE_FRAMES,         "Eval: FRAMES Wikipedia"),
             ]
             for cid, cname in courses:
@@ -177,40 +174,40 @@ def setup_eval_db(eval_password: str = "eval_password_not_used_123!") -> None:
 
 
 # ---------------------------------------------------------------------------
-# LightRAG ingest helpers
+# vector RAG ingest helpers
 # ---------------------------------------------------------------------------
 
-def _lightrag_dsn() -> str:
-    """Return psycopg-compatible DSN for the lightrag database."""
-    dsn = os.environ.get("LIGHTRAG_PG_DSN", "").strip()
+def _vector_dsn() -> str:
+    """Return psycopg-compatible DSN for the vector database."""
+    dsn = os.environ.get("RAG_PG_DSN", "").strip()
     if not dsn:
-        raise RuntimeError("LIGHTRAG_PG_DSN must be set (points to the edu_lightrag PG database).")
+        raise RuntimeError("RAG_PG_DSN must be set (points to the vector RAG database).")
     return _psycopg_dsn(dsn)
 
 
 def is_already_ingested(course_id: str, material_id: str) -> bool:
-    """Return True if this material's chunks already exist in lightrag_doc_chunks.
+    """Return True if this material's document exists in the vector store.
 
     Checks (workspace, full_doc_id) in the KV text-chunk table so we can skip
     re-embedding on a resumed run, avoiding unnecessary embedding API calls.
     """
     import psycopg
     from rag_mvp.engine import material_stable_doc_id
-    from rag_mvp.course_workspace import course_id_to_workspace
+    from rag_mvp.vector_store import course_workspace
 
     doc_id = material_stable_doc_id(material_id)
-    workspace = course_id_to_workspace(course_id)
+    workspace = course_workspace(course_id)
     try:
-        with psycopg.connect(_lightrag_dsn()) as conn:
+        with psycopg.connect(_vector_dsn()) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM lightrag_doc_chunks"
-                    " WHERE workspace = %s AND full_doc_id = %s LIMIT 1",
+                    "SELECT 1 FROM rag_documents"
+                    " WHERE workspace = %s AND id = %s LIMIT 1",
                     (workspace, doc_id),
                 )
                 return cur.fetchone() is not None
     except Exception as exc:
-        print(f"  [skip-check] Could not query lightrag_doc_chunks: {exc}")
+        print(f"  [skip-check] Could not query rag_documents: {exc}")
         return False
 
 
@@ -220,19 +217,13 @@ def ingest_text_naive(
     text: str,
     original_filename: str,
 ) -> int:
-    """Ingest plain text WITHOUT entity extraction (vector-only RAG).
-
-    Uses the sync wrapper so each call gets its own asyncio.run() and the
-    course LightRAG cache is invalidated afterward (prevents 'NoneType has
-    no _run_with_retry' when ingesting multiple documents in a loop).
-    """
+    """Ingest plain text into the vector index."""
     from rag_mvp.engine import ingest_text_into_course_sync
     return ingest_text_into_course_sync(
         course_id,
         material_id,
         text,
         original_filename=original_filename,
-        skip_entity_extraction=True,
     )
 
 
@@ -242,18 +233,8 @@ def ingest_text_full(
     text: str,
     original_filename: str,
 ) -> int:
-    """Ingest plain text WITH entity extraction (full LightRAG knowledge graph).
-
-    Uses the sync wrapper for the same cache-invalidation reason as ingest_text_naive.
-    """
-    from rag_mvp.engine import ingest_text_into_course_sync
-    return ingest_text_into_course_sync(
-        course_id,
-        material_id,
-        text,
-        original_filename=original_filename,
-        skip_entity_extraction=False,
-    )
+    """Compatibility alias for the single vector-index ingest path."""
+    return ingest_text_naive(course_id, material_id, text, original_filename)
 
 
 def run_ingest(coro):
@@ -294,14 +275,14 @@ COURSE_RAGAS_CUSTOM = "c8b8787f-9c7e-4f37-bab5-fb94a438d9cf"
 
 
 # ---------------------------------------------------------------------------
-# query_lightrag_direct: retrieval + controlled LLM call (no aquery_llm)
+# query_vector_direct: retrieval + controlled LLM call (no aquery_llm)
 # ---------------------------------------------------------------------------
 
-# Official GraphRAG-Bench system prompt (from Examples/run_lightrag.py)
+# Official vector-RAG benchmark system prompt (from Examples/run_vector.py)
 # Used to ensure fair comparison with the published leaderboard results.
 # In our pipeline the {context_data} placeholder is moved to the user message;
 # {history} is omitted (stateless eval).
-_GRAPHRAG_BENCH_SYSTEM_PROMPT = (
+_VECTOR_BENCH_SYSTEM_PROMPT = (
     "---Role---\n"
     "You are a helpful assistant responding to user queries.\n\n"
     "---Goal---\n"
@@ -426,11 +407,10 @@ def _cross_encoder_rerank(
     return [h for _, h in ranked[:top_k]]
 
 
-def query_lightrag_direct(
+def query_vector_direct(
     course_id: str,
     question: str,
     *,
-    mode: str,
     top_k: int = 10,
     enable_rewrite: bool = True,
     enable_decompose: bool = True,
@@ -438,13 +418,13 @@ def query_lightrag_direct(
     rerank: bool = False,
     official: bool = False,
 ) -> tuple[str, list[str]]:
-    """Retrieve chunks with LightRAG then synthesise an answer via a simple RAG prompt.
+    """Retrieve chunks with vector RAG then synthesise an answer via a simple RAG prompt.
 
     Steps:
       1. (C3) Rewrite query via LLM for better semantic retrieval (translate Chinese→English,
          expand abbreviations, clarify implicit subjects).
       2. (C4) Optionally decompose into sub-queries and merge hits.
-      3. Vector retrieval via LightRAG + BM25 full-text, merged with RRF.
+      3. Vector retrieval via vector RAG + BM25 full-text, merged with RRF.
       4. Optional cross-encoder re-ranking of merged hits (requires sentence-transformers;
          gracefully falls back to RRF order if the package is not installed).
       5. Synthesise answer using the original *question* so reply language is preserved.
@@ -454,10 +434,10 @@ def query_lightrag_direct(
       rerank: When True, apply Cross-Encoder re-ranking after RRF merge.
               Requires `sentence-transformers` (``pip install sentence-transformers``);
               falls back to RRF order silently if the package is missing.
-      official: When True, aligns with the official GraphRAG-Bench evaluation protocol:
+      official: When True, aligns with the official vector-RAG benchmark evaluation protocol:
                 - disables query rewrite and decompose (use raw question for retrieval)
                 - disables BM25 (official benchmark uses pure vector retrieval)
-                - uses the official English system prompt (GRAPHRAG_BENCH_SYSTEM_PROMPT)
+                - uses the official English system prompt (VECTOR_BENCH_SYSTEM_PROMPT)
                 This ensures results are comparable to the published leaderboard.
 
     Returns (answer_text, [chunk_text, ...]).
@@ -496,7 +476,7 @@ def query_lightrag_direct(
     all_vec_hits: list[dict] = []
     seen_vec_ids: set[str] = set()
     for sq in queries_to_run:
-        for h in course_retrieval_hits_sync(course_id, sq, mode=mode, top_k=vec_fetch_k):
+        for h in course_retrieval_hits_sync(course_id, sq, top_k=vec_fetch_k):
             cid = h.get("chunk_id", "")
             if cid not in seen_vec_ids:
                 seen_vec_ids.add(cid)
@@ -530,10 +510,10 @@ def query_lightrag_direct(
         context_block = "(No relevant content retrieved)" if official else "（未检索到相关内容）"
 
     if official:
-        # Official GraphRAG-Bench format: system prompt is role+goal only;
-        # context and question are both in the user message (mirrors run_lightrag.py behaviour).
+        # Official vector-RAG benchmark format: system prompt is role+goal only;
+        # context and question are both in the user message (mirrors run_vector.py behaviour).
         messages = [
-            SystemMessage(content=_GRAPHRAG_BENCH_SYSTEM_PROMPT),
+            SystemMessage(content=_VECTOR_BENCH_SYSTEM_PROMPT),
             HumanMessage(content=(
                 f"---Knowledge Base---\n{context_block}\n\n"
                 f"{question}"

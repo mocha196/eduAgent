@@ -1,36 +1,136 @@
-name: CI
+name: CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  lint-and-test:
-    name: Lint, type-check & unit tests
+  web-ci:
+    name: Web lint, type-check, test and build
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: edu-platform
-
+    env:
+      DATABASE_URL: postgresql://edu:edu@localhost:5432/edu_platform?schema=public
+      JWT_SECRET: ci-only-jwt-secret-at-least-32-characters
+      INTERNAL_API_KEY: ci-only-internal-key
+      RAG_SERVICE_API_KEY: ci-only-rag-service-key
+      LLM_CONFIG_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
+          cache: npm
           cache-dependency-path: edu-platform/package-lock.json
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run test
+      - run: npm run build
 
-      - name: Install dependencies
-        run: npm ci
+  rag-ci:
+    name: RAG compile, import and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - run: uv run python -m compileall -q src
+      - run: uv run python -c "import rag_mvp.engine; import rag_service.main"
+      - run: uv run pytest -q tests/unit
 
-      - name: Lint
-        run: npm run lint
+  publish-images:
+    name: Build and publish Docker images
+    if: github.event_name != 'pull_request'
+    needs: [web-ci, rag-ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push Next.js
+        uses: docker/build-push-action@v6
+        with:
+          context: ./edu-platform
+          push: true
+          cache-from: type=gha,scope=nextjs
+          cache-to: type=gha,mode=max,scope=nextjs
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/edu-platform-nextjs:latest
+            ghcr.io/${{ github.repository_owner }}/edu-platform-nextjs:sha-${{ github.sha }}
+      - name: Build and push RAG service
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./edu-platform/Dockerfile.rag-service
+          push: true
+          cache-from: type=gha,scope=rag-service
+          cache-to: type=gha,mode=max,scope=rag-service
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/edu-rag-service:latest
+            ghcr.io/${{ github.repository_owner }}/edu-rag-service:sha-${{ github.sha }}
 
-      - name: Type check
-        run: npx tsc --noEmit
-
-      - name: Unit tests
-        run: npm run test
+  deploy-production:
+    name: Deploy production
+    if: github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true'
+    needs: publish-images
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Copy Compose manifest
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/edu-platform' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" edu-platform/docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.yml"
+      - name: Pull and restart services
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/edu-platform' }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_TAG: sha-${{ github.sha }}
+        run: |
+          printf '%s' "$GHCR_PULL_TOKEN" | ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "docker login ghcr.io -u '$GHCR_USERNAME' --password-stdin"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd '$DEPLOY_PATH' && test -f .env && GITHUB_OWNER='$IMAGE_OWNER' IMAGE_TAG='$IMAGE_TAG' docker compose --env-file .env pull nextjs rag-service rag-worker review-scheduler && GITHUB_OWNER='$IMAGE_OWNER' IMAGE_TAG='$IMAGE_TAG' docker compose --env-file .env up -d --no-build postgres redis minio rag-service rag-worker nextjs review-scheduler && curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:8001/health && curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:3000/login"

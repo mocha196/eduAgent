@@ -9,8 +9,8 @@ Pipeline:
     6. ReviewerAgent._run_reviewer(questions, blueprint) → QualityReport dict
     7. DB updated at each stage via psycopg3 sync connection
 
-Course RAG is PostgreSQL-backed (PGKVStorage / PGVectorStorage / PGGraphStorage).
-Entity retrieval uses existing course_aquery_data() — no direct table queries needed.
+Course RAG is backed by PostgreSQL and pgvector.
+Topic retrieval uses the course vector index — no direct table queries needed.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ _PLANNER_SYSTEM = """\
 你是一位专业的教学设计专家。你会收到：
 1. 教师的作业需求描述
 2. 预分配好的题目槽位列表（每道题的类型、认知目标、难度已确定）
-3. 从课程知识图谱检索到的候选知识点实体
+3. 从课程向量索引检索到的候选知识点
 
 你的任务：
 1. 为每个槽位从候选实体中选出最合适的实体（1-2个）
@@ -279,7 +279,7 @@ async def _run_planner(
 
 
 # ---------------------------------------------------------------------------
-# Entity / context retrieval from course RAG (PostgreSQL backend)
+# Topic / context retrieval from course vector RAG
 # ---------------------------------------------------------------------------
 
 
@@ -288,10 +288,10 @@ async def _retrieve_candidates(
     topic_hint: str,
     count: int,
 ) -> list[dict[str, Any]]:
-    """Query course RAG (hybrid mode) to build entity candidates with text contexts.
+    """Query course vector RAG to build topic candidates with text contexts.
 
     Returns a list of dicts: {name, score, context, chunk_ids}.
-    Falls back to chunk-based pseudo-entities if no named entities are returned.
+    Each retrieved chunk becomes a topic candidate for the planner.
     """
     query = (
         f"{topic_hint}的核心概念、知识点和重要原理" if topic_hint
@@ -299,7 +299,7 @@ async def _retrieve_candidates(
     )
     top_k = min(count * 3, 60)
 
-    raw = await course_aquery_data(course_id, query, mode="hybrid", top_k=top_k)
+    raw = await course_aquery_data(course_id, query, top_k=top_k)
     data = raw.get("data") or {}
 
     entities: list[dict] = list(data.get("entities") or [])
@@ -726,7 +726,7 @@ async def regenerate_one_question(
         query_parts = [plain[:80]]
     query = " ".join(query_parts).strip() or "知识点"
 
-    raw = await course_aquery_data(course_id, query, mode="local", top_k=10)
+    raw = await course_aquery_data(course_id, query, top_k=10)
     data = raw.get("data") or {}
 
     chunks: list[dict] = list(data.get("chunks") or [])
@@ -866,7 +866,7 @@ async def complete_teacher_question(
     plain_stem = re.sub(r"<[^>]+>", "", question_stem).strip()
     query = f"{' '.join(entity_names[:2])} {plain_stem[:60]}".strip() or primary_entity or "知识点"
 
-    raw = await course_aquery_data(course_id, query, mode="local", top_k=6)
+    raw = await course_aquery_data(course_id, query, top_k=6)
     data = raw.get("data") or {}
     chunks: list[dict] = list(data.get("chunks") or [])
     chunk_map: dict[str, str] = {}

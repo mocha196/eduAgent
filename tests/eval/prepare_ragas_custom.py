@@ -203,7 +203,7 @@ def generate_testset(
     On the next run the checkpoint is reloaded and generation resumes from where
     it left off.
 
-    The knowledge graph is built once during the first batch
+    The vector index is built once during the first batch
     (``generate_with_langchain_docs``); subsequent batches call
     ``generator.generate()`` which reuses the cached graph.
     """
@@ -238,11 +238,11 @@ def generate_testset(
         batch_n = min(batch_size, n - len(questions))
         try:
             if not kg_built:
-                # First batch: builds the knowledge graph then generates samples.
+                # First batch: builds the vector index then generates samples.
                 testset = generator.generate_with_langchain_docs(lc_docs, testset_size=batch_n)
                 kg_built = True
             else:
-                # Subsequent batches: reuse the already-built knowledge graph.
+                # Subsequent batches: reuse the already-built vector index.
                 testset = generator.generate(testset_size=batch_n)
 
             batch_q = _extract_questions(testset, id_offset=len(questions))

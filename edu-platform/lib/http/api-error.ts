@@ -15,6 +15,7 @@ export type ApiErrorCode =
   | "NOT_PUBLISHED"
   | "DEADLINE_PASSED"
   | "ALREADY_RETURNED"
+  | "GRADING_IN_PROGRESS"
   | "NOT_GRADED"
   | "ALREADY_ANSWERED";
 

@@ -205,7 +205,7 @@ model MaterialImage {
   @@map("material_images")
 }
 
-/// Maps LightRAG chunk IDs to the source page they were extracted from.
+/// Maps vector chunk IDs to the source page they were extracted from.
 /// Populated during material indexing so citation panels can show only the relevant page image.
 model ChunkPageMapping {
   id         String @id @default(uuid()) @db.Uuid

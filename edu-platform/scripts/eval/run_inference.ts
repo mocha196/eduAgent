@@ -7,13 +7,13 @@
  * Run from the edu-platform/ directory:
  *
  *   npx tsx scripts/eval/run_inference.ts \
- *     --input  ../tests/eval/data/graphrag_bench_questions.json \
- *     --output ../tests/eval/results/graphrag_bench_naive_answers.json \
+ *     --input  ../tests/eval/data/ragas_custom_questions.json \
+ *     --output ../tests/eval/results/vector_baseline_answers.json \
  *     --course-id c0000001-0000-4000-8000-000000000000
  *
  *   npx tsx scripts/eval/run_inference.ts \
- *     --input  ../tests/eval/data/graphrag_bench_questions.json \
- *     --output ../tests/eval/results/graphrag_bench_full_answers.json \
+ *     --input  ../tests/eval/data/ragas_custom_questions.json \
+ *     --output ../tests/eval/results/vector_agent_answers.json \
  *     --course-id c0000002-0000-4000-8000-000000000000
  *
  *   npx tsx scripts/eval/run_inference.ts \

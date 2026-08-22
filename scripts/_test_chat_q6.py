@@ -16,9 +16,7 @@ q6 = (
     "--- do not fabricate.\n\n"
     "Use the knowledge retrieval tool to look up relevant information. "
     "Select the retrieval `mode` based on question type:\n"
-    "- `naive`: fact/definition lookups (pure vector search)\n"
-    "- `mix`: relational or cross-topic questions (vector + knowledge graph)\n"
-    "- `hybrid` (default): when unsure"
+    "The knowledge tool uses vector retrieval. Write concise, specific search queries."
 )
 
 print("Sending question 6...")

@@ -3,7 +3,7 @@
 Calls the Next.js chat endpoint (POST /api/v1/courses/{courseId}/chat) which runs
 the full agentic pipeline:
   ReAct LLM → knowledge_query tool (with _decomposeQuery + _rewriteQuery)
-             → LightRAG mix retrieval → answer synthesis
+             → vector retrieval → answer synthesis
 
 The eval student is enrolled in the target course automatically.
 A fresh session_id UUID is used per question to avoid history contamination.
@@ -128,7 +128,7 @@ def _ask_agentic(
     jwt = make_eval_jwt()
 
     if official:
-        # Official GraphRAG-Bench protocol: English prompt, keep tool-call guidance
+        # Official vector-RAG benchmark protocol: English prompt, keep tool-call guidance
         # but drop the Chinese mode table and instruction noise.
         message = (
             f"{question_text}\n\n"
@@ -136,9 +136,7 @@ def _ask_agentic(
             "If the retrieved context is insufficient, respond with \"I don't know\" — do not fabricate.\n\n"
             "Use the knowledge retrieval tool to look up relevant information. "
             "Select the retrieval `mode` based on question type:\n"
-            "- `naive`: fact/definition lookups (pure vector search)\n"
-            "- `mix`: relational or cross-topic questions (vector + knowledge graph)\n"
-            "- `hybrid` (default): when unsure"
+            "The knowledge tool uses vector retrieval. Focus on writing a precise search query."
         )
     else:
         message = (
@@ -148,9 +146,7 @@ def _ask_agentic(
             "`mode` 参数控制检索范围，根据问题特点自行选择最合适的模式：\n\n"
             "| 问题类型 | 推荐 mode | 原因 |\n"
             "|---|---|---|\n"
-            "| 事实定义、参数查询 | `naive` | 纯向量，速度快，精度高 |\n"
-            "| 概念关系、跨章节综合 | `mix` | 向量 + 知识图谱，覆盖更广 |\n"
-            "| 不确定时 | `hybrid`（默认） | 自动平衡 |"
+            "知识工具统一使用向量检索；请将复杂问题拆成清晰、具体的检索问题。"
         )
 
     url = f"{base_url.rstrip('/')}/api/v1/courses/{course_id}/chat"
@@ -181,7 +177,7 @@ def main(
     blacklist_path: str | None = None,
     official: bool = False,
 ) -> None:
-    mode_label = "TS Agentic ReAct (official GraphRAG-Bench protocol)" if official else "TS Agentic ReAct (mix)"
+    mode_label = "TS Agentic ReAct (official vector-RAG benchmark protocol)" if official else "TS Agentic ReAct (vector)"
     print(f"\n=== Collect Answers — {mode_label} ===\n")
 
     questions = load_json(questions_path)
@@ -286,7 +282,7 @@ if __name__ == "__main__":
     parser.add_argument("--blacklist", default="tests/eval/data/bad_question_ids.json",
                         help="Path to JSON file with bad question IDs to skip")
     parser.add_argument("--official", action="store_true",
-                        help="Use official GraphRAG-Bench protocol: English prompt, "
+                        help="Use official vector-RAG benchmark protocol: English prompt, "
                              "no Chinese mode table. Required for fair leaderboard comparison.")
     args = parser.parse_args()
 

@@ -19,8 +19,6 @@ export type RagQueueTask = {
     | "personal_index_only";
   created_at: string;
   text_only?: boolean;
-  /** When true (default), skip LLM entity/relation extraction at ingest (chunks + embeddings only). */
-  skip_kg?: boolean;
 };
 
 export async function enqueueRagTask(task: RagQueueTask): Promise<void> {
@@ -34,9 +32,6 @@ export async function enqueueRagTask(task: RagQueueTask): Promise<void> {
   };
   if (typeof task.text_only === "boolean") {
     fields.text_only = task.text_only ? "true" : "false";
-  }
-  if (typeof task.skip_kg === "boolean") {
-    fields.skip_kg = task.skip_kg ? "true" : "false";
   }
   await redis.xAdd(stream, "*", {
     ...fields,

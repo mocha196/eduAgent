@@ -72,7 +72,7 @@ describe("uploadMaterialStream", () => {
     assertTeacherOfCourseMock.mockResolvedValue(undefined);
   });
 
-  it("preserves skip_kg on initial office convert_preview task", async () => {
+  it("preserves text_only on initial office convert_preview task", async () => {
     await uploadMaterialStream({
       teacherUserId: "teacher-1",
       role: UserRole.TEACHER,
@@ -82,7 +82,6 @@ describe("uploadMaterialStream", () => {
       contentLength: 128,
       body: Readable.from(["pptx"]),
       textOnly: false,
-      skipKg: false,
     });
 
     expect(enqueueRagTaskMock).toHaveBeenCalledTimes(1);
@@ -90,7 +89,6 @@ describe("uploadMaterialStream", () => {
       expect.objectContaining({
         operation: "convert_preview",
         text_only: false,
-        skip_kg: false,
       }),
     );
   }, 15000);

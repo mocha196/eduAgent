@@ -13,7 +13,6 @@ Usage (run from project root):
 
 Options:
   --text-only     Only embed text (skip images/tables).  Default: False
-  --skip-kg       Skip KG entity extraction (faster).    Default: False
   --dry-run       Show plan and exit without doing anything
   --material-id   Reuse a specific UUID (for retrying a partially-run import)
   --server        API base URL (default: http://localhost:3000)
@@ -203,7 +202,6 @@ def main() -> None:
     parser.add_argument("--password", default="111111Aa")
     parser.add_argument("--server", default="http://localhost:3000")
     parser.add_argument("--text-only", action="store_true", default=False)
-    parser.add_argument("--skip-kg", action="store_true", default=False)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--material-id", default=None,
@@ -251,7 +249,7 @@ def main() -> None:
     logger.info("resume           = {}", args.resume)
     logger.info("PDF              = {}", pdf_path.name)
     logger.info("content_lists    = {} file(s)", len(content_list_paths))
-    logger.info("text_only        = {}  skip_kg = {}", args.text_only, args.skip_kg)
+    logger.info("text_only        = {}", args.text_only)
     logger.info("=" * 60)
 
     if args.dry_run:
@@ -267,15 +265,7 @@ def main() -> None:
         update_material_status,
     )
 
-    # We use pre-parsed content_list files so no document parser is needed.
-    # RAGAnything checks parser installation during init — bypass it here.
-    # This only affects the current process and has no impact on the worker.
-    try:
-        from raganything.parser import MineruParser, DoclingParser, PaddleOCRParser
-        for _parser_cls in (MineruParser, DoclingParser, PaddleOCRParser):
-            _parser_cls.check_installation = lambda self: True
-    except Exception:
-        pass  # raganything version without these classes — skip
+    # We use pre-parsed content-list files, so no document parser is needed.
 
     conn = _db_connect()
     dest_base = settings.output_dir / material_id
@@ -329,9 +319,7 @@ def main() -> None:
         # ------------------------------------------------------------------
         # INGEST: stage ALL parts first, then call ingest once so the engine
         # sees all JSON files in a single scan and can process them together.
-        # This ensures use_fast_kg_skip merges all parts in one ainsert call,
-        # and the full-KG path assigns unique doc_ids per part (engine fix).
-        # LightRAG chunk upsert is idempotent, so re-running is always safe.
+        # A single replace operation makes re-running idempotent.
         # ------------------------------------------------------------------
         dummy_local = dest_base / f"{material_id}.pdf"
         n_parts = len(content_list_paths)
@@ -350,7 +338,6 @@ def main() -> None:
             dummy_local,
             original_filename=original_filename,
             text_only=args.text_only,
-            skip_entity_extraction=args.skip_kg,
         )
         logger.success("Done: {} chunks total", total_n)
 
@@ -360,7 +347,7 @@ def main() -> None:
         _stage_content_lists(material_id, content_list_paths, settings.output_dir)
 
         try:
-            _record_chunk_page_mappings(material_id, conn, dest_base)
+            _record_chunk_page_mappings(material_id, course_id, conn)
         except Exception as exc:
             logger.warning("chunk_page_mappings (non-fatal): {}", exc)
 

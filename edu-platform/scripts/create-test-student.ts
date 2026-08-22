@@ -8,21 +8,19 @@ import * as argon2 from "argon2";
 const prisma = new PrismaClient();
 
 async function main() {
-  const username = "test_student";
+  const username = "S2026001";
   const password = "test123456";
   const realName = "功能测试学生";
-  const studentId = "S2026001";
 
   // 检查是否已存在
   const existing = await prisma.user.findFirst({
-    where: { OR: [{ username }, { studentId }] },
+    where: { username },
   });
 
   if (existing) {
     console.log("学生已存在:");
     console.log("  id      :", existing.id);
     console.log("  username:", existing.username);
-    console.log("  studentId:", existing.studentId);
     console.log("  role    :", existing.role);
     console.log("  初始密码:", password, "(如已修改则以实际为准)");
     return;
@@ -36,7 +34,6 @@ async function main() {
       passwordHash,
       role: UserRole.STUDENT,
       realName,
-      studentId,
       isActive: true,
     },
   });
@@ -44,7 +41,6 @@ async function main() {
   console.log("✓ 测试学生创建成功:");
   console.log("  id       :", user.id);
   console.log("  username :", user.username);
-  console.log("  studentId:", user.studentId);
   console.log("  密码     :", password);
 }
 

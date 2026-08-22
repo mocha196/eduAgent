@@ -38,7 +38,6 @@ export async function POST(req: NextRequest) {
       throw new ApiError(400, "VALIDATION_ERROR", "multipart field 'file' is required");
     }
     const textOnly = parseBool(form.get("text_only"));
-    const skipKg = parseBool(form.get("skip_kg"));
     const stream = Readable.fromWeb(file.stream() as import("node:stream/web").ReadableStream<Uint8Array>);
     const created = await uploadPersonalMaterialStream({
       userId: auth.sub,
@@ -47,7 +46,6 @@ export async function POST(req: NextRequest) {
       contentLength: file.size,
       body: stream,
       textOnly,
-      skipKg,
     });
     return jsonOk(created);
   } catch (e) {

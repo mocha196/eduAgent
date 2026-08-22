@@ -39,7 +39,6 @@ async function main(): Promise<void> {
   for (let i = 1; i <= MOCK_COUNT; i++) {
     const idx      = String(i).padStart(2, "0");
     const username = `mock_student_${idx}`;
-    const email    = `mock_student_${idx}@localhost.test`;
 
     // Upsert 用户
     let user = await prisma.user.findUnique({ where: { username } });
@@ -47,7 +46,6 @@ async function main(): Promise<void> {
       user = await prisma.user.create({
         data: {
           username,
-          email,
           passwordHash,
           role:     UserRole.STUDENT,
           realName: `压测学生 ${idx}`,

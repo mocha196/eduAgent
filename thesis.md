@@ -1,4 +1,4 @@
-﻿# 基于大模型与知识图谱的智能教育辅助平台
+﻿# 基于大模型与向量检索的智能教育辅助平台
 
 ---
 
@@ -53,7 +53,7 @@ flowchart TD
 
     subgraph SYSTEM["系统（后端处理）"]
         P1[/"JWT认证\n中间件"/] --> P2[材料异步处理队列\nRedis Stream]
-        P2 --> P3[RAG服务\nLightRAG索引]
+        P2 --> P3[RAG服务\n自研向量索引索引]
         P3 --> P4[AI Agent\nReAct推理循环]
         P4 --> P5[QaLog记录]
         P5 --> P6[学习分析聚合]
@@ -96,10 +96,7 @@ flowchart TD
     FT -- 音频MP3/WAV --> P6[Whisper语音识别\n→ 结构化文本]
 
     P1 & P2 & P3 & P4 & P5 & P6 --> IDX1[文本分块]
-    IDX1 --> IDX2{是否启用\n知识图谱?}
-    IDX2 -- 是 --> IDX3[实体/关系抽取\n→ 写入Neo4j\n知识图谱]
-    IDX2 -- 否 --> IDX4
-    IDX3 --> IDX4[Embedding向量化\n→ 写入PostgreSQL\n向量数据库]
+    IDX1 --> IDX4[Embedding向量化\n→ 写入PostgreSQL pgvector\n向量知识库]
     IDX4 --> DB2[更新Material状态\nstatus=READY\nindexedChunkCount=N]
     DB2 --> DONE([材料可供AI检索])
 
@@ -113,7 +110,7 @@ flowchart TD
 
 Python Worker 持续消费队列，根据文件类型选择对应处理策略：Office 文件先由 LibreOffice 转为 PDF 以生成预览版本，再经 MinerU 提取结构化文本；视频/音频文件经 Whisper 模型转录后生成结构化摘要；图片文件通过 MinerU OCR 识别。
 
-所有类型最终汇聚到分块与索引阶段：文本被切分为语义连贯的 chunk，可选择性地抽取实体关系写入 Neo4j 知识图谱，随后生成 Embedding 向量存入 PostgreSQL pgvector 数据库。全流程完成后将 Material 状态更新为 `READY`，任意环节失败则记录 `FAILED` 状态与错误原因，支持教师手动重试。
+所有类型最终汇聚到分块与索引阶段：文本被切分为语义连贯的 chunk，随后生成 Embedding 向量并写入 PostgreSQL pgvector 数据库。全流程完成后将 Material 状态更新为 `READY`，任意环节失败则记录 `FAILED` 状态与错误原因，支持教师手动重试。
 
 ---
 
@@ -150,7 +147,7 @@ sequenceDiagram
 
             alt RAG知识检索
                 Tools->>RAG: POST /rag/query\n{query, course_ids, top_k}
-                RAG->>RAG: 向量检索 + 图谱检索 + 重排序
+                RAG->>RAG: 向量检索 + BM25 关键词检索 + 融合排序
                 RAG-->>Tools: {answer, hit_chunks, hit_materials}
                 Tools-->>Agent: 工具结果 + 引用信息
                 Agent-->>FE: SSE: {type:"citation", chunk_id, source_label}
@@ -236,7 +233,7 @@ flowchart TD
     DS2[("D2\nPostgreSQL\n课程/课时表")]
     DS3[("D3\nMinIO\n材料文件")]
     DS4[("D4\nPostgreSQL\n材料元数据")]
-    DS5[("D5\nPostgreSQL/Neo4j\n向量库/知识图谱")]
+    DS5[("D5\nPostgreSQL pgvector\n向量知识库")]
     DS6[("D6\nRedis\nAgent会话")]
     DS7[("D7\nPostgreSQL\nQaLog")]
     DS8[("D8\nPostgreSQL\n作业表")]
@@ -287,7 +284,7 @@ flowchart TD
     P6 -->|学习进度| E2
 ```
 
-**说明：** 六个子系统共享以 PostgreSQL 为核心的持久化存储，其中用户表（D1）、课程表（D2）、材料元数据表（D4）、QaLog 表（D7）、作业表（D8）存于 PostgreSQL；材料文件二进制（D3）存于 MinIO；向量数据及知识图谱（D5）分存于 PostgreSQL pgvector 和 Neo4j；Agent 会话历史（D6）存于 Redis（TTL 24h）。P3 材料处理通过 Redis Stream 解耦前台上传与后台索引任务。
+**说明：** 六个子系统共享以 PostgreSQL 为核心的持久化存储，其中用户表（D1）、课程表（D2）、材料元数据表（D4）、QaLog 表（D7）、作业表（D8）存于 PostgreSQL；材料文件二进制（D3）存于 MinIO；向量知识库（D5）存于 PostgreSQL pgvector；Agent 会话历史（D6）存于 Redis（TTL 24h）。P3 材料处理通过 Redis Stream 解耦前台上传与后台索引任务。
 
 ---
 
@@ -302,7 +299,7 @@ flowchart TD
     E1(["教师"])
     DS3[("MinIO\n文件存储")]
     DS4[("材料元数据\nPostgreSQL")]
-    DS5[("向量库/知识图谱\nPostgreSQL+Neo4j")]
+    DS5[("向量知识库\nPostgreSQL pgvector")]
     RQ[("Redis Stream\nedu:rag:tasks:stream")]
 
     P31["P3.1\n文件接收\n与校验"]
@@ -323,7 +320,7 @@ flowchart TD
     RQ -->|"Worker消费"| P34
     P34 -->|"结构化文本块\n+页面图像URL"| P35
     P35 -->|"语义分块列表"| P36
-    P36 -->|"向量+实体关系"| DS5
+    P36 -->|"向量+语义片段"| DS5
     P36 -->|"chunk数量"| P37
     P37 -->|"UPDATE status=READY\nindexedChunkCount=N"| DS4
     P37 -->|"处理完成通知"| E1
@@ -337,7 +334,7 @@ flowchart TD
 flowchart TD
     E2(["学生"])
     DS6[("Redis\nAgent会话")]
-    DS5[("向量库/知识图谱")]
+    DS5[("向量库/向量知识库")]
     DS7[("QaLog\nPostgreSQL")]
     DS1[("用户表\nPostgreSQL")]
     E4(["LLM服务"])
@@ -358,7 +355,7 @@ flowchart TD
     P43 <-->|"推理请求/流式响应"| E4
     P43 -- "工具调用" --> P44
     P44 -- "knowledgeQuery" --> P45
-    P45 <-->|"向量/图谱检索\n{query,course_ids}"| DS5
+    P45 <-->|"向量/关键词检索\n{query,course_ids}"| DS5
     P45 -->|"命中chunks+引用"| P43
     P43 -->|"文本增量/引用事件\nSSE数据帧"| P46
     P46 -->|"流式SSE推送"| E2
@@ -372,7 +369,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     E1(["教师"])
-    DS5[("向量库/知识图谱")]
+    DS5[("向量库/向量知识库")]
     DS8[("作业表\nPostgreSQL")]
     E4(["LLM服务"])
 
@@ -412,7 +409,7 @@ flowchart TD
 |------|-----------|------|------|---------|
 | DF-01 | 材料上传请求 | 教师（浏览器） | P3.1 文件接收 | `file`（二进制流）+ `courseId`（UUID）+ `lessonId`（UUID，可选）+ `Content-Type`（multipart/form-data） |
 | DF-02 | RAG任务消息 | P3.3 任务入队 | Redis Stream | `materialId`（UUID）+ `task_type`（parse_and_index \| convert_preview \| transcribe_and_index）+ `course_id`（UUID）+ `minio_path`（字符串） |
-| DF-03 | 知识检索请求 | P4.4 工具路由 | RAG服务 | `query`（字符串）+ `course_ids`（UUID数组）+ `retrieval_mode`（hybrid \| course \| personal）+ `top_k`（整数，默认10） |
+| DF-03 | 知识检索请求 | P4.4 工具路由 | RAG服务 | `query`（字符串）+ `course_ids`（UUID数组）+ `top_k`（整数，默认10） |
 | DF-04 | SSE事件帧 | P4.6 回答生成 | 学生浏览器 | `type`（text \| citation \| tool_call \| tool_result \| done）+ `content`（字符串）\| `chunk_id` + `source_label` + `image_urls` |
 | DF-05 | 问答日志 | P4.7 日志持久化 | D7 QaLog表 | 见数据存储 DS-03 |
 
@@ -482,7 +479,7 @@ graph TD
 
 - **用户认证与管理（M1）**：负责用户的身份注册与验证，采用 Argon2id 算法加密存储密码，JWT 双令牌机制（15 分钟 Access Token + 7 天 Refresh Token）保障无感刷新。
 - **课程与课时管理（M2）**：提供课程的完整生命周期管理，支持多教师协作，分享码机制允许学生快速入课。
-- **教学材料管理（M3）**：支持 PDF、Office、视频、音频、图片等 6 类格式，通过 Redis Stream 异步队列解耦上传与处理，LightRAG 完成知识库构建。
+- **教学材料管理（M3）**：支持 PDF、Office、视频、音频、图片等 6 类格式，通过 Redis Stream 异步队列解耦上传与处理，自研向量索引 完成知识库构建。
 - **AI 智能问答（M4）**：核心模块，基于 ReAct 范式驱动 14 个工具执行，并集成三层记忆系统（事实记忆、概念记忆、学习档案）实现个性化辅导；CronJob 为定时 Agent 任务提供支撑。
 - **AI 作业生成（M5）**：三阶段流水线（规划—生成—审核）确保作业质量，支持题目的单独重生成与质量评分反馈。
 - **学习分析与统计（M6）**：基于 QaLog 数据聚合分析，为教师提供教学决策支持，为学生提供个性化学习路径建议。
@@ -600,10 +597,7 @@ flowchart TD
     WP1 & WP2 & WP3 & WP4 & WP5 & WP6 --> CHK[文本分块\n（语义分割）]
     CHK --> EMB[Embedding\n向量化]
     EMB --> VDB[写入 PostgreSQL\npgvector 向量库]
-    VDB --> KG{启用\n知识图谱?}
-    KG -- 是 --> NEO[实体关系抽取\n→ 写入 Neo4j]
-    KG -- 否 --> FIN
-    NEO --> FIN[UPDATE Material\nstatus=READY\nindexedChunkCount=N]
+    VDB --> FIN[UPDATE Material\nstatus=READY\nindexedChunkCount=N]
     FIN --> DONE([材料可供检索])
 
     W -- 任意步骤异常 --> FAIL[UPDATE Material\nstatus=FAILED\nstatusMessage=错误信息]
@@ -634,7 +628,7 @@ flowchart TD
         L2 -- 工具调用 --> L4[SSE推送\ntype:tool_call]
         L4 --> TOOL{工具路由}
 
-        TOOL -- knowledgeQueryTool --> T1[RAG Service\nPOST /rag/query\n混合向量+图谱检索]
+        TOOL -- knowledgeQueryTool --> T1[RAG Service\nPOST /rag/query\n混合向量+关键词检索]
         T1 --> T1R[SSE推送引用事件\ntype:citation]
         TOOL -- generateQuizTool --> T2[RAG Service\nPOST /rag/generate-quiz]
         TOOL -- webSearchTool --> T3[Tavily/Wikipedia API]
@@ -1294,7 +1288,7 @@ erDiagram
 
 系统将两类耗时操作从请求链路中剥离：
 
-- **异步材料处理**：教学材料上传后，后端向 **Redis Stream**（`material:ingest:stream`）写入任务消息，Python RAG 服务以消费者组模式拉取并执行文本提取、向量化与知识图谱入库，全程状态（UPLOADED → PARSING → READY）写回 PostgreSQL，前端通过轮询感知进度。
+- **异步材料处理**：教学材料上传后，后端向 **Redis Stream**（`material:ingest:stream`）写入任务消息，Python RAG 服务以消费者组模式拉取并执行文本提取、向量化与向量知识库入库，全程状态（UPLOADED → PARSING → READY）写回 PostgreSQL，前端通过轮询感知进度。
 - **定时 Agent 任务**：`cron_jobs` 表存储用户定义的调度规则（标准 cron 表达式），Next.js 内置调度器按周期触发 ReAct Agent 执行个性化复习推送等任务，执行记录持久化至 `cron_job_runs` 表。
 
 ---
@@ -1313,9 +1307,9 @@ Redis 7 在系统中承担多项职责：Agent 会话消息历史以键 `agent:s
 
 教学材料（PDF、Office 文档、视频、音频、图片）统一存储于 MinIO，对象路径格式为 `materials/{courseId}/{materialId}/{filename}`。MinIO 兼容 Amazon S3 协议，支持私有化部署，满足教育数据的本地化合规要求。系统通过预签名 URL（Presigned URL）向前端下发时效性访问凭证，避免将 MinIO 内部地址直接暴露。个人知识库材料同样使用独立桶（`personal-materials`）隔离存储。
 
-**（4）图数据库：Neo4j 5**
+**（4）向量数据库：PostgreSQL pgvector**
 
-RAG 知识图谱存储于 **Neo4j 5 Community**。选择图数据库而非关系数据库的核心理由在于数据模型的天然契合度：知识图谱中的实体（概念、章节）与关系（包含、依赖、相关）在图模型中以节点和边直接表达，遍历多跳关系（如"与运输层相关的所有概念及其依赖"）可通过 Cypher 查询一条语句完成；若改用关系表，同等查询需多次 JOIN，性能随跳数指数级下降。LightRAG 框架负责文本到图的自动抽取与更新，Neo4j 提供持久化存储与 Cypher 查询接口，二者配合实现课程知识的图结构化索引与语义检索增强。
+RAG 向量知识库存储于 **PostgreSQL pgvector**。材料文本被切分为带来源、页码和材料标识的语义片段，Embedding 向量与片段元数据一并持久化。查询时使用余弦距离完成语义召回，并可与 PostgreSQL 全文检索的 BM25 风格得分进行融合；统一使用 PostgreSQL 也减少了额外存储服务与跨库一致性维护成本。
 
 ---
 
@@ -1432,8 +1426,8 @@ export async function enqueueRagTask(task: RagQueueTask): Promise<void> {
     operation: task.operation,    // "parse_and_index" | "convert_preview" 等
     created_at: task.created_at,
   };
-  if (typeof task.skip_kg === "boolean") {
-    fields.skip_kg = task.skip_kg ? "true" : "false"; // 控制是否构建知识图谱
+  if (typeof task.text_only === "boolean") {
+    fields.text_only = task.text_only ? "true" : "false"; // 是否仅处理文本内容
   }
   // Redis XADD 自动生成时间戳ID，支持多 Worker 消费者组竞争消费
   await redis.xAdd(stream, "*", { ...fields });
@@ -1457,7 +1451,7 @@ async function enqueueRagTaskWithRetry(task: RagQueueTask, maxAttempts = 5): Pro
 }
 ```
 
-**设计要点：** Redis Stream 的 `XADD` 命令保证消息持久化，Python Worker 使用消费者组（Consumer Group）机制实现分布式处理与断点续消费；`skip_kg` 字段允许对文本类材料跳过代价较高的知识图谱抽取，在速度与能力间灵活权衡。
+**设计要点：** Redis Stream 的 `XADD` 命令保证消息持久化，Python Worker 使用消费者组（Consumer Group）机制实现分布式处理与断点续消费；`text_only` 字段用于区分纯文本与多模态内容处理，两种路径最终都会写入同一向量索引。
 
 ---
 
@@ -1466,7 +1460,7 @@ async function enqueueRagTaskWithRetry(task: RagQueueTask, maxAttempts = 5): Pro
 知识查询工具（`lib/agent/tools/rag.ts`）封装了对 RAG 服务的调用：
 
 ```typescript
-// knowledgeQueryTool：调用 RAG Service，支持混合检索（向量+图谱）
+// knowledgeQueryTool：调用 RAG Service 进行向量检索
 const result = await fetch(`${RAG_SERVICE_URL}/rag/query`, {
   method: "POST",
   headers: {
@@ -1476,7 +1470,6 @@ const result = await fetch(`${RAG_SERVICE_URL}/rag/query`, {
   body: JSON.stringify({
     query: args.query,
     course_ids: ctx.courseIds,        // 限定检索范围至当前课程
-    retrieval_mode: "hybrid",         // 向量相似度 + 图谱关系联合检索
     top_k: 10,
   }),
 });
@@ -1494,17 +1487,17 @@ for (const chunk of data.hit_chunks ?? []) {
 }
 ```
 
-**设计要点：** RAG 服务通过 `X-Internal-Key` 头进行内网鉴权，禁止外部直接调用；`retrieval_mode=hybrid` 融合 PostgreSQL pgvector 的语义向量检索与 Neo4j 知识图谱的关系检索，提升召回质量；`image_urls` 字段携带材料页面截图 URL，使前端引用面板可展示图文对照原文。
+**设计要点：** RAG 服务通过 `X-Internal-Key` 头进行内网鉴权，禁止外部直接调用；`retrieval_mode=vector` 使用 PostgreSQL pgvector 完成语义向量检索，并可与 BM25 关键词结果融合；`image_urls` 字段携带材料页面截图 URL，使前端引用面板可展示图文对照原文。
 
 ---
 
 ## 五、总结
 
-本文设计并实现了一个基于大模型与知识图谱的智能教育辅助平台，涵盖了从系统需求分析、架构设计到核心功能实现的完整开发过程。系统以 Next.js 15 + TypeScript 为前后端核心框架，PostgreSQL（含 pgvector 扩展）+ Redis + Neo4j + MinIO 构成多层次存储体系，FastAPI 提供独立的 RAG 知识检索服务，形成一套功能完备、工程可行的智能教育解决方案。
+本文设计并实现了一个基于大模型与向量知识库的智能教育辅助平台，涵盖了从系统需求分析、架构设计到核心功能实现的完整开发过程。系统以 Next.js 15 + TypeScript 为前后端核心框架，PostgreSQL（含 pgvector 扩展）+ Redis + MinIO 构成多层次存储体系，FastAPI 提供独立的 RAG 知识检索服务，形成一套功能完备、工程可行的智能教育解决方案。
 
 **系统功能回顾：** 系统实现了六大核心功能模块——用户认证与管理、课程与课时管理、教学材料的多模态处理与知识库构建、基于 ReAct 范式的 AI 智能问答、AI 辅助作业的三阶段生成流水线，以及面向教师与学生双端的学习分析与统计。通过材料处理状态机（UPLOADED → PARSING → READY）与 Redis Stream 异步队列，实现了大文件处理与用户界面的完全解耦；通过 JWT 双令牌机制与中间件无感刷新，在安全性与用户体验之间取得了良好的平衡。
 
-**技术创新点：** 第一，将 GraphRAG（知识图谱增强检索）与向量检索相融合，采用 LightRAG 框架同时维护 PostgreSQL 向量库与 Neo4j 知识图谱，实现了语义相似度与概念关联的双路召回；第二，在 TypeScript 运行时内原生实现 ReAct Agent，避免了引入独立 Python Agent 进程带来的部署复杂度和跨语言通信开销，Agent 的工具注册、会话管理、记忆系统均以模块化方式集成于 Next.js 服务中；第三，设计了三层记忆系统（短期会话历史、中期事实记忆 `UserMemoryFact`、长期概念掌握度 `UserMemoryConcept`），使 Agent 能够跨会话积累对学生知识状态的理解，提供真正的个性化辅导；第四，作业生成采用 Planner-Generator-Reviewer 三智能体协作流水线，通过专项 ReviewerAgent 对生成题目进行质量量化评分与失败题目定向重生成，显著提升了 AI 生成内容的可用性。
+**技术创新点：** 第一，采用 PostgreSQL pgvector 构建带材料、页码与图片引用信息的统一向量知识库，并融合语义召回与全文关键词信号；第二，在 TypeScript 运行时内原生实现 ReAct Agent，避免了引入独立 Python Agent 进程带来的部署复杂度和跨语言通信开销，Agent 的工具注册、会话管理、记忆系统均以模块化方式集成于 Next.js 服务中；第三，设计了三层记忆系统（短期会话历史、中期事实记忆 `UserMemoryFact`、长期概念掌握度 `UserMemoryConcept`），使 Agent 能够跨会话积累对学生知识状态的理解，提供真正的个性化辅导；第四，作业生成采用 Planner-Generator-Reviewer 三智能体协作流水线，通过专项 ReviewerAgent 对生成题目进行质量量化评分与失败题目定向重生成，显著提升了 AI 生成内容的可用性。
 
 
 

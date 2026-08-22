@@ -1,7 +1,4 @@
-"""Turn MinerU ``content_list`` multimodal blocks into text chunks for ``ainsert_custom_kg``.
-
-No RAG-Anything / graph pipeline — only string surrogates + LightRAG token chunking.
-"""
+"""Turn MinerU ``content_list`` multimodal blocks into searchable text chunks."""
 
 from __future__ import annotations
 
@@ -174,6 +171,9 @@ def content_item_to_surrogate_text(item: dict[str, Any]) -> str:
     """Map one multimodal ``content_list`` item to a single searchable text blob."""
     ctype = str(item.get("type") or "unknown").strip()
 
+    if ctype == "text":
+        return str(item.get("text") or item.get("content") or "").strip()
+
     if ctype == "image":
         return _image_surrogate_caption_path(item)
 
@@ -251,30 +251,22 @@ def content_item_to_surrogate_text(item: dict[str, Any]) -> str:
 
 
 def _surrogate_text_to_custom_chunks(
-    lightrag: Any,
     text: str,
     file_path: str,
     *,
     source_id_prefix: str,
     order_base: int,
 ) -> list[dict[str, Any]]:
-    """Split surrogate text using LightRAG token chunking (same contract as engine)."""
-    from lightrag.operate import chunking_by_token_size
+    """Split surrogate text using the application's token chunker."""
+    from rag_mvp.text_chunking import split_text
 
     text = text.strip()
     if not text:
         return []
-    pieces = chunking_by_token_size(
-        lightrag.tokenizer,
-        text,
-        None,
-        False,
-        lightrag.chunk_overlap_token_size,
-        lightrag.chunk_token_size,
-    )
+    pieces = split_text(text)
     chunks: list[dict[str, Any]] = []
-    for p in pieces:
-        content = (p.get("content") or "").strip()
+    for piece in pieces:
+        content = piece.strip()
         if not content:
             continue
         chunks.append(
@@ -289,7 +281,6 @@ def _surrogate_text_to_custom_chunks(
 
 
 def multimodal_items_to_custom_chunks(
-    lightrag: Any,
     items: list[dict[str, Any]],
     file_path: str,
     *,
@@ -303,7 +294,6 @@ def multimodal_items_to_custom_chunks(
             continue
         prefix = f"mm{mm_idx}"
         sub = _surrogate_text_to_custom_chunks(
-            lightrag,
             surrogate,
             file_path,
             source_id_prefix=prefix,
@@ -314,7 +304,6 @@ def multimodal_items_to_custom_chunks(
 
 
 async def multimodal_items_to_custom_chunks_async(
-    lightrag: Any,
     items: list[dict[str, Any]],
     file_path: str,
     *,
@@ -340,7 +329,6 @@ async def multimodal_items_to_custom_chunks_async(
             continue
         prefix = f"mm{mm_idx}"
         sub = _surrogate_text_to_custom_chunks(
-            lightrag,
             surrogate,
             file_path,
             source_id_prefix=prefix,

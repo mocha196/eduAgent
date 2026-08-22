@@ -10,7 +10,6 @@ const prisma = new PrismaClient();
 async function main(): Promise<void> {
   const username = process.env.SEED_ADMIN_USERNAME ?? "admin";
   const password = process.env.SEED_ADMIN_PASSWORD;
-  const email = process.env.SEED_ADMIN_EMAIL ?? "admin@localhost";
 
   if (!password || password.length < 12) {
     throw new Error(
@@ -31,7 +30,6 @@ async function main(): Promise<void> {
   await prisma.user.create({
     data: {
       username,
-      email,
       passwordHash,
       role: UserRole.ADMIN,
       realName: "System Admin",

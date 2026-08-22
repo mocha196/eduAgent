@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
     const styles = await prisma.agentStyle.findMany({ orderBy: { createdAt: "asc" } });
     return jsonOk({ styles });
   } catch (e) {
-    if (e instanceof ApiError) return e.toResponse();
+    if (e instanceof ApiError) return jsonError(e);
     throw e;
   }
 }

@@ -1,6 +1,6 @@
-"""Collect answers for Ragas-custom questions using LightRAG naive mode (non-agentic).
+"""Collect answers for Ragas-custom questions using dense vector RAG.
 
-Retrieves context chunks with mode="naive" (pure vector search), then calls the
+Retrieves context chunks with pure vector search, then calls the
 LLM with a simple, consistent RAG prompt — no query decomposition or rewriting.
 
 Usage:
@@ -24,7 +24,7 @@ from tests.eval._common import (
     COURSE_RAGAS_CUSTOM,
     _bootstrap,
     load_json,
-    query_lightrag_direct,
+    query_vector_direct,
 )
 
 _bootstrap()
@@ -43,8 +43,8 @@ def main(
     blacklist_path: str | None = None,
     official: bool = False,
 ) -> None:
-    mode_label = "naive (official GraphRAG-Bench protocol)" if official else "naive"
-    print(f"\n=== Collect Answers — LightRAG {mode_label} (non-agentic) ===\n")
+    mode_label = "official protocol" if official else "vector"
+    print(f"\n=== Collect Answers — {mode_label} RAG (non-agentic) ===\n")
 
     questions = load_json(questions_path)
     if blacklist_path:
@@ -80,7 +80,7 @@ def main(
     print(f"Already answered    : {len(done_ids)}")
     print(f"Remaining           : {len(pending)}")
     print(f"Course ID           : {course_id}")
-    print(f"Mode                : naive  |  top_k={top_k}")
+    print(f"Mode                : vector  |  top_k={top_k}")
     print(f"Official protocol   : {official} (no rewrite/decompose/BM25, EN system prompt)")
     print(f"LLM model           : {llm_model}")
     print(f"Output              : {output_path}\n")
@@ -91,10 +91,9 @@ def main(
         print(f"[{len(done_ids) + i + 1}/{len(questions)}] {question_text[:80]}...")
 
         try:
-            answer, contexts = query_lightrag_direct(
+            answer, contexts = query_vector_direct(
                 course_id,
                 question_text,
-                mode="naive",
                 top_k=top_k,
                 official=official,
             )
@@ -124,7 +123,7 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Collect LightRAG naive answers")
+    parser = argparse.ArgumentParser(description="Collect dense vector RAG answers")
     parser.add_argument("--questions", default=_DEFAULT_QUESTIONS)
     parser.add_argument("--output", default=_DEFAULT_OUTPUT)
     parser.add_argument("--course-id", default=COURSE_RAGAS_CUSTOM)
@@ -136,7 +135,7 @@ if __name__ == "__main__":
     parser.add_argument("--blacklist", default="tests/eval/data/bad_question_ids.json",
                         help="Path to JSON file with bad question IDs to skip")
     parser.add_argument("--official", action="store_true",
-                        help="Use official GraphRAG-Bench protocol: no query rewrite/decompose/BM25, "
+                        help="Use official vector-RAG benchmark protocol: no query rewrite/decompose/BM25, "
                              "English system prompt. Required for fair leaderboard comparison.")
     args = parser.parse_args()
     main(args.questions, args.output, args.course_id, args.top_k, args.limit, args.delay, args.blacklist, args.official)

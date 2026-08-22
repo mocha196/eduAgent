@@ -1,12 +1,10 @@
-"""Single factory for LightRAG ``EmbeddingFunc`` (Ollama vs OpenAI-compatible APIs)."""
+"""Embedding client abstraction for the vector RAG store."""
 
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
-from lightrag.llm.ollama import ollama_embed
-from lightrag.llm.openai import openai_embed
-from lightrag.utils import EmbeddingFunc
 from loguru import logger
 
 from .config import settings
@@ -14,107 +12,74 @@ from .http_env import ensure_loopback_bypass_http_proxy
 
 ensure_loopback_bypass_http_proxy()
 
-_EMBED_MAX_ATTEMPTS = 3  # total attempts (1 original + 2 retries)
-_EMBED_RETRY_BASE_SECS = 2  # base backoff: 2s, 4s
+_MAX_ATTEMPTS = 3
+_RETRY_BASE_SECONDS = 2
 
 
-def _effective_embedding_base_url() -> str:
-    u = (settings.embedding_base_url or settings.llm_base_url or "").strip()
-    return u.rstrip("/")
+def _base_url() -> str:
+    return (settings.embedding_base_url or settings.llm_base_url or "").strip().rstrip("/")
 
 
-def _effective_embedding_api_key() -> str:
+def _api_key() -> str:
     return (settings.embedding_api_key or settings.llm_api_key or "").strip()
 
 
-async def _ollama_embedding_func_with_label(texts: list[str], **kwargs):
-    """Ollama embeddings via LightRAG's ``ollama_embed.func`` (use .func to avoid double-wrap)."""
-    from .llm import _llm_role
+def _retryable(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(word in text for word in ("connection", "timeout", "network", "reset by peer", "eof"))
 
-    key = settings.ollama_api_key.strip() or None
-    last_exc: Exception | None = None
-    for attempt in range(_EMBED_MAX_ATTEMPTS):
-        token = _llm_role.set(f"embedding/{settings.embedding_model}")
+
+async def _openai_embeddings(texts: list[str]) -> list[list[float]]:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=_api_key() or "not-set", base_url=_base_url() or None)
+    request: dict[str, Any] = {"model": settings.embedding_model, "input": texts}
+    # `dimensions` is an OpenAI text-embedding-3 feature. Most compatible
+    # providers (including BGE-M3 endpoints) reject the parameter outright.
+    if settings.embedding_model.lower().startswith("text-embedding-3"):
+        request["dimensions"] = settings.embedding_dim
+    response = await client.embeddings.create(**request)
+    ordered = sorted(response.data, key=lambda item: item.index)
+    return [list(item.embedding) for item in ordered]
+
+
+async def _ollama_embeddings(texts: list[str]) -> list[list[float]]:
+    from ollama import AsyncClient
+
+    kwargs: dict[str, Any] = {"host": settings.ollama_base_url.rstrip("/")}
+    if settings.ollama_api_key.strip():
+        kwargs["headers"] = {"Authorization": f"Bearer {settings.ollama_api_key.strip()}"}
+    response = await AsyncClient(**kwargs).embed(model=settings.embedding_model, input=texts)
+    embeddings = response.get("embeddings") if isinstance(response, dict) else response.embeddings
+    return [list(vector) for vector in embeddings]
+
+
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed a non-empty list of strings with retry and dimension validation."""
+    if not texts:
+        return []
+    call = _openai_embeddings if settings.embedding_mode == "openai_compatible" else _ollama_embeddings
+    last_error: Exception | None = None
+    for attempt in range(_MAX_ATTEMPTS):
         try:
-            return await ollama_embed.func(
-                texts,
-                embed_model=settings.embedding_model,
-                host=settings.ollama_base_url.rstrip("/"),
-                api_key=key,
-                **kwargs,
-            )
+            vectors = await call(texts)
+            for vector in vectors:
+                if len(vector) != settings.embedding_dim:
+                    raise RuntimeError(
+                        f"Embedding dimension mismatch: expected {settings.embedding_dim}, got {len(vector)}"
+                    )
+            return vectors
         except Exception as exc:
-            if not _is_retryable_embedding_error(exc):
+            last_error = exc
+            if not _retryable(exc) or attempt == _MAX_ATTEMPTS - 1:
                 raise
-            last_exc = exc
-            if attempt < _EMBED_MAX_ATTEMPTS - 1:
-                wait = _EMBED_RETRY_BASE_SECS * (2 ** attempt)
-                logger.warning(
-                    "[embedding] Ollama connection error (attempt {}/{}), retrying in {}s: {}",
-                    attempt + 1, _EMBED_MAX_ATTEMPTS, wait, exc,
-                )
-                await asyncio.sleep(wait)
-        finally:
-            _llm_role.reset(token)
-    raise last_exc  # type: ignore[misc]
-
-
-def _is_retryable_embedding_error(exc: Exception) -> bool:
-    """Return True for transient connection/timeout errors that are safe to retry."""
-    from openai import APIConnectionError, APITimeoutError
-    if isinstance(exc, (APIConnectionError, APITimeoutError)):
-        return True
-    # Also catch httpx and generic network strings for non-openai backends
-    err = str(exc).lower()
-    return any(kw in err for kw in ("connection", "timeout", "network", "reset by peer", "eof"))
-
-
-async def _openai_compatible_embedding_func_with_label(texts: list[str], **kwargs):
-    """OpenAI-compatible ``/v1/embeddings`` with per-attempt retry on connection errors."""
-    from .llm import _llm_role
-
-    base = _effective_embedding_base_url()
-    key = _effective_embedding_api_key() or None
-    last_exc: Exception | None = None
-    for attempt in range(_EMBED_MAX_ATTEMPTS):
-        token = _llm_role.set(f"embedding/{settings.embedding_model}")
-        try:
-            # Explicitly request EMBEDDING_DIM dimensions so the API output always matches the
-            # configured vector size (e.g. text-embedding-v4 defaults to 1536d but we need 1024d).
-            # openai_embed.func accepts `embedding_dim` and internally passes it as `dimensions` to the API.
-            return await openai_embed.func(
-                texts,
-                model=settings.embedding_model,
-                base_url=base or None,
-                api_key=key,
-                embedding_dim=settings.embedding_dim,
-                **kwargs,
+            delay = _RETRY_BASE_SECONDS * (2**attempt)
+            logger.warning(
+                "Embedding request failed (attempt {}/{}); retrying in {}s: {}",
+                attempt + 1,
+                _MAX_ATTEMPTS,
+                delay,
+                exc,
             )
-        except Exception as exc:
-            if not _is_retryable_embedding_error(exc):
-                raise
-            last_exc = exc
-            if attempt < _EMBED_MAX_ATTEMPTS - 1:
-                wait = _EMBED_RETRY_BASE_SECS * (2 ** attempt)
-                logger.warning(
-                    "[embedding] APIConnectionError (attempt {}/{}), retrying in {}s: {}",
-                    attempt + 1, _EMBED_MAX_ATTEMPTS, wait, exc,
-                )
-                await asyncio.sleep(wait)
-        finally:
-            _llm_role.reset(token)
-    raise last_exc  # type: ignore[misc]
-
-
-def build_embedding_func() -> EmbeddingFunc:
-    """Return a new ``EmbeddingFunc`` bound to current settings (fresh LightRAG worker queues)."""
-    if settings.embedding_mode == "openai_compatible":
-        fn = _openai_compatible_embedding_func_with_label
-    else:
-        fn = _ollama_embedding_func_with_label
-    return EmbeddingFunc(
-        embedding_dim=settings.embedding_dim,
-        max_token_size=settings.embedding_max_tokens,
-        func=fn,
-        send_dimensions=False,
-    )
+            await asyncio.sleep(delay)
+    raise last_error or RuntimeError("Embedding request failed")

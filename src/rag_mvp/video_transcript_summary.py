@@ -214,7 +214,7 @@ async def _call_llm_chunk(
     _trace: "Any | None" = None,
     _chunk_index: int = 0,
 ) -> list[dict[str, Any]]:
-    from lightrag.llm.openai import openai_complete_if_cache
+    from .llm import openai_complete
 
     if not chunk_rows:
         return []
@@ -236,7 +236,7 @@ async def _call_llm_chunk(
     last_err: Exception | None = None
     for attempt in range(2):
         try:
-            raw = await openai_complete_if_cache(
+            raw = await openai_complete(
                 model,
                 user,
                 system_prompt=system_prompt,

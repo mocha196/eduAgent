@@ -1,5 +1,5 @@
 /**
- * RAG tools: knowledge_query, generate_quiz, build_mindmap
+ * Vector RAG tool: knowledge_query
  * All call the Python RAG microservice via HTTP.
  */
 
@@ -167,14 +167,6 @@ export const knowledgeQueryTool: Tool = {
     type: "object",
     properties: {
       question: { type: "string", minLength: 1, maxLength: 2000, description: "要查询的自然语言问题" },
-      mode: {
-        type: "string",
-        enum: ["naive", "mix", "hybrid", "local", "global"],
-        description:
-          "检索模式。naive：纯向量检索，速度快；" +
-          "mix：向量 + 知识图谱，覆盖更广；" +
-          "hybrid/local/global：其他图谱模式。",
-      },
       sources: {
         description:
           "必填。字符串：personal | course | all | enrolled_courses；或数组：[course, personal]。",
@@ -234,15 +226,12 @@ export const knowledgeQueryTool: Tool = {
     const effectiveSource = ctx.evalMode ? "course" : source!;
 
     const top_k = typeof args.top_k === "number" ? Math.max(1, Math.min(20, args.top_k)) : 5;
-    const mode = typeof args.mode === "string" ? args.mode : "hybrid";
-
     type QueryResp = { hits: HitItem[]; warnings: string[] };
     const baseBody = {
       source: effectiveSource,
       user_id: ctx.userId,
       accessible_course_ids: ctx.accessibleCourseIds,
       course_id: ctx.courseId ?? null,
-      mode,
       top_k,
     };
 
@@ -315,44 +304,4 @@ export const knowledgeQueryTool: Tool = {
     return { content, citations, meta };
   },
 };
-
-// ---- generate_quiz (disabled) ----------------------------------------------
-
-/* export const generateQuizTool: Tool = {
-  name: "generate_quiz",
-  description:
-    "根据课程知识库生成练习题。当用户要求练习、做题、出题或测验时调用此工具。",
-  parameters: {
-    type: "object",
-    properties: {
-      count: { type: "integer", description: "生成题目数量（默认 5，最多 20）" },
-      question_type: {
-        type: "string",
-        enum: ["single_choice", "multi_choice", "fill_blank", "short_answer", "mixed"],
-        description: "题型：单选、多选、填空、简答、混合（默认混合）",
-      },
-    },
-    required: [],
-  },
-  async execute(args: Record<string, unknown>, ctx: TurnContext): Promise<string> {
-    if (!ctx.courseId) {
-      return JSON.stringify({ error: "generate_quiz 需要绑定课程（无课程上下文）" });
-    }
-    const ragUrl = process.env.RAG_SERVICE_URL ?? "http://localhost:8001";
-    const ragKey = process.env.RAG_SERVICE_API_KEY ?? "";
-
-    const count =
-      typeof args.count === "number" ? Math.max(1, Math.min(20, args.count)) : 5;
-    const question_type =
-      typeof args.question_type === "string" ? args.question_type : "mixed";
-
-    const result = await ragPost<Record<string, unknown>>(`${ragUrl}/rag/generate-quiz`, ragKey, {
-      course_id: ctx.courseId,
-      count,
-      question_type,
-    });
-    return JSON.stringify(result);
-  },
-}; */
-
 

@@ -66,7 +66,6 @@ function UploadForm({
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [textOnly, setTextOnly] = useState(true);
-  const [skipKg, setSkipKg] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -90,7 +89,6 @@ function UploadForm({
       const form = new FormData();
       form.append("file", file);
       form.append("text_only", textOnly ? "true" : "false");
-      form.append("skip_kg", skipKg ? "true" : "false");
       const res = await fetch("/api/v1/me/materials", {
         method: "POST",
         credentials: "include",
@@ -132,19 +130,6 @@ function UploadForm({
           <div>
             <p className="font-medium text-foreground">仅文本索引</p>
             <p className="text-[11px] text-muted-foreground mt-0.5">开启后跳过图片、表格、公式等多模态块</p>
-          </div>
-        </label>
-        <label className="flex items-start gap-2.5 rounded-xl border border-border px-3 py-2.5 text-xs cursor-pointer hover:bg-muted/20 transition-colors">
-          <input
-            type="checkbox"
-            checked={skipKg}
-            disabled={uploading}
-            onChange={(e) => setSkipKg(e.target.checked)}
-            className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary"
-          />
-          <div>
-            <p className="font-medium text-foreground">关闭实体与关系提取</p>
-            <p className="text-[11px] text-muted-foreground mt-0.5">不做知识图谱抽取，只写入向量索引</p>
           </div>
         </label>
       </div>

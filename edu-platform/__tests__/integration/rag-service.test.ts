@@ -68,15 +68,15 @@ describe("RAG Service integration", () => {
   });
 
   // ─── TC-RAG-003: Smoke test with real embedding backend ──────────────────
-  // Uses mode=naive (vector-only search) which calls only the embedding API
-  // and does NOT trigger LightRAG's structured-output keyword extraction LLM call.
+  // Uses vector search, which calls only the embedding API
+  // and does not trigger an extra query-analysis LLM call.
   // This makes the test stable regardless of whether the LLM model supports
   // JSON schema response_format (DeepSeek V4 Flash does NOT; deepseek-v4-pro does).
   //
   // The endpoint returns { hits: HitItem[], warnings: string[] }.
   // hits may be empty when no documents are indexed yet — that is still 200 OK.
 
-  describe("TC-RAG-003: /rag/query smoke test (mode=naive)", () => {
+  describe("TC-RAG-003: /rag/query vector smoke test", () => {
     it("query with a real course_id returns a parseable response", async () => {
       if (!firstCourseId || !firstUserId) {
         console.log("No courses in DB — skipping smoke test");
@@ -90,7 +90,7 @@ describe("RAG Service integration", () => {
           user_id: firstUserId,
           course_id: firstCourseId,
           question: "What is this course about?",
-          mode: "naive",
+          mode: "vector",
           top_k: 3,
         }),
       });
@@ -118,7 +118,7 @@ describe("RAG Service integration", () => {
           source: "personal",
           user_id: firstUserId,
           question: "What topics have I studied?",
-          mode: "naive",
+          mode: "vector",
           top_k: 3,
         }),
       });

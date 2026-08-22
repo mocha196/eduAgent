@@ -1,10 +1,10 @@
-"""Course material pipeline: MinIO → engine.parse_file → LightRAG PG (workspace).
+"""Course material pipeline: MinIO → MinerU parsing → PostgreSQL vector index.
 
 If PostgreSQL reports ``another operation is in progress`` during indexing, try
 lowering ``MAX_PARALLEL_INSERT`` or ``EMBEDDING_MAX_ASYNC`` in ``rag_mvp`` settings.
 
 When ``edu-rag-worker`` has started the persistent async loop (``worker_async_loop``),
-parse and ingest run on that loop so LightRAG global locks stay on one event loop.
+parse and ingest run on that loop.
 Otherwise parse uses ``engine.parse_file`` (``asyncio.run``) and ingest uses sync wrappers.
 PARSED / INDEXING commits remain on the main thread between parse and ingest.
 
@@ -126,7 +126,6 @@ async def _ingest_parsed_material_worker_async(
     local_file: Path,
     original_filename: str | None,
     text_only: bool,
-    skip_kg: bool,
 ) -> int:
     """Ingest + same cache invalidation as ``ingest_parsed_material_into_course_sync``."""
     try:
@@ -136,7 +135,6 @@ async def _ingest_parsed_material_worker_async(
             local_file,
             original_filename=original_filename,
             text_only=text_only,
-            skip_entity_extraction=skip_kg,
         )
     finally:
         _invalidate_course_rag_cache_for(course_id)
@@ -163,7 +161,6 @@ def _ingest_parsed_dispatch(
     local_file: Path,
     original_filename: str | None,
     text_only: bool,
-    skip_kg: bool,
 ) -> int:
     if is_worker_async_loop_started():
         return run_worker_coroutine(
@@ -173,7 +170,6 @@ def _ingest_parsed_dispatch(
                 local_file,
                 original_filename,
                 text_only,
-                skip_kg,
             ),
             timeout=None,
         )
@@ -183,7 +179,6 @@ def _ingest_parsed_dispatch(
         local_file,
         original_filename=original_filename,
         text_only=text_only,
-        skip_entity_extraction=skip_kg,
     )
 
 
@@ -192,7 +187,6 @@ def _ingest_text_dispatch(
     material_id: str,
     text: str,
     original_filename: str | None,
-    skip_kg: bool,
 ) -> int:
     async def _ingest_text_worker_async() -> int:
         return await ingest_text_into_course_async(
@@ -200,7 +194,6 @@ def _ingest_text_dispatch(
             material_id,
             text,
             original_filename=original_filename,
-            skip_entity_extraction=skip_kg,
         )
 
     if is_worker_async_loop_started():
@@ -210,7 +203,6 @@ def _ingest_text_dispatch(
         material_id,
         text,
         original_filename=original_filename,
-        skip_entity_extraction=skip_kg,
     )
 
 
@@ -271,9 +263,7 @@ def _raise_if_cancelled(r: redis.Redis, material_id: str, checkpoint: str) -> No
         raise MaterialCancelledError(f"Cancelled at {checkpoint}")
 
 
-def _enqueue_parse_and_index_task(
-    material_id: str, *, text_only: bool, skip_kg: bool = True
-) -> None:
+def _enqueue_parse_and_index_task(material_id: str, *, text_only: bool) -> None:
     """Chain Phase 2 after Office preview PDF is ready (same Redis Stream as Next.js)."""
     redis_url = os.environ.get("REDIS_URL", "").strip()
     if not redis_url:
@@ -287,14 +277,11 @@ def _enqueue_parse_and_index_task(
             "operation": "parse_and_index",
             "created_at": datetime.now(UTC).isoformat(),
             "text_only": "true" if text_only else "false",
-            "skip_kg": "true" if skip_kg else "false",
         },
     )
 
 
-def _enqueue_convert_preview_task(
-    material_id: str, *, text_only: bool, skip_kg: bool = True
-) -> None:
+def _enqueue_convert_preview_task(material_id: str, *, text_only: bool) -> None:
     """Re-queue Phase 1 (e.g. compat for in-flight ``parse_and_index`` before Phase D)."""
     redis_url = os.environ.get("REDIS_URL", "").strip()
     if not redis_url:
@@ -308,13 +295,12 @@ def _enqueue_convert_preview_task(
             "operation": "convert_preview",
             "created_at": datetime.now(UTC).isoformat(),
             "text_only": "true" if text_only else "false",
-            "skip_kg": "true" if skip_kg else "false",
         },
     )
 
 
 def _maybe_enqueue_convert_preview_for_stuck_office(
-    conn: psycopg.Connection, material_id: str, *, text_only: bool, skip_kg: bool = True
+    conn: psycopg.Connection, material_id: str, *, text_only: bool
 ) -> None:
     """If ``parse_and_index`` cannot claim because Phase D blocks office+PENDING, re-queue Phase 1."""
     with conn.cursor() as cur:
@@ -344,7 +330,6 @@ def _maybe_enqueue_convert_preview_for_stuck_office(
             _enqueue_parse_and_index_task(
                 material_id,
                 text_only=text_only,
-                skip_kg=skip_kg,
             )
             return
     except Exception:
@@ -357,7 +342,7 @@ def _maybe_enqueue_convert_preview_for_stuck_office(
         "parse_and_index: material {} is office+PENDING; enqueue convert_preview (compat)",
         material_id,
     )
-    _enqueue_convert_preview_task(material_id, text_only=text_only, skip_kg=skip_kg)
+    _enqueue_convert_preview_task(material_id, text_only=text_only)
 
 
 _OFFICE_SUFFIXES = frozenset({".ppt", ".pptx", ".doc", ".docx"})
@@ -794,42 +779,18 @@ def _upload_material_images_to_minio(
 
 def _record_chunk_page_mappings(
     material_id: str,
+    course_id: str,
     conn: psycopg.Connection,
-    scan_dir: Path,
 ) -> None:
-    """Record chunk_id → page_idx for multimodal content items (image, table, equation, chart).
+    """Copy vector chunk page metadata into the platform citation table."""
+    from rag_mvp.vector_store import course_workspace, document_id, document_page_mappings
 
-    Text items are concatenated before chunking so their per-page boundaries are
-    difficult to recover; only multimodal surrogate chunks are tracked here since
-    those are the items paired with visual images in the citation panel.
-    chunk_id = compute_mdhash_id(surrogate_text, prefix="chunk-") — same formula
-    LightRAG uses when storing chunks in lightrag_vdb_chunks.
-    """
-    from lightrag.utils import compute_mdhash_id
-
-    from rag_mvp.multimodal_surrogate_chunks import content_item_to_surrogate_text
-
-    _VISUAL_TYPES = frozenset({"image", "table", "equation", "chart"})
-
-    mappings: list[tuple[str, str, int]] = []  # (material_id, chunk_id, page_idx)
-    for json_path in scan_dir.rglob("*_content_list.json"):
-        if "_content_list_v2" in json_path.name:
-            continue
-        try:
-            raw: list = json.loads(json_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for item in raw:
-            if str(item.get("type", "")).strip() not in _VISUAL_TYPES:
-                continue
-            page_idx = item.get("page_idx")
-            if page_idx is None:
-                continue
-            surrogate = content_item_to_surrogate_text(item).strip()
-            if not surrogate:
-                continue
-            chunk_id = compute_mdhash_id(surrogate, prefix="chunk-")
-            mappings.append((material_id, chunk_id, int(page_idx)))
+    mappings = [
+        (material_id, chunk_id, page_idx)
+        for chunk_id, page_idx in document_page_mappings(
+            course_workspace(course_id), document_id(material_id)
+        )
+    ]
 
     if not mappings:
         logger.debug("No visual chunk-page mappings found for material {}", material_id)
@@ -888,7 +849,7 @@ async def _generate_document_summary_async(
     """
     import asyncio
 
-    from lightrag.llm.openai import openai_complete_if_cache
+    from rag_mvp.llm import llm_chat_model_func
 
     cfg = settings
     if not full_text.strip():
@@ -943,15 +904,12 @@ async def _generate_document_summary_async(
         )
         async with sem:
             try:
-                return await openai_complete_if_cache(
-                    cfg.llm_model,
+                return await llm_chat_model_func(
                     prompt,
                     system_prompt=(
                         "You are a helpful assistant that summarises document sections concisely."
                     ),
                     history_messages=[],
-                    api_key=cfg.llm_api_key,
-                    base_url=cfg.llm_base_url,
                     max_tokens=512,
                     temperature=0.0,
                 )
@@ -977,22 +935,17 @@ async def _generate_document_summary_async(
                 "Cover the main topics, key points, structure, and conclusions."
                 f"\n\n{combined}"
             )
-            model = cfg.refine_model
         else:
             prompt = (
                 f"The following are summaries of consecutive sections of a document{name_hint}. "
                 "Merge them into one coherent paragraph in the same language."
                 f"\n\n{combined}"
             )
-            model = cfg.llm_model
         try:
-            return await openai_complete_if_cache(
-                model,
+            return await llm_chat_model_func(
                 prompt,
                 system_prompt="You are a helpful assistant that synthesises document summaries.",
                 history_messages=[],
-                api_key=cfg.llm_api_key,
-                base_url=cfg.llm_base_url,
                 max_tokens=1024,
                 temperature=0.0,
             )
@@ -1081,10 +1034,9 @@ def _run_material_download_parse_and_ingest(
     file_type: str,
     original_filename: str | None,
     text_only: bool,
-    skip_kg: bool,
     r: redis.Redis | None = None,
 ) -> None:
-    """MinIO → parse → LightRAG. Row must already be ``PARSING``."""
+    """MinIO → parse → vector index. Row must already be ``PARSING``."""
     work_parent = Path(tempfile.mkdtemp(prefix="edu_mat_"))
     suffix = Path(minio_path).suffix or ".bin"
     local_file = work_parent / f"{material_id}{suffix}"
@@ -1171,12 +1123,11 @@ def _run_material_download_parse_and_ingest(
             local_file,
             str(original_filename) if original_filename else None,
             text_only,
-            skip_kg,
         )
 
         # Record chunk→page_idx mappings (best-effort; used for per-page image filtering).
         try:
-            _record_chunk_page_mappings(material_id, conn, settings.output_dir / local_file.stem)
+            _record_chunk_page_mappings(material_id, course_id, conn)
         except Exception as cpm_exc:
             logger.warning("chunk_page_mappings recording failed for {} (non-fatal): {}", material_id, cpm_exc)
 
@@ -1198,7 +1149,7 @@ def _run_material_download_parse_and_ingest(
         if stem_dir.exists():
             shutil.rmtree(stem_dir, ignore_errors=True)
 
-        logger.success("Indexed material {} ({} chunks via LightRAG)", material_id, n)
+        logger.success("Indexed material {} ({} vector chunks)", material_id, n)
         _notify_nextjs({"type": "MATERIAL_READY", "material_id": material_id, "course_id": course_id})
     except MaterialCancelledError:
         # Cancelled cleanly — material is already soft-deleted by the API.
@@ -1224,7 +1175,6 @@ def process_convert_preview(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
 ) -> None:
     """Phase 1 for Office uploads: LibreOffice → ``preview.pdf`` → READY; then ``parse_and_index``."""
     with conn.cursor() as cur:
@@ -1248,7 +1198,7 @@ def process_convert_preview(
             ft_lower,
         )
         try:
-            _enqueue_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+            _enqueue_parse_and_index_task(material_id, text_only=text_only)
         except Exception:
             logger.exception(
                 "convert_preview: parse_and_index enqueue failed for non-office material {}",
@@ -1271,7 +1221,6 @@ def process_convert_preview(
                 _enqueue_parse_and_index_task(
                     material_id,
                     text_only=text_only,
-                    skip_kg=skip_kg,
                 )
                 return
         except Exception:
@@ -1287,7 +1236,7 @@ def process_convert_preview(
                 material_id,
             )
             try:
-                _enqueue_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+                _enqueue_parse_and_index_task(material_id, text_only=text_only)
             except Exception:
                 logger.exception(
                     "convert_preview: chain parse_and_index enqueue failed for material {}",
@@ -1339,7 +1288,7 @@ def process_convert_preview(
         with conn.transaction():
             update_material_preview_pdf_status(conn, material_id, "READY")
         try:
-            _enqueue_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+            _enqueue_parse_and_index_task(material_id, text_only=text_only)
         except Exception:
             logger.exception(
                 "convert_preview: chain parse_and_index enqueue failed for material {}",
@@ -1370,10 +1319,9 @@ def process_parse_and_index(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
     r: redis.Redis | None = None,
 ) -> None:
-    """DB is source of truth; parse via engine.parse_file; ingest via LightRAG insert only."""
+    """DB is source of truth; parse via MinerU and write the vector index."""
     # Checkpoint 0: before claiming the row — skip entirely if already cancelled.
     if r is not None and _is_cancel_requested(r, material_id):
         logger.info("process_parse_and_index: cancel signal detected before claim for material {}", material_id)
@@ -1382,7 +1330,7 @@ def process_parse_and_index(
     claimed = _claim_material_for_parse(conn, material_id)
     if not claimed:
         _maybe_enqueue_convert_preview_for_stuck_office(
-            conn, material_id, text_only=text_only, skip_kg=skip_kg
+            conn, material_id, text_only=text_only
         )
         return
 
@@ -1394,7 +1342,6 @@ def process_parse_and_index(
         claimed["file_type"],
         claimed.get("original_filename"),
         text_only,
-        skip_kg,
         r=r,
     )
 
@@ -1404,7 +1351,6 @@ def process_index_only(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
 ) -> None:
     """Re-ingest from local parse cache, or full MinIO→parse→ingest if cache is missing."""
     claimed = _claim_material_for_index_retry(conn, material_id)
@@ -1452,7 +1398,6 @@ def process_index_only(
             file_type,
             str(original_filename) if original_filename else None,
             text_only,
-            skip_kg,
         )
         return
 
@@ -1465,7 +1410,6 @@ def process_index_only(
             source_placeholder,
             str(original_filename) if original_filename else None,
             text_only,
-            skip_kg,
         )
         with conn.transaction():
             ok = update_material_status(
@@ -1515,7 +1459,7 @@ def process_delete_material(conn: psycopg.Connection, material_id: str) -> None:
                 f"delete_material: material {material_id} expected is_deleted=true",
             )
     _delete_material_rag_dispatch(course_id, material_id)
-    logger.info("Deleted LightRAG document for material {} (course {})", material_id, course_id)
+    logger.info("Deleted vector document for material {} (course {})", material_id, course_id)
 
 
 def process_repair_preview(conn: psycopg.Connection, material_id: str) -> None:
@@ -1581,10 +1525,9 @@ def process_transcribe_and_index(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
     r: redis.Redis | None = None,
 ) -> None:
-    """Transcribe a video/audio file with Whisper, build a structured summary, then ingest into LightRAG.
+    """Transcribe a video/audio file with Whisper, build a structured summary, then vector-index it.
 
     Pipeline:
       1. Claim material row → PARSING (reuses ``_claim_material_for_parse``).
@@ -1593,7 +1536,7 @@ def process_transcribe_and_index(
       4. LLM structured time-segment summary via ``build_structured_summary_from_transcript_text``.
          Falls back to raw transcript text if no timestamps are detected.
       5. Commit PARSED → INDEXING.
-      6. Ingest the summary (or raw transcript) text into the course LightRAG workspace.
+      6. Ingest the summary (or raw transcript) text into the course vector workspace.
       7. Commit READY with chunk count.
 
     Requires:
@@ -1689,7 +1632,6 @@ def process_transcribe_and_index(
             material_id,
             ingest_text,
             str(original_filename) if original_filename else None,
-            skip_kg,
         )
 
         with conn.transaction():
@@ -1839,7 +1781,6 @@ def _ingest_personal_parsed_dispatch(
     local_file: Path,
     original_filename: str | None,
     text_only: bool,
-    skip_kg: bool,
 ) -> int:
     async def _worker_coro() -> int:
         try:
@@ -1847,7 +1788,6 @@ def _ingest_personal_parsed_dispatch(
                 user_id, material_id, local_file,
                 original_filename=original_filename,
                 text_only=text_only,
-                skip_entity_extraction=skip_kg,
             )
         finally:
             _invalidate_personal_rag_cache(user_id)
@@ -1858,7 +1798,6 @@ def _ingest_personal_parsed_dispatch(
         user_id, material_id, local_file,
         original_filename=original_filename,
         text_only=text_only,
-        skip_entity_extraction=skip_kg,
     )
 
 
@@ -1867,13 +1806,11 @@ def _ingest_personal_text_dispatch(
     material_id: str,
     text: str,
     original_filename: str | None,
-    skip_kg: bool,
 ) -> int:
     async def _worker_coro() -> int:
         return await ingest_text_into_personal_async(
             user_id, material_id, text,
             original_filename=original_filename,
-            skip_entity_extraction=skip_kg,
         )
 
     if is_worker_async_loop_started():
@@ -1881,7 +1818,6 @@ def _ingest_personal_text_dispatch(
     return ingest_text_into_personal_sync(
         user_id, material_id, text,
         original_filename=original_filename,
-        skip_entity_extraction=skip_kg,
     )
 
 
@@ -1906,10 +1842,9 @@ def _run_personal_material_download_parse_and_ingest(
     file_type: str,
     original_filename: str | None,
     text_only: bool,
-    skip_kg: bool,
     r: redis.Redis | None = None,
 ) -> None:
-    """MinIO → parse → personal LightRAG. Row must already be PARSING."""
+    """MinIO → parse → personal vector index. Row must already be PARSING."""
     work_parent = Path(tempfile.mkdtemp(prefix="edu_pmat_"))
     suffix = Path(minio_path).suffix or ".bin"
     local_file = work_parent / f"{material_id}{suffix}"
@@ -1972,7 +1907,7 @@ def _run_personal_material_download_parse_and_ingest(
         n = _ingest_personal_parsed_dispatch(
             user_id, material_id, local_file,
             str(original_filename) if original_filename else None,
-            text_only, skip_kg,
+            text_only,
         )
 
         with conn.transaction():
@@ -2008,7 +1943,6 @@ def process_personal_parse_and_index(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
     r: redis.Redis | None = None,
 ) -> None:
     if r is not None and _is_cancel_requested(r, material_id):
@@ -2025,7 +1959,7 @@ def process_personal_parse_and_index(
         claimed["minio_path"],
         claimed["file_type"],
         claimed.get("original_filename"),
-        text_only, skip_kg, r=r,
+        text_only, r=r,
     )
 
 
@@ -2045,7 +1979,7 @@ def process_personal_delete_material(conn: psycopg.Connection, material_id: str)
             f"personal_delete: material {material_id} expected is_deleted=true"
         )
     _delete_personal_material_rag_dispatch(user_id, material_id)
-    logger.info("Deleted personal LightRAG document for material {}", material_id)
+    logger.info("Deleted personal vector document for material {}", material_id)
 
 
 def process_personal_transcribe_and_index(
@@ -2053,7 +1987,6 @@ def process_personal_transcribe_and_index(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
     r: redis.Redis | None = None,
 ) -> None:
     """Transcribe a personal video/audio file and ingest into the user's personal KB."""
@@ -2125,7 +2058,7 @@ def process_personal_transcribe_and_index(
 
         n = _ingest_personal_text_dispatch(
             user_id, material_id, ingest_text,
-            str(original_filename) if original_filename else None, skip_kg,
+            str(original_filename) if original_filename else None,
         )
 
         with conn.transaction():
@@ -2149,9 +2082,7 @@ def process_personal_transcribe_and_index(
         shutil.rmtree(work_parent, ignore_errors=True)
 
 
-def _enqueue_personal_parse_and_index_task(
-    material_id: str, *, text_only: bool, skip_kg: bool = True
-) -> None:
+def _enqueue_personal_parse_and_index_task(material_id: str, *, text_only: bool) -> None:
     """Chain personal Phase 2 after Office preview PDF is ready."""
     redis_url = os.environ.get("REDIS_URL", "").strip()
     if not redis_url:
@@ -2165,7 +2096,6 @@ def _enqueue_personal_parse_and_index_task(
             "operation": "personal_parse_and_index",
             "created_at": datetime.now(UTC).isoformat(),
             "text_only": "true" if text_only else "false",
-            "skip_kg": "true" if skip_kg else "false",
         },
     )
 
@@ -2175,7 +2105,6 @@ def process_personal_convert_preview(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
 ) -> None:
     """Phase 1 for personal Office uploads: LibreOffice → preview.pdf → READY; then personal_parse_and_index."""
     with conn.cursor() as cur:
@@ -2198,7 +2127,7 @@ def process_personal_convert_preview(
             material_id, ft_lower,
         )
         try:
-            _enqueue_personal_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+            _enqueue_personal_parse_and_index_task(material_id, text_only=text_only)
         except Exception:
             logger.exception(
                 "personal_convert_preview: personal_parse_and_index enqueue failed for {}",
@@ -2216,7 +2145,7 @@ def process_personal_convert_preview(
                 material_id,
             )
             try:
-                _enqueue_personal_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+                _enqueue_personal_parse_and_index_task(material_id, text_only=text_only)
             except Exception:
                 logger.exception(
                     "personal_convert_preview: chain enqueue failed for {}",
@@ -2272,7 +2201,7 @@ def process_personal_convert_preview(
             "personal_convert_preview: material {} preview ready; chaining personal_parse_and_index",
             material_id,
         )
-        _enqueue_personal_parse_and_index_task(material_id, text_only=text_only, skip_kg=skip_kg)
+        _enqueue_personal_parse_and_index_task(material_id, text_only=text_only)
     except Exception as exc:
         logger.exception("personal_convert_preview failed for material {}", material_id)
         with conn.transaction():
@@ -2286,7 +2215,6 @@ def process_personal_index_only(
     material_id: str,
     *,
     text_only: bool = True,
-    skip_kg: bool = True,
 ) -> None:
     """Re-ingest personal material from local parse cache, or full MinIO→parse→ingest fallback."""
     claimed = _claim_personal_material_for_index_retry(conn, material_id)
@@ -2321,7 +2249,7 @@ def process_personal_index_only(
         _run_personal_material_download_parse_and_ingest(
             conn, material_id, user_id, minio_path, file_type,
             str(original_filename) if original_filename else None,
-            text_only, skip_kg,
+            text_only,
         )
         return
 
@@ -2331,7 +2259,7 @@ def process_personal_index_only(
         n = _ingest_personal_parsed_dispatch(
             user_id, material_id, source_placeholder,
             str(original_filename) if original_filename else None,
-            text_only, skip_kg,
+            text_only,
         )
         with conn.transaction():
             ok = update_personal_material_status(

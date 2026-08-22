@@ -10,23 +10,14 @@ Usage examples:
     uv run rag ingest data/input/report.pdf
     uv run rag ingest data/input/
     uv run rag query "What are the main findings?"
-    uv run rag query "Summarise the tables" --mode local
+    uv run rag query "Summarise the tables"
     uv run rag query "What are the main findings?" --refs
     uv run rag query "What is in this diagram?" --image data/input/figure.png
     uv run rag query "Compare" --image a.png --image b.jpg --refs
     ## 清除
     uv run rag clear-storage
     uv run rag reindex data/input/report.pdf
-    uv run rag status
-    ## 可视化知识图谱
-    uv run rag visualise
-    ## 出题
-    uv run rag generate
-    uv run rag generate -f data/input/应用层.pdf -n 15
-    uv run rag generate -f data/input/应用层.pdf -f data/input/运输层.pdf -n 30 --alpha 0.7 --beta 0.3
-    uv run rag generate -n 20 -w short_answer:1.0 -g application:0.6,synthesis:0.4
-    uv run rag generate -n 10 -g innovation:1.0 -w single_choice:0.5,fill_blank:0.5
-    ## minerU单独解析文件
+    uv run rag status    ## minerU单独解析文件
     uv run parse data/input/input.pdf
     # mindmap
     uv run mindmap data/input/report.pdf --structured --output output/mindmaps/report_mindmap.json --refine
@@ -120,7 +111,6 @@ def ingest(path: Path) -> None:
         logger.error(str(exc))
         raise SystemExit(1) from exc
 
-
 @cli.command("video-ingest")
 @click.argument("media_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
@@ -192,7 +182,7 @@ def video_ingest(
 
     \b
     Default: writes ``<stem>.txt``, runs LLM to produce ``<stem>.summary.json`` +
-    ``<stem>.summary.md``, ingests the Markdown summary (cleaner for LightRAG than raw ASR).
+    ``<stem>.summary.md``, then ingests the Markdown summary into the vector index.
 
     \b
     Requires:
@@ -200,10 +190,9 @@ def video_ingest(
       - uv sync --extra video (faster-whisper)
       - LLM credentials for structured summary (unless --skip-structured-summary and ingest raw only)
     """
-    from lightrag.llm.openai import openai_complete_if_cache
-
     from .config import settings as _cfg
     from .engine import ingest_file, query
+    from .llm import llm_chat_model_func
     from .video_transcribe import is_video_or_audio_file, transcribe_media_to_txt_file
     from .video_transcript_summary import (
         build_structured_summary_from_transcript_text,
@@ -228,14 +217,10 @@ def video_ingest(
             "1) 主题与目标 2) 关键论点或步骤 3) 术语表（如有）4) 延伸问题。"
             "避免空话，时间戳标记可忽略。"
         )
-        model = _cfg.refine_model if len(transcript) > 12_000 else _cfg.llm_model
-        return await openai_complete_if_cache(
-            model,
+        return await llm_chat_model_func(
             transcript,
             system_prompt=system,
             history_messages=[],
-            api_key=_cfg.llm_api_key,
-            base_url=_cfg.llm_base_url,
             max_tokens=_cfg.llm_max_tokens,
             temperature=_cfg.llm_temperature,
         )
@@ -325,7 +310,7 @@ def video_ingest(
                 "请根据当前知识库中与本次讲座/口述相关的内容，用中文给出结构化摘要："
                 "核心主题、要点列表、重要术语、延伸讨论问题。若资料单一请据实归纳。"
             )
-            rag_ans = query(rag_q, mode="global")
+            rag_ans = query(rag_q)
             click.echo(rag_ans if isinstance(rag_ans, str) else str(rag_ans))
         except Exception as exc:
             logger.error(str(exc))
@@ -361,17 +346,10 @@ def parse(path: Path) -> None:
 @cli.command()
 @click.argument("question")
 @click.option(
-    "--mode",
-    type=click.Choice(["hybrid", "local", "global", "naive"], case_sensitive=False),
-    default="hybrid",
-    show_default=True,
-    help="Retrieval mode.",
-)
-@click.option(
     "--refs",
     is_flag=True,
     default=False,
-    help="Show source chunks, entities and file references used to answer.",
+    help="Show source chunks and file references used to answer.",
 )
 @click.option(
     "--image",
@@ -380,7 +358,7 @@ def parse(path: Path) -> None:
     type=click.Path(exists=True, path_type=Path),
     help="Image file (.jpg / .jpeg / .png); repeat for multiple. Vision API first, else MinerU parse + text.",
 )
-def query(question: str, mode: str, refs: bool, images: tuple[Path, ...]) -> None:
+def query(question: str, refs: bool, images: tuple[Path, ...]) -> None:
     """Query the knowledge base with a natural-language QUESTION.
 
     With ``--image``, retrieval runs as usual, then the vision model sees the
@@ -391,7 +369,7 @@ def query(question: str, mode: str, refs: bool, images: tuple[Path, ...]) -> Non
 
     try:
         image_paths = list(images) if images else None
-        result = do_query(question, mode=mode, with_refs=refs, image_paths=image_paths)
+        result = do_query(question, with_refs=refs, image_paths=image_paths)
         if result is None:
             click.echo("[No answer returned – knowledge base may be empty or query failed.]")
             return
@@ -404,7 +382,6 @@ def query(question: str, mode: str, refs: bool, images: tuple[Path, ...]) -> Non
         assert isinstance(result, dict)
         answer = result.get("answer", "")
         chunks = result.get("chunks", [])
-        entities = result.get("entities", [])
         refs_list = result.get("references", [])
 
         click.echo(answer)
@@ -429,15 +406,6 @@ def query(question: str, mode: str, refs: bool, images: tuple[Path, ...]) -> Non
                 for line in content.splitlines():
                     click.echo(f"    {line}")
 
-        if entities:
-            click.echo("\n" + "─" * 60)
-            click.echo(f"相关实体 (Entities, top {min(len(entities), 10)})")
-            click.echo("─" * 60)
-            for ent in entities[:10]:
-                click.echo(
-                    f"  {ent.get('entity_name', '')} [{ent.get('entity_type', '')}]"
-                    f" – {ent.get('description', '')[:80]}"
-                )
     except Exception as exc:
         logger.error(str(exc))
         raise SystemExit(1) from exc
@@ -447,19 +415,11 @@ def query(question: str, mode: str, refs: bool, images: tuple[Path, ...]) -> Non
 def status() -> None:
     """Show knowledge base storage statistics."""
     from .config import settings
+    from .vector_store import personal_workspace, workspace_stats
 
-    working_dir = settings.working_dir
     output_dir = settings.output_dir
 
-    click.echo(f"Working dir : {working_dir.resolve()}")
     click.echo(f"Output dir  : {output_dir.resolve()}")
-
-    if not working_dir.exists():
-        click.echo("Status      : not initialised (run 'rag ingest' first)")
-        return
-
-    total_bytes = sum(f.stat().st_size for f in working_dir.rglob("*") if f.is_file())
-    total_mb = total_bytes / (1024 * 1024)
 
     parsed_files = list(output_dir.rglob("*.md")) if output_dir.exists() else []
     cached_jsons = (
@@ -468,18 +428,13 @@ def status() -> None:
         else []
     )
 
-    # Show stored embedding metadata if available
-    metadata_path = working_dir / ".metadata.json"
-    if metadata_path.exists():
-        import json
-        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
-        mode = meta.get("embedding_mode") or "ollama"
-        click.echo(
-            f"Embed       : mode={mode} model={meta.get('embedding_model')} "
-            f"(dim={meta.get('embedding_dim')})"
-        )
-
-    click.echo(f"Storage size: {total_mb:.1f} MB")
+    stats = workspace_stats(personal_workspace("local"))
+    click.echo(
+        f"Embed       : mode={settings.embedding_mode} model={settings.embedding_model} "
+        f"(dim={settings.embedding_dim})"
+    )
+    click.echo(f"Vector docs : {stats['documents']}")
+    click.echo(f"Vector chunks: {stats['chunks']}")
     click.echo(f"Parsed docs : {len(parsed_files)} markdown files")
     click.echo(f"Cached parse: {len(cached_jsons)} content_list.json available for reindex")
 
@@ -502,7 +457,7 @@ def reindex(path: Path | None, output_dir: str | None) -> None:
 
     Use this after:
       - Running 'rag clear-storage' due to an embedding dimension change
-      - Migrating to a new graph / storage configuration
+      - Migrating to a new vector storage configuration
     The output/parsed/ directory must contain *_content_list.json files.
     """
     from .engine import reindex_from_cache
@@ -527,9 +482,9 @@ def reindex(path: Path | None, output_dir: str | None) -> None:
 
 
 @cli.command("clear-storage")
-@click.confirmation_option(prompt="This will delete rag_storage/ (vectors + graph). Continue?")
+@click.confirmation_option(prompt="This will delete the local vector workspace. Continue?")
 def clear_storage_cmd() -> None:
-    """Delete the vector/graph storage so it can be rebuilt via 'rag reindex'.
+    """Delete the local vector workspace so it can be rebuilt via 'rag reindex'.
 
     \b
     The parsed output in output/ is NOT deleted.
@@ -540,160 +495,6 @@ def clear_storage_cmd() -> None:
 
     try:
         clear_storage()
-    except Exception as exc:
-        logger.error(str(exc))
-        raise SystemExit(1) from exc
-
-@cli.command("generate")
-@click.option(
-    "--file", "-f",
-    "files",
-    multiple=True,
-    type=click.Path(exists=True, path_type=Path),
-    help="Source document(s) to restrict question scope. Repeatable. Omit for all indexed docs.",
-)
-@click.option("--count", "-n", default=20, show_default=True, help="Total number of questions to generate.")
-@click.option(
-    "--output", "-o",
-    default="output/questions",
-    show_default=True,
-    type=click.Path(path_type=Path),
-    help="Output directory for JSON and Markdown results.",
-)
-@click.option("--alpha", default=0.6, show_default=True, help="Weight for chunk-frequency in entity importance score.")
-@click.option("--beta", default=0.4, show_default=True, help="Weight for graph-degree in entity importance score.")
-@click.option(
-    "--type-weights", "-w",
-    "type_weights_str",
-    default=None,
-    help=(
-        "Question type proportions as 'type:weight,...'. "
-        "Valid types: single_choice, multi_choice, fill_blank, short_answer. "
-        "Weights need not sum to exactly 1 (they are normalised). "
-        "Example: --type-weights single_choice:0.4,multi_choice:0.2,fill_blank:0.2,short_answer:0.2"
-    ),
-)
-@click.option(
-    "--objective-weights", "-g",
-    "objective_weights_str",
-    default=None,
-    help=(
-        "Cognitive objective proportions as 'objective:weight,...'. "
-        "Valid objectives: knowledge, comprehension, application, synthesis, innovation. "
-        "Weights need not sum to exactly 1 (they are normalised). "
-        "Interacts with --type-weights via a compatibility matrix; "
-        "zero-compatibility pairs (e.g. innovation + fill_blank) are excluded automatically. "
-        "Example: -g application:0.5,synthesis:0.3,innovation:0.2"
-    ),
-)
-def generate_cmd(
-    files: tuple[Path, ...],
-    count: int,
-    output: Path,
-    alpha: float,
-    beta: float,
-    type_weights_str: str | None,
-    objective_weights_str: str | None,
-) -> None:
-    """Generate exam questions from indexed documents using entity importance ranking.
-
-    \b
-    Entity importance = alpha × chunk_frequency + beta × graph_degree
-    Default format  distribution: single_choice 40%, multi_choice 10%, fill_blank 30%, short_answer 20%
-    Default objective distribution: knowledge 30%, comprehension 20%, application 30%, synthesis 10%, innovation 10%
-
-    \b
-    Both -w and -g interact via a compatibility matrix. Invalid combinations
-    (e.g. innovation + fill_blank) are excluded automatically.
-
-    \b
-    Examples:
-      uv run rag generate -n 20
-      uv run rag generate -f data/input/\u5e94\u7528\u5c42.pdf -n 15
-      uv run rag generate -n 20 -w single_choice:0.5,fill_blank:0.3,short_answer:0.2
-      uv run rag generate -n 20 -g application:0.5,synthesis:0.3,innovation:0.2
-      uv run rag generate -n 20 -w short_answer:1.0 -g application:0.6,synthesis:0.4
-    """
-    from .question_gen import DEFAULT_TYPE_WEIGHTS, DEFAULT_OBJECTIVE_WEIGHTS, OBJECTIVE_TYPES, generate, save_output
-
-    file_paths = list(files) if files else None
-
-    # Parse --type-weights if provided
-    type_weights: dict[str, float] | None = None
-    if type_weights_str:
-        valid_types = set(DEFAULT_TYPE_WEIGHTS.keys())
-        try:
-            pairs = [item.split(":") for item in type_weights_str.split(",")]
-            type_weights = {k.strip(): float(v.strip()) for k, v in pairs}
-        except (ValueError, IndexError) as exc:
-            raise click.BadParameter(
-                f"Invalid format: {exc}. Expected 'type:weight,...'", param_hint="--type-weights"
-            ) from exc
-        unknown = set(type_weights) - valid_types
-        if unknown:
-            raise click.BadParameter(
-                f"Unknown type(s): {unknown}. Valid: {valid_types}", param_hint="--type-weights"
-            )
-        # Normalise so weights sum to 1.0
-        total_w = sum(type_weights.values())
-        if total_w <= 0:
-            raise click.BadParameter("Weights must be positive.", param_hint="--type-weights")
-        type_weights = {k: v / total_w for k, v in type_weights.items()}
-
-    # Parse --objective-weights if provided
-    objective_weights: dict[str, float] | None = None
-    if objective_weights_str:
-        valid_objectives = set(OBJECTIVE_TYPES.keys())
-        try:
-            obj_pairs = [item.split(":") for item in objective_weights_str.split(",")]
-            objective_weights = {k.strip(): float(v.strip()) for k, v in obj_pairs}
-        except (ValueError, IndexError) as exc:
-            raise click.BadParameter(
-                f"Invalid format: {exc}. Expected 'objective:weight,...'", param_hint="--objective-weights"
-            ) from exc
-        unknown_obj = set(objective_weights) - valid_objectives
-        if unknown_obj:
-            raise click.BadParameter(
-                f"Unknown objective(s): {unknown_obj}. Valid: {valid_objectives}",
-                param_hint="--objective-weights",
-            )
-        total_ow = sum(objective_weights.values())
-        if total_ow <= 0:
-            raise click.BadParameter("Weights must be positive.", param_hint="--objective-weights")
-        objective_weights = {k: v / total_ow for k, v in objective_weights.items()}
-
-    try:
-        result = generate(file_paths=file_paths, count=count, alpha=alpha, beta=beta, type_weights=type_weights, objective_weights=objective_weights)
-        json_path, md_path = save_output(result, output)
-        click.echo(f"Generated {result['total']} questions")
-        click.echo(f"JSON     : {json_path.resolve()}")
-        click.echo(f"Markdown : {md_path.resolve()}")
-    except Exception as exc:
-        logger.error(str(exc))
-        raise SystemExit(1) from exc
-
-
-@cli.command("visualise")
-@click.option("--output", default=None, type=click.Path(path_type=Path), help="Output HTML path (default: rag_storage/graph_viz.html).")
-@click.option("--max-nodes", default=500, show_default=True, help="Max nodes to render (top by degree).")
-@click.option("--no-browser", is_flag=True, default=False, help="Generate HTML but do not open browser.")
-def visualise(output: Path | None, max_nodes: int, no_browser: bool) -> None:
-    """Generate a D3.js interactive knowledge graph and open it in the browser.
-
-    \b
-    Features:
-      - Force-directed layout, colour-coded by entity type
-      - Drag nodes, zoom/pan, search, adjust physics sliders
-      - Double-click a node to pin/unpin it
-      - Hover nodes/edges for details
-    """
-    from .graph_viz import open_graph
-
-    try:
-        html_path = open_graph(output_html=output, max_nodes=max_nodes, no_browser=no_browser)
-        click.echo(f"Graph saved to: {html_path.resolve()}")
-        if not no_browser:
-            click.echo("Opening in browser…")
     except Exception as exc:
         logger.error(str(exc))
         raise SystemExit(1) from exc

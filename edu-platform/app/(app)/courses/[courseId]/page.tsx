@@ -13,7 +13,6 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import MaterialUpload from "@/components/MaterialUpload";
 import { RetryMaterialIndexPopover } from "@/components/RetryMaterialIndexPopover";
-import KnowledgeGraphPanel from "@/components/KnowledgeGraphPanel";
 import { cn } from "@/lib/utils";
 
 type Course = {
@@ -439,8 +438,6 @@ export default function CourseDetailPage() {
                     <p className="text-sm text-muted-foreground leading-relaxed">{course.description}</p>
                   </div>
                 )}
-
-                <KnowledgeGraphPanel courseId={courseId!} isTeacher={isTeacher} />
 
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" size="sm" asChild>

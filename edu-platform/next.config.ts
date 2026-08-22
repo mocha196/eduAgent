@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // output: "standalone",  // disabled for local dev; re-enable for Docker
+  output: "standalone",
   typescript: { ignoreBuildErrors: true },
   eslint: { ignoreDuringBuilds: true },
   // pino / thread-stream use Worker(__filename) internally — bundling them

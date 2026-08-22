@@ -26,19 +26,15 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     const auth = requireAuthenticated(await getAuthFromRequest(_req));
     const { materialId } = await ctx.params;
     let textOnly = true;
-    let skipKg = true;
     try {
       const body = (await _req.json()) as {
         text_only?: unknown;
-        skip_kg?: unknown;
       };
       textOnly = parseBoolFlag(body?.text_only, true);
-      skipKg = parseBoolFlag(body?.skip_kg, true);
     } catch {
       textOnly = true;
-      skipKg = true;
     }
-    await retryPersonalMaterialIndex(auth.sub, materialId, textOnly, skipKg);
+    await retryPersonalMaterialIndex(auth.sub, materialId, textOnly);
     return jsonOk({ ok: true });
   } catch (e) {
     if (e instanceof ApiError) return jsonError(e);

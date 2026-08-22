@@ -166,7 +166,6 @@ async function markOfficePreviewReadyAndMaybeQueueParse(m: Material): Promise<vo
       operation: "parse_and_index",
       created_at: new Date().toISOString(),
       text_only: true,
-      skip_kg: true,
     });
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -254,7 +253,6 @@ export async function uploadMaterialStream(params: {
   body: ReadableStream<Uint8Array> | Readable;
   lessonId?: string | null;
   textOnly?: boolean;
-  skipKg?: boolean;
 }): Promise<MaterialCreatedDto> {
   try {
     getMinioConfig();
@@ -357,7 +355,6 @@ export async function uploadMaterialStream(params: {
   }
 
   const textOnly = params.textOnly ?? true;
-  const skipKg = params.skipKg ?? true;
   const task: RagQueueTask = isOfficeMaterialFileType(fileType)
     ? {
         task_id: randomUUID(),
@@ -365,7 +362,6 @@ export async function uploadMaterialStream(params: {
         operation: "convert_preview",
         created_at: new Date().toISOString(),
         text_only: textOnly,
-        skip_kg: skipKg,
       }
     : isVideoOrAudioFileType(fileType)
     ? {
@@ -374,7 +370,6 @@ export async function uploadMaterialStream(params: {
         operation: "transcribe_and_index",
         created_at: new Date().toISOString(),
         text_only: textOnly,
-        skip_kg: skipKg,
       }
     : {
         task_id: randomUUID(),
@@ -382,7 +377,6 @@ export async function uploadMaterialStream(params: {
         operation: "parse_and_index",
         created_at: new Date().toISOString(),
         text_only: textOnly,
-        skip_kg: skipKg,
       };
   await enqueueRagTaskWithRetry(task);
 
@@ -465,7 +459,6 @@ export async function retryMaterialIndex(
   courseId: string,
   materialId: string,
   textOnly?: boolean,
-  skipKg?: boolean,
 ): Promise<void> {
   assertUuid(materialId, "material_id");
   assertUuid(courseId, "course_id");
@@ -497,7 +490,6 @@ export async function retryMaterialIndex(
     operation: "index_only",
     created_at: new Date().toISOString(),
     text_only: textOnly ?? true,
-    skip_kg: skipKg ?? true,
   };
   await enqueueRagTaskWithRetry(task);
 }
@@ -516,7 +508,7 @@ const CANCEL_KEY_TTL_SEC = 7200;
  * 1. Validate caller is teacher of the owning course.
  * 2. Set a Redis signal key so the Python worker aborts at its next checkpoint.
  * 3. Soft-delete the material (isDeleted=true) so it disappears from listings.
- * 4. Enqueue delete_material to clean up MinIO / LightRAG vectors after the worker stops.
+ * 4. Enqueue delete_material to clean up MinIO / vector index data after the worker stops.
  *
  * Safe to call on UPLOADED/PARSING/PARSED/INDEXING. Returns 404 for unknown or
  * already-deleted materials, 409 for READY (use DELETE instead).
@@ -568,7 +560,7 @@ export async function cancelMaterialProcessing(
     data: { isDeleted: true },
   });
 
-  // 3. Enqueue cleanup (MinIO + LightRAG vectors). Best-effort — if this fails the
+  // 3. Enqueue cleanup (MinIO + vector index data). Best-effort — if this fails the
   //    material is already hidden and the signal is set; log but don't surface error.
   const task: RagQueueTask = {
     task_id: randomUUID(),

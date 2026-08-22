@@ -59,7 +59,6 @@ export async function registerUser(
       const user = await tx.user.create({
         data: {
           username: body.username.trim(),
-          email: body.email.trim().toLowerCase(),
           passwordHash,
           role: body.role,
           isActive: true,
@@ -71,7 +70,7 @@ export async function registerUser(
     throw new ApiError(
       409,
       "CONFLICT",
-      "Username or email already registered",
+      "Username already registered",
     );
   }
 }

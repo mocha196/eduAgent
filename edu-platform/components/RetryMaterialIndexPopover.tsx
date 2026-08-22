@@ -30,7 +30,6 @@ export function RetryMaterialIndexPopover({
 }: RetryMaterialIndexPopoverProps) {
   const [open, setOpen] = useState(false);
   const [textOnly, setTextOnly] = useState(true);
-  const [skipKg, setSkipKg] = useState(true);
   const [retrying, setRetrying] = useState(false);
 
   async function confirmRetry() {
@@ -42,7 +41,7 @@ export function RetryMaterialIndexPopover({
           method: "POST",
           credentials: "include",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text_only: textOnly, skip_kg: skipKg }),
+          body: JSON.stringify({ text_only: textOnly }),
         },
       );
       if (!res.ok) {
@@ -64,7 +63,6 @@ export function RetryMaterialIndexPopover({
         setOpen(next);
         if (next) {
           setTextOnly(true);
-          setSkipKg(true);
         }
       }}
     >
@@ -101,18 +99,8 @@ export function RetryMaterialIndexPopover({
           />
           <span>重试索引默认仅文本</span>
         </label>
-        <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border px-2 py-1.5 text-[11px] text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={skipKg}
-            onChange={(e) => setSkipKg(e.target.checked)}
-            className="mt-0.5 h-3 w-3 shrink-0 accent-primary"
-          />
-          <span>重试关闭实体/关系提取（多模态走文本化向量，无图谱）</span>
-        </label>
         <p className="text-[10px] leading-snug text-muted-foreground">
-          取消勾选则重试走完整 RAG-Anything 入库（含图谱）。与上传页的「关 KG /
-          仅文本」语义一致。
+          取消“仅文本”后，图片、表格和公式会转换为可检索文本后写入向量索引。
         </p>
         <div className="flex justify-end gap-2 pt-1">
           <Button

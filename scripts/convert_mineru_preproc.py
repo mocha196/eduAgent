@@ -1,15 +1,14 @@
-"""Convert MinerU preproc-blocks JSON to content_list format for LightRAG ingest.
+"""Convert MinerU preproc-blocks JSON to the platform content-list format.
 
 MinerU cloud sometimes saves the raw preproc format:
   { "pdf_info": [ { "preproc_blocks": [ {type, lines:[{spans:[{content|image_path}]}] } ] } ] }
 
-This script converts it to the flat content_list format that RAGAnything / reindex_from_cache expects:
+This script converts it to the flat content-list format used by the vector indexer:
   [ {type:"text", text:"...", page_idx:N}, {type:"image", img_path:"...", page_idx:N}, ... ]
 
 Usage:
   python scripts/convert_mineru_preproc.py                          # convert all MinerU_*.json in output/parsed/
   python scripts/convert_mineru_preproc.py output/parsed/MinerU_X.json  # single file
-  python scripts/convert_mineru_preproc.py --ingest                 # convert + immediately ingest into LightRAG
 """
 from __future__ import annotations
 
@@ -165,7 +164,7 @@ def find_preproc_files(scan_dir: Path) -> list[Path]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert MinerU preproc JSON → content_list for LightRAG")
+    parser = argparse.ArgumentParser(description="Convert MinerU preproc JSON to content-list files")
     parser.add_argument(
         "files",
         nargs="*",
@@ -175,11 +174,6 @@ def main() -> None:
         "--out-dir",
         default=None,
         help="Output directory for content_list files (default: same folder as source)",
-    )
-    parser.add_argument(
-        "--ingest",
-        action="store_true",
-        help="After conversion, immediately ingest into LightRAG via reindex_from_cache",
     )
     args = parser.parse_args()
 
@@ -204,28 +198,6 @@ def main() -> None:
             print(f"[error] {src.name}: {exc}", file=sys.stderr)
 
     print(f"\nConverted {len(converted)}/{len(sources)} file(s).")
-
-    if args.ingest and converted:
-        print("\nIngesting into LightRAG …")
-        # Add project root to sys.path so rag_mvp can be imported
-        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-        from rag_mvp.engine import get_rag, _ensure_lightrag_storages, _fix_image_paths
-        import asyncio
-
-        rag = get_rag()
-
-        async def _do_ingest():
-            await _ensure_lightrag_storages(rag)
-            for dest in converted:
-                raw = json.loads(dest.read_text(encoding="utf-8"))
-                content_list = _fix_image_paths(raw, dest.parent)
-                stem = dest.stem.replace("_content_list", "")
-                await rag.insert_content_list(content_list, file_path=stem)
-                print(f"[ingest] {stem} ({len(content_list)} blocks) ✓")
-
-        asyncio.run(_do_ingest())
-        print("Ingest complete.")
-
 
 if __name__ == "__main__":
     main()

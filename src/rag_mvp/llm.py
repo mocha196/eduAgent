@@ -1,4 +1,4 @@
-"""Qwen LLM, Vision LLM, and Embedding functions for RAG-Anything / LightRAG."""
+"""Text and vision model clients used by the application."""
 
 import base64
 import contextvars
@@ -7,19 +7,38 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from openai import AsyncOpenAI
-from lightrag.llm.openai import openai_complete_if_cache
 from loguru import logger
+from openai import AsyncOpenAI
 
 from .config import settings
 from .http_env import ensure_loopback_bypass_http_proxy
+
+
+async def openai_complete(
+    model: str,
+    prompt: str,
+    *,
+    system_prompt: str | None,
+    history_messages: list | None,
+    api_key: str,
+    base_url: str,
+    **kwargs,
+) -> str:
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.extend(history_messages or [])
+    messages.append({"role": "user", "content": prompt})
+    client = AsyncOpenAI(api_key=api_key or "not-set", base_url=base_url or None)
+    response = await client.chat.completions.create(model=model, messages=messages, **kwargs)
+    return response.choices[0].message.content or ""
 
 # Before any httpx / ollama calls: so Ollama and other loopback URLs ignore HTTP_PROXY.
 ensure_loopback_bypass_http_proxy()
 
 
 def ensure_ollama_embedding_reachable(*, timeout: float = 3.0) -> None:
-    """Fail fast before LightRAG opens PG pools if Ollama is down (course indexing).
+    """Fail fast before vector indexing if Ollama is down.
 
     Only runs when ``EMBEDDING_MODE=ollama``. Uses ``OLLAMA_BASE_URL``.
     Set ``RAG_SKIP_OLLAMA_PREFLIGHT=1`` to skip (e.g. isolated unit tests).
@@ -106,10 +125,7 @@ def ensure_embedding_backend_reachable(*, timeout: float = 3.0) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Inject source context into LightRAG's rate-limit log lines.
-# LightRAG logs the error BEFORE re-raising, so we cannot add context
-# after the fact.  Instead we use a contextvar + logging.Filter so that
-# the "lightrag" logger automatically prepends the calling role.
+# Inject model-role context into rate-limit log lines.
 # ---------------------------------------------------------------------------
 
 _llm_role: contextvars.ContextVar[str] = contextvars.ContextVar("_llm_role", default="")
@@ -124,9 +140,6 @@ class _RolePrefixFilter(logging.Filter):
             record.msg = f"[{role}] {record.msg}"
             record.args = ()  # args already interpolated above via getMessage()
         return True
-
-
-logging.getLogger("lightrag").addFilter(_RolePrefixFilter())
 
 
 def image_mime_type_for_suffix(suffix: str) -> str:
@@ -186,47 +199,36 @@ def _dbg(
 async def llm_model_func(
     prompt: str,
     system_prompt: str | None = None,
-    history_messages: list = [],
+    history_messages: list | None = None,
     **kwargs,
 ) -> str:
-    """KG extraction LLM used by LightRAG for entity/relation extraction (async).
-
-    Uses LLM_KG_* settings when configured, otherwise falls back to the default
-    LLM_MODEL / LLM_API_KEY / LLM_BASE_URL.  ``LLM_EXTRA_BODY`` (e.g. DashScope
-    thinking-mode flag) is only applied when no dedicated KG model is set.
-    """
+    """Default async text-generation model used by CLI and utility flows."""
     kwargs.setdefault("max_tokens", settings.llm_max_tokens)
     kwargs.setdefault("temperature", settings.llm_temperature)
-    model = settings.effective_kg_model
-    # Apply LLM_EXTRA_BODY only when falling back to the default model (no KG override).
-    # Dedicated KG providers (e.g. SiliconFlow) may not support provider-specific keys.
-    if not settings.llm_kg_model.strip() and settings.llm_extra_body:
-        # Per-call explicit extra_body has higher priority than global defaults.
+    model = settings.llm_model
+    if settings.llm_extra_body:
         kwargs.setdefault("extra_body", settings.llm_extra_body)
-    # Disable thinking mode for DeepSeek KG models (same as chat model handling).
-    kg_base_url = settings.effective_kg_base_url or ""
-    if "deepseek.com" in kg_base_url or model.lower().startswith("deepseek"):
+    base_url = settings.llm_base_url or ""
+    if "deepseek.com" in base_url or model.lower().startswith("deepseek"):
         kwargs.setdefault("extra_body", {"thinking": {"type": "disabled"}})
-    # Disable thinking mode for Qwen3 models on SiliconFlow (or any provider).
-    # SiliconFlow TPM=50,000; thinking tokens waste the quota with no extraction benefit.
-    if "siliconflow.cn" in kg_base_url or "qwen3" in model.lower():
+    if "siliconflow.cn" in base_url or "qwen3" in model.lower():
         kwargs.setdefault("extra_body", {"enable_thinking": False})
-    token = _llm_role.set(f"kg/{model}")
-    _dbg(f"kg/{model}", prompt, kwargs)
+    token = _llm_role.set(f"default/{model}")
+    _dbg(f"default/{model}", prompt, kwargs)
     try:
-        result = await openai_complete_if_cache(
+        result = await openai_complete(
             model,
             prompt,
             system_prompt=system_prompt,
             history_messages=history_messages,
-            api_key=settings.effective_kg_api_key,
-            base_url=settings.effective_kg_base_url,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
             **kwargs,
         )
-        _dbg(f"kg/{model}", prompt, kwargs, result=result)
+        _dbg(f"default/{model}", prompt, kwargs, result=result)
         return result
     except Exception as exc:
-        _dbg(f"kg/{model}", prompt, kwargs, exc=exc)
+        _dbg(f"default/{model}", prompt, kwargs, exc=exc)
         raise
     finally:
         _llm_role.reset(token)
@@ -235,14 +237,13 @@ async def llm_model_func(
 async def llm_chat_model_func(
     prompt: str,
     system_prompt: str | None = None,
-    history_messages: list = [],
+    history_messages: list | None = None,
     **kwargs,
 ) -> str:
     """Chat / assignment LLM backed by the chat provider (e.g. DeepSeek deepseek-v4-pro).
 
     Falls back to ``llm_model_func`` settings when LLM_CHAT_* env vars are not set.
-    Used by assignment_gen and question_gen; LightRAG indexing continues to use
-    ``llm_model_func`` to avoid disrupting RAG internals.
+    Used by assignment and question generation.
     """
     kwargs.setdefault("max_tokens", settings.llm_max_tokens)
     kwargs.setdefault("temperature", settings.llm_temperature)
@@ -255,7 +256,7 @@ async def llm_chat_model_func(
     token = _llm_role.set(f"chat/{model}")
     _dbg(f"chat/{model}", prompt, kwargs)
     try:
-        result = await openai_complete_if_cache(
+        result = await openai_complete(
             model,
             prompt,
             system_prompt=system_prompt,
@@ -276,7 +277,7 @@ async def llm_chat_model_func(
 async def vision_model_func(
     prompt: str,
     system_prompt: str | None = None,
-    history_messages: list = [],
+    history_messages: list | None = None,
     image_data: str | None = None,
     messages: list | None = None,
     image_mime: str | None = None,
@@ -412,7 +413,7 @@ async def _call_vision_raw(
 async def _filtered_vision_model_func(
     prompt: str,
     system_prompt: str | None = None,
-    history_messages: list = [],
+    history_messages: list | None = None,
     image_data: str | None = None,
     messages: list | None = None,
     image_mime: str | None = None,

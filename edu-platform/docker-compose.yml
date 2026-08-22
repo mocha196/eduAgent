@@ -22,23 +22,6 @@ services:
       timeout: 5s
       retries: 5
 
-  neo4j:
-    image: neo4j:5-community
-    container_name: edu-platform-neo4j
-    restart: unless-stopped
-    environment:
-      NEO4J_AUTH: neo4j/edu_neo4j_password
-    ports:
-      - "7474:7474"   # 浏览器管理界面
-      - "7687:7687"   # Bolt 协议（LightRAG 使用）
-    volumes:
-      - edu_platform_neo4jdata:/data
-    healthcheck:
-      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   redis:
     image: redis:7-alpine
     container_name: edu-platform-redis
@@ -64,7 +47,7 @@ services:
       - edu_platform_minio:/data
 
   rag-service:
-    image: ghcr.io/${GITHUB_OWNER}/edu-rag-service:latest
+    image: ghcr.io/${GITHUB_OWNER}/edu-rag-service:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: edu-platform/Dockerfile.rag-service
@@ -76,7 +59,7 @@ services:
       # Keep rag-service container-safe defaults (service names on compose network).
       # This avoids .env localhost values accidentally breaking in-container connections.
       DATABASE_URL: ${RAG_SERVICE_DATABASE_URL:-postgresql://edu:edu@postgres:5432/edu_platform?schema=public}
-      LIGHTRAG_PG_DSN: ${RAG_SERVICE_LIGHTRAG_PG_DSN:-}
+      RAG_PG_DSN: ${RAG_SERVICE_PG_DSN:-postgresql://edu:edu@postgres:5432/edu_rag}
       RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
@@ -84,6 +67,8 @@ services:
       EMBEDDING_MODE: ${EMBEDDING_MODE:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       # Internal notification webhook (Next.js → rag-service callback)
       NEXTJS_INTERNAL_URL: ${NEXTJS_INTERNAL_URL:-http://nextjs:3000}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
@@ -93,12 +78,50 @@ services:
       redis:
         condition: service_started
 
+  rag-worker:
+    image: ghcr.io/${GITHUB_OWNER}/edu-rag-service:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: edu-platform/Dockerfile.rag-service
+    container_name: edu-platform-rag-worker
+    restart: unless-stopped
+    command: ["uv", "run", "edu-rag-worker"]
+    environment:
+      DATABASE_URL: ${RAG_SERVICE_DATABASE_URL:-postgresql://edu:edu@postgres:5432/edu_platform?schema=public}
+      RAG_PG_DSN: ${RAG_SERVICE_PG_DSN:-postgresql://edu:edu@postgres:5432/edu_rag}
+      REDIS_URL: ${RAG_WORKER_REDIS_URL:-redis://redis:6379}
+      MINIO_ENDPOINT: ${RAG_WORKER_MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minio_minio_minio}
+      MINIO_BUCKET: ${MINIO_BUCKET:-edu-materials}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      EMBEDDING_MODE: ${EMBEDDING_MODE:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      MINERU_CLOUD_API_KEY: ${MINERU_CLOUD_API_KEY:-}
+      MINERU_CLOUD_ENABLED: ${MINERU_CLOUD_ENABLED:-false}
+      NEXTJS_INTERNAL_URL: ${NEXTJS_INTERNAL_URL:-http://nextjs:3000}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+
   # ---------------------------------------------------------------------------
   # Next.js application
   # ---------------------------------------------------------------------------
 
   nextjs:
-    image: ghcr.io/${GITHUB_OWNER}/edu-platform-nextjs:latest
+    image: ghcr.io/${GITHUB_OWNER}/edu-platform-nextjs:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -140,13 +163,15 @@ services:
         condition: service_started
       rag-service:
         condition: service_started
+      rag-worker:
+        condition: service_started
 
   # ---------------------------------------------------------------------------
   # Review Scheduler — triggers daily memory review sessions per user timezone
   # ---------------------------------------------------------------------------
 
   review-scheduler:
-    image: ghcr.io/${GITHUB_OWNER}/edu-platform-nextjs:latest
+    image: ghcr.io/${GITHUB_OWNER}/edu-platform-nextjs:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -172,22 +197,7 @@ services:
     depends_on:
       - nextjs
 
-  # Watchtower — polls GHCR every 5 min and auto-restarts containers when new images are pushed.
-  # For public GHCR repos no auth is needed.
-  # Set GITHUB_OWNER in .env to match your GitHub username.
-  watchtower:
-    image: containrrr/watchtower
-    container_name: edu-platform-watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      WATCHTOWER_POLL_INTERVAL: "300"
-      WATCHTOWER_CLEANUP: "true"
-    command: edu-platform-nextjs edu-platform-rag-service
-
 volumes:
   edu_platform_pgdata:
   edu_platform_redisdata:
   edu_platform_minio:
-  edu_platform_neo4jdata:

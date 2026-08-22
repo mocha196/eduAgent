@@ -15,26 +15,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM API (DashScope / Qwen) — default provider (vision, memory, LightRAG indexing)
+    # LLM API (DashScope / Qwen) — default provider
     llm_api_key: str = ""
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # Model names
     llm_model: str = "qwen-plus-2025-04-28"
     refine_model: str = "qwen-long"   # long-context model for structure-refine phase
-    vision_model: str = "qwen3.6-plus"  # vision model for image understanding / LightRAG multimodal
+    vision_model: str = "qwen3.6-plus"  # vision model for image understanding
 
     # Chat / assignment model — separate provider (e.g. DeepSeek) with own API key.
     # Falls back to default LLM settings when unset.
     llm_chat_api_key: str = ""      # LLM_CHAT_API_KEY; empty → use llm_api_key
     llm_chat_base_url: str = ""     # LLM_CHAT_BASE_URL; empty → use llm_base_url
     llm_chat_model: str = ""        # LLM_CHAT_MODEL; empty → use llm_model
-
-    # KG extraction model — used by LightRAG for entity/relation extraction during ingest.
-    # Falls back to default LLM settings when unset.
-    llm_kg_api_key: str = ""        # LLM_KG_API_KEY; empty → use llm_api_key
-    llm_kg_base_url: str = ""       # LLM_KG_BASE_URL; empty → use llm_base_url
-    llm_kg_model: str = ""          # LLM_KG_MODEL; empty → use llm_model
 
     # Vision model — separate provider/endpoint (e.g. SiliconFlow Qwen-VL).
     # Falls back to default LLM settings when unset.
@@ -48,25 +42,21 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     # Model id depends on embedding_mode: Ollama tag (e.g. bge-m3) or API model (e.g. text-embedding-v1).
     embedding_model: str = "text-embedding-v1"
-    # Must match embedding vectors and PostgreSQL ``vector(N)`` on LightRAG tables.
+    # Must match embedding vectors and PostgreSQL ``vector(N)`` on rag_chunks.
     embedding_dim: int = 1024
     embedding_max_tokens: int = 8192
-    # LightRAG insert tuning (passed explicitly in engine.LightRAG so values respect Settings, not import-time os.getenv).
+    # Vector indexing and chunking tuning.
     embedding_batch_num: int = Field(
         default=3,
         validation_alias="EMBEDDING_BATCH_NUM",
-        description="Texts per embedding batch inside LightRAG; lower reduces peak embed memory/latency.",
+        description="Texts per embedding request; lower reduces peak memory and latency.",
     )
     chunk_token_size: int = Field(default=1000, validation_alias="CHUNK_SIZE")
-    """LightRAG text chunk size in tokens (env CHUNK_SIZE)."""
+    """Text chunk size in tokens (env CHUNK_SIZE)."""
     chunk_overlap_token_size: int = Field(default=100, validation_alias="CHUNK_OVERLAP_SIZE")
     """Overlap between consecutive chunks (env CHUNK_OVERLAP_SIZE)."""
-    entity_extract_max_gleaning: int = Field(default=1, validation_alias="ENTITY_EXTRACT_MAX_GLEANING")
-    """LightRAG entity-extraction gleaning passes (default 1 = one extra refinement pass).
-    Set to 0 to skip gleaning entirely — halves the number of KG-extraction LLM calls.
-    Recommended for rate-limited free-tier providers (e.g. SiliconFlow TPM=50K)."""
     embedding_timeout_seconds: int = Field(default=120, validation_alias="EMBEDDING_TIMEOUT")
-    """LightRAG default_embedding_timeout (seconds). Worker execution cap scales with this inside lightrag.utils."""
+    """Embedding request timeout in seconds."""
 
     @field_validator("embedding_mode", mode="before")
     @classmethod
@@ -126,21 +116,6 @@ class Settings(BaseSettings):
         """Base URL for vision LLM (falls back to default llm_base_url)."""
         return self.vision_base_url.strip() or self.llm_base_url
 
-    @property
-    def effective_kg_api_key(self) -> str:
-        """API key for KG extraction LLM (falls back to default llm_api_key)."""
-        return self.llm_kg_api_key.strip() or self.llm_api_key
-
-    @property
-    def effective_kg_base_url(self) -> str:
-        """Base URL for KG extraction LLM (falls back to default llm_base_url)."""
-        return self.llm_kg_base_url.strip() or self.llm_base_url
-
-    @property
-    def effective_kg_model(self) -> str:
-        """Model name for KG extraction LLM (falls back to default llm_model)."""
-        return self.llm_kg_model.strip() or self.llm_model
-
     # LLM generation
     llm_max_tokens: int = 4096
     llm_temperature: float = 0.1
@@ -153,7 +128,6 @@ class Settings(BaseSettings):
     )
 
     # Paths
-    working_dir: Path = Path("rag_storage")
     output_dir: Path = Path("output/parsed")
     transcript_output_dir: Path = Path("output/transcripts")
 
@@ -199,7 +173,7 @@ class Settings(BaseSettings):
     mineru_source: str = "modelscope"
     mineru_lang: str = "ch"
 
-    # RAGAnything
+    # Document parsing
     parser: str = "mineru"
     parse_method: str = "auto"
 
@@ -211,7 +185,7 @@ class Settings(BaseSettings):
     embedding_max_async: int = 2    # parallel embedding calls (lower for Ollama CPU / Windows + PG pool)
     max_parallel_insert: int = 1    # parallel document inserts (was 2; safer with asyncio.run)
 
-    # Surrogate multimodal ingest (skip_kg + non-text-only): optional VLM caption for images
+    # Multimodal ingest: optional VLM caption for images
     ingest_surrogate_image_vlm: bool = Field(
         default=False,
         validation_alias="INGEST_SURROGATE_IMAGE_VLM",
@@ -253,14 +227,6 @@ class Settings(BaseSettings):
         "只有包含完整或可理解的图表、流程图、表格、电路图或技术示意图才回答 USEFUL。"
         "只回答 USEFUL 或 USELESS，不要有其他任何内容。"
     )
-
-    # Optional LightRAG rerank (see HKUDS/LightRAG docs / examples/rerank_example.py).
-    # rerank_binding: cohere | jina | ali (DashScope text rerank)
-    rerank_binding: str = ""
-    rerank_model: str = ""
-    rerank_base_url: str = ""
-    rerank_api_key: str = ""
-    query_enable_rerank: bool = True
 
     ollama_api_key: str = ""
     tavily_api_key: str = ""

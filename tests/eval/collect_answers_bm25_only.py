@@ -1,14 +1,14 @@
 """Collect answers using Hybrid Search (BM25 + dense vector + RRF fusion).
 
 Retrieval pipeline:
-  1. Dense vector retrieval via LightRAG (mode="naive", flat chunk embeddings)
+  1. Dense vector retrieval from the pgvector chunk index
   2. BM25 full-text retrieval via PostgreSQL GIN index
   3. Reciprocal Rank Fusion (RRF) to merge the two ranked lists
   4. Optional Cross-Encoder re-ranking (``--rerank``; requires sentence-transformers;
      falls back silently to RRF order if the package is not installed)
 
 This ablation isolates the effect of combining lexical and semantic signals
-without the graph-augmented retrieval used by the "mix" mode.
+without an additional cross-encoder unless `--rerank` is enabled.
 
 Usage:
   python -m tests.eval.collect_answers_bm25_only
@@ -32,7 +32,7 @@ from tests.eval._common import (
     COURSE_RAGAS_CUSTOM,
     _bootstrap,
     load_json,
-    query_lightrag_direct,
+    query_vector_direct,
 )
 
 _bootstrap()
@@ -52,7 +52,7 @@ def main(
     rerank: bool = False,
 ) -> None:
     rerank_label = " + cross-encoder rerank" if rerank else " + RRF"
-    print(f"\n=== Collect Answers — Hybrid Search (BM25 + vector-naive{rerank_label}) ===\n")
+    print(f"\n=== Collect Answers — Vector + BM25 Search{rerank_label} ===\n")
 
     questions = load_json(questions_path)
     if blacklist_path:
@@ -87,7 +87,7 @@ def main(
     print(f"Already answered    : {len(done_ids)}")
     print(f"Remaining           : {len(pending)}")
     print(f"Course ID           : {course_id}")
-    print(f"Mode                : hybrid (BM25 + vector-naive + RRF{', cross-encoder rerank' if rerank else ''})  |  top_k={top_k}")
+    print(f"Mode                : vector + BM25 + RRF{', cross-encoder rerank' if rerank else ''}  |  top_k={top_k}")
     print(f"LLM model           : {llm_model}")
     print(f"Output              : {output_path}\n")
 
@@ -97,10 +97,9 @@ def main(
         print(f"[{len(done_ids) + i + 1}/{len(questions)}] {question_text[:80]}...")
 
         try:
-            answer, contexts = query_lightrag_direct(
+            answer, contexts = query_vector_direct(
                 course_id,
                 question_text,
-                mode="naive",
                 top_k=top_k,
                 enable_bm25=True,
                 rerank=rerank,

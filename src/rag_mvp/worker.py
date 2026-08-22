@@ -120,11 +120,10 @@ def _parse_bool_field(raw: str | None, default: bool = True) -> bool:
 def _process_one(conn: Any, r: redis.Redis, fields: dict[str, str]) -> None:
     op = fields.get("operation")
     text_only = _parse_bool_field(fields.get("text_only"), default=True)
-    skip_kg = _parse_bool_field(fields.get("skip_kg"), default=True)
     handler = get_task_handler(op)
     if handler is None:
         raise ValueError(f"unknown operation: {op!r}")
-    handler(conn, r, fields, text_only, skip_kg)
+    handler(conn, r, fields, text_only)
 
 
 def _handle_entries(

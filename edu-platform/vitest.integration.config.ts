@@ -6,7 +6,7 @@ import path from "path";
  * Usage: npx vitest run --config vitest.integration.config.ts --reporter=verbose
  *
  * Prerequisites:
- *   docker compose up -d   (postgres, redis, minio, neo4j)
+ *   docker compose up -d   (postgres, redis, minio)
  *   RAG service running on localhost:8001
  */
 export default defineConfig({

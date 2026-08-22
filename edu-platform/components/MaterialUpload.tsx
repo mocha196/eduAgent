@@ -166,7 +166,6 @@ function UploadForm({
   const [selectedLessonId, setSelectedLessonId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [textOnly, setTextOnly] = useState(true);
-  const [skipKg, setSkipKg] = useState(false);
   const [pct, setPct] = useState(0);
   const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
   const [msg, setMsg] = useState<string | null>(null);
@@ -196,7 +195,6 @@ function UploadForm({
         fd.set("file", file);
         if (selectedLessonId) fd.set("lesson_id", selectedLessonId);
         fd.set("text_only", textOnly ? "true" : "false");
-        fd.set("skip_kg", skipKg ? "true" : "false");
         const xhr = new XMLHttpRequest();
         await new Promise<void>((resolve, reject) => {
           xhrRef.current = xhr;
@@ -285,19 +283,6 @@ function UploadForm({
           <div>
             <p className="font-medium text-foreground">仅文本索引</p>
             <p className="text-[11px] text-muted-foreground mt-0.5">开启后跳过图片、表格、公式等多模态块</p>
-          </div>
-        </label>
-        <label className="flex items-start gap-2.5 rounded-xl border border-border px-3 py-2.5 text-xs cursor-pointer hover:bg-muted/20 transition-colors">
-          <input
-            type="checkbox"
-            checked={skipKg}
-            disabled={busy}
-            onChange={(e) => setSkipKg(e.target.checked)}
-            className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary"
-          />
-          <div>
-            <p className="font-medium text-foreground">关闭实体与关系提取</p>
-            <p className="text-[11px] text-muted-foreground mt-0.5">不做知识图谱抽取，只写入向量索引</p>
           </div>
         </label>
       </div>

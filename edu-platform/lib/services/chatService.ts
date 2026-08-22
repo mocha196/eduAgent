@@ -178,6 +178,7 @@ export async function createNewCourseChatSession(
 
 type PersistArgs = {
   courseId: string | null;
+  lessonId?: string | null;
   platformStudentId: string;
   sessionId: string;
   question: string;

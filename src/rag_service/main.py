@@ -1,8 +1,8 @@
-"""RAG Service — FastAPI microservice exposing LightRAG to the TS Agent.
+"""RAG Service — FastAPI microservice exposing vector retrieval to the TS Agent.
 
 Endpoints:
-  POST /rag/query                         — hybrid/course/personal/enrolled_courses retrieval
-  POST /rag/generate-quiz                 — question generation from a course's knowledge graph
+  POST /rag/query                         — course/personal/enrolled_courses vector retrieval
+  POST /rag/generate-quiz                 — quiz generation from retrieved course chunks
   POST /rag/build-mindmap                 — mindmap from parsed Markdown files
   POST /rag/parse-document                — base64 → extracted text (PDF / office / image)
   POST /rag/assignment/regenerate-question — regenerate a single assignment question via RAG
@@ -18,9 +18,8 @@ import base64
 import os
 import subprocess
 import tempfile
-import threading
 import uuid
-from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,50 +53,10 @@ def _require_key(request: Request) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Startup warmup — pre-initialise LightRAG for all published courses so that
-# the first knowledge_query tool call doesn't pay the cold-start penalty.
-# ---------------------------------------------------------------------------
-
-async def _warmup_course_caches() -> None:
-    """Query DB for published course IDs and pre-initialise each workspace."""
-    from rag_mvp.db import connect_sync
-    from rag_mvp.engine import get_course_rag_anything
-
-    try:
-        with connect_sync() as conn, conn.cursor() as cur:
-            cur.execute("SELECT id::text FROM courses WHERE status = 'PUBLISHED'")
-            course_ids: list[str] = [row[0] for row in cur.fetchall()]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Warmup: failed to fetch course IDs: {}", exc)
-        return
-
-    if not course_ids:
-        logger.info("Warmup: no published courses found, skipping.")
-        return
-
-    logger.info("Warmup: pre-initialising {} course workspace(s)...", len(course_ids))
-    for cid in course_ids:
-        try:
-            await get_course_rag_anything(cid)
-            logger.debug("Warmup: course {} ready", cid)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Warmup: course {} skipped — {}", cid, exc)
-    logger.info("Warmup: all course workspaces ready.")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Schedule warmup as a background task so the server accepts requests
-    # immediately — warmup runs concurrently and completes in the background.
-    asyncio.create_task(_warmup_course_caches())
-    yield
-
-
-# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="RAG Service", version="1.0.0", docs_url="/docs", lifespan=lifespan)
+app = FastAPI(title="RAG Service", version="1.0.0", docs_url="/docs")
 
 # ---------------------------------------------------------------------------
 # /rag/query
@@ -109,7 +68,6 @@ class QueryRequest(BaseModel):
     course_id: str | None = None
     accessible_course_ids: list[str] = Field(default_factory=list)
     question: str
-    mode: str = "mix"
     top_k: int = Field(default=5, ge=1, le=20)
 
 
@@ -238,7 +196,6 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
     )
 
     source = body.source.strip().lower()
-    mode = body.mode or "mix"
     top_k = body.top_k
     question = body.question.strip()
     warnings: list[str] = []
@@ -263,22 +220,22 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
     raw_hits: list[dict[str, Any]] = []
 
     if source == "personal":
-        raw_hits = await personal_retrieval_hits(body.user_id, question, mode=mode, top_k=top_k)
+        raw_hits = await personal_retrieval_hits(body.user_id, question, top_k=top_k)
 
     elif source == "course":
         if not body.course_id:
             raise HTTPException(status_code=400, detail="course_id required for source=course")
         raw_hits = await course_retrieval_hits(
-            body.course_id, question, mode=mode, top_k=top_k
+            body.course_id, question, top_k=top_k
         )
 
     elif source == "all":
         # personal + current course merged
-        personal = await personal_retrieval_hits(body.user_id, question, mode=mode, top_k=top_k)
+        personal = await personal_retrieval_hits(body.user_id, question, top_k=top_k)
         course_hits: list[dict[str, Any]] = []
         if body.course_id:
             course_hits = await course_retrieval_hits(
-                body.course_id, question, mode=mode, top_k=top_k
+                body.course_id, question, top_k=top_k
             )
         raw_hits = course_hits + personal
 
@@ -287,7 +244,7 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
         seen: set[str] = set()
         for cid in (body.accessible_course_ids or []):
             try:
-                hits = await course_retrieval_hits(cid, question, mode=mode, top_k=top_k)
+                hits = await course_retrieval_hits(cid, question, top_k=top_k)
                 for h in hits:
                     cid_chunk = str(h.get("chunk_id") or "")
                     if cid_chunk and cid_chunk in seen:
@@ -368,59 +325,64 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
 class GenerateQuizRequest(BaseModel):
     course_id: str
     count: int = Field(default=5, ge=1, le=20)
-    question_type: str = "mixed"  # single_choice|multi_choice|fill_blank|short_answer|mixed
+    question_type: str = "mixed"
 
 
 class GenerateQuizResponse(BaseModel):
     questions: list[dict[str, Any]]
-    total: int = 0
-    generated_at: str = ""
-
-
-_quiz_lock = threading.Lock()
+    total: int
+    generated_at: str
 
 
 @app.post("/rag/generate-quiz", response_model=GenerateQuizResponse)
-def rag_generate_quiz(
+async def rag_generate_quiz(
     body: GenerateQuizRequest, _auth: None = Depends(_require_key)
 ) -> GenerateQuizResponse:
-    from rag_mvp.config import settings
-    from rag_mvp.course_workspace import course_id_to_workspace
-    from rag_mvp.question_gen import (
-        DEFAULT_TYPE_WEIGHTS,
-        generate,
+    """Generate review questions from ordinary vector-retrieved course passages."""
+    from rag_mvp.engine import course_retrieval_hits
+    from rag_mvp.question_gen import DEFAULT_TYPE_WEIGHTS, generate_one
+
+    requested_type = body.question_type.strip().lower()
+    if requested_type != "mixed" and requested_type not in DEFAULT_TYPE_WEIGHTS:
+        raise HTTPException(status_code=400, detail="Unsupported question_type")
+
+    hits = await course_retrieval_hits(
+        body.course_id,
+        "课程核心概念 定义 原理 应用 重点",
+        top_k=min(body.count * 3, 20),
     )
+    if not hits:
+        raise HTTPException(status_code=404, detail="No indexed course passages found")
 
-    # Resolve course working_dir so question_gen reads the right graphml
-    ws = course_id_to_workspace(body.course_id)
-    rag_storage_root = getattr(settings, "rag_storage_dir", None) or Path("rag_storage")
-    course_working_dir = Path(rag_storage_root) / ws
+    if requested_type == "mixed":
+        question_types = ["single_choice", "fill_blank"]
+    else:
+        question_types = [requested_type]
 
-    if not course_working_dir.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Course knowledge base not found for course_id={body.course_id!r}",
+    async def _generate(index: int, hit: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = hit.get("metadata") or {}
+        label = Path(str(metadata.get("file_path") or "课程知识点")).stem or "课程知识点"
+        return await generate_one(
+            entity_name=label,
+            context=str(hit.get("text") or ""),
+            q_type=question_types[index % len(question_types)],
+            q_id=index + 1,
+            score=float(hit.get("relevance_score") or 0.0),
+            chunk_ids=[str(hit.get("chunk_id") or "")],
+            objective="knowledge",
+            entity_names=[label],
         )
 
-    # Build type_weights from question_type
-    if body.question_type in DEFAULT_TYPE_WEIGHTS:
-        type_weights = {body.question_type: 1.0}
-    else:
-        type_weights = None  # "mixed" → use defaults
-
-    # question_gen.generate() reads from settings.working_dir — swap with lock for thread safety
-    with _quiz_lock:
-        original_wd = settings.working_dir
-        settings.working_dir = course_working_dir
-        try:
-            result = generate(count=body.count, type_weights=type_weights)
-        finally:
-            settings.working_dir = original_wd
-
+    candidates = await asyncio.gather(
+        *(_generate(index, hit) for index, hit in enumerate(hits[: body.count * 2]))
+    )
+    questions = [question for question in candidates if question is not None][: body.count]
+    for index, question in enumerate(questions, start=1):
+        question["id"] = index
     return GenerateQuizResponse(
-        questions=result.get("questions") or [],
-        total=result.get("total") or 0,
-        generated_at=str(result.get("generated_at") or ""),
+        questions=questions,
+        total=len(questions),
+        generated_at=datetime.now(UTC).isoformat(),
     )
 
 

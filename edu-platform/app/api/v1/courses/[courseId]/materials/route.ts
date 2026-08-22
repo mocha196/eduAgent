@@ -21,13 +21,6 @@ function parseTextOnly(v: FormDataEntryValue | null): boolean {
   return s === "1" || s === "true" || s === "yes" || s === "on";
 }
 
-function parseSkipKg(v: FormDataEntryValue | null): boolean {
-  if (typeof v !== "string") return true;
-  const s = v.trim().toLowerCase();
-  if (!s) return true;
-  return s === "1" || s === "true" || s === "yes" || s === "on";
-}
-
 export async function GET(req: NextRequest, ctx: Ctx) {
   try {
     const auth = requireAuthenticated(await getAuthFromRequest(req));
@@ -63,11 +56,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     
     const lessonRaw = form.get("lesson_id");
     const textOnlyRaw = form.get("text_only");
-    const skipKgRaw = form.get("skip_kg");
     const lessonId =
       typeof lessonRaw === "string" && lessonRaw.trim() ? lessonRaw.trim() : null;
     const textOnly = parseTextOnly(textOnlyRaw);
-    const skipKg = parseSkipKg(skipKgRaw);
     const size = file.size;
     if (size <= 0) {
       throw new ApiError(400, "VALIDATION_ERROR", "Empty file");
@@ -83,7 +74,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       body,
       lessonId,
       textOnly,
-      skipKg,
     });
     return jsonOk(created, 201);
   } catch (e) {
