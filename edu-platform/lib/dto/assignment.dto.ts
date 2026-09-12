@@ -58,6 +58,20 @@ export interface QualityReport {
   summary: string;
 }
 
+export interface QuestionAdoptionMetrics {
+  generatedCount: number;
+  retainedCount: number;
+  unchangedCount: number;
+  modifiedCount: number;
+  deletedCount: number;
+  teacherAddedCount: number;
+  /** AI-origin question IDs retained at publication / generatedCount. */
+  adoptionRate: number;
+  /** AI-origin questions published without pedagogical-content edits / generatedCount. */
+  directAdoptionRate: number;
+  calculatedAt: string;
+}
+
 // ── Request bodies ──────────────────────────────────────────────────────────
 
 export interface StructuredGenerationParams {
@@ -144,6 +158,7 @@ export interface AssignmentDetailDto extends AssignmentSummaryDto {
   blueprint: Blueprint | null;
   questions: QuestionItem[] | null;
   qualityReport: QualityReport | null;
+  adoptionMetrics: QuestionAdoptionMetrics | null;
   publishedAt: string | null;
   /** Original NLP request stored for retry. */
   teacherRequest: string | null;

@@ -104,6 +104,43 @@ def _load_cp_scores(prefix: str) -> dict[str, float]:
     return result
 
 
+def _load_agentic_tool_stats() -> dict:
+    """Aggregate paired tool_result data captured in answers_agentic.json."""
+    path = RESULTS_DIR / "answers_agentic.json"
+    if not path.exists():
+        return {"total": 0, "completed": 0, "successful": 0, "success_rate": None,
+                "average_duration_ms": None, "by_tool": {}}
+    answers = json.loads(path.read_text(encoding="utf-8"))
+    calls = [call for answer in answers for call in answer.get("tool_calls", [])]
+    completed = [call for call in calls if call.get("success") is not None]
+    durations = [float(call["duration_ms"]) for call in completed
+                 if isinstance(call.get("duration_ms"), (int, float))]
+    by_tool: dict[str, dict] = {}
+    for name in sorted({str(call.get("name") or "unknown") for call in calls}):
+        items = [call for call in calls if str(call.get("name") or "unknown") == name]
+        done = [call for call in items if call.get("success") is not None]
+        succeeded = sum(call.get("success") is True for call in done)
+        tool_durations = [float(call["duration_ms"]) for call in done
+                          if isinstance(call.get("duration_ms"), (int, float))]
+        by_tool[name] = {
+            "total": len(items),
+            "completed": len(done),
+            "successful": succeeded,
+            "success_rate": _round4(succeeded / len(done)) if done else None,
+            "average_duration_ms": _round4(sum(tool_durations) / len(tool_durations))
+            if tool_durations else None,
+        }
+    successful = sum(call.get("success") is True for call in completed)
+    return {
+        "total": len(calls),
+        "completed": len(completed),
+        "successful": successful,
+        "success_rate": _round4(successful / len(completed)) if completed else None,
+        "average_duration_ms": _round4(sum(durations) / len(durations)) if durations else None,
+        "by_tool": by_tool,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Stat computation helpers
 # ---------------------------------------------------------------------------
@@ -309,6 +346,7 @@ def main(output_path: str) -> None:
             for prefix in PREFIXES
         },
         "overall": overall,
+        "agentic_tool_calls": _load_agentic_tool_stats(),
         "by_language": by_language,
         "by_question_type": by_question_type,
         "intersection": {

@@ -98,10 +98,22 @@ def _parse_sse_stream(response: httpx.Response) -> tuple[str, list[str], list[di
             # Only the final synthesis after all tool calls is the real answer.
             answer_parts.clear()
             tool_calls.append({
+                "tool_call_id": event.get("tool_call_id", ""),
                 "name": event.get("name", ""),
                 "input": event.get("input"),
+                "success": None,
+                "duration_ms": None,
             })
             continue
+        elif etype == "tool_result":
+            call_id = event.get("tool_call_id", "")
+            matched = next(
+                (call for call in reversed(tool_calls) if call.get("tool_call_id") == call_id),
+                None,
+            )
+            if matched is not None:
+                matched["success"] = event.get("success") is True
+                matched["duration_ms"] = event.get("duration_ms")
         elif etype == "citation":
             # Prefer eval_text (full chunk up to 1500 chars) over the 300-char UI preview.
             # Skip image/media metadata chunks — they carry no semantic text for eval.
@@ -260,8 +272,27 @@ def main(
 
     answered = len([a for a in answers if a.get("generated_answer")])
     avg_tools = tool_calls_total / len(answers) if answers else 0
+    completed_tools = [
+        call
+        for answer_item in answers
+        for call in answer_item.get("tool_calls", [])
+        if call.get("success") is not None
+    ]
+    successful_tools = sum(call.get("success") is True for call in completed_tools)
+    tool_success_rate = successful_tools / len(completed_tools) if completed_tools else None
+    tool_durations = [
+        float(call["duration_ms"])
+        for call in completed_tools
+        if isinstance(call.get("duration_ms"), (int, float))
+    ]
     print(f"\n✓ {len(answers)} answers saved → {output_path}")
     print(f"  answered: {answered}  |  avg tool calls/question: {avg_tools:.2f}")
+    if tool_success_rate is not None:
+        avg_duration = sum(tool_durations) / len(tool_durations) if tool_durations else 0.0
+        print(
+            f"  tool success: {successful_tools}/{len(completed_tools)} "
+            f"({tool_success_rate:.2%})  |  avg tool duration: {avg_duration:.2f} ms"
+        )
 
 
 if __name__ == "__main__":

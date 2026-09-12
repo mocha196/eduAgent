@@ -1,1 +1,1 @@
-"""rag_mvp - Multimodal RAG powered by RAG-Anything, MinerU and Qwen API."""
+"""rag_mvp - Multimodal RAG with pluggable parsing, PostgreSQL, and Qwen APIs."""

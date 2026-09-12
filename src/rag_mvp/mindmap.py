@@ -1,4 +1,4 @@
-"""Mindmap generation from MinerU-parsed Markdown files.
+"""Mindmap generation from parser-produced Markdown or normalized document text.
 
 Two modes:
   structure  – parse MD headings into a tree (instant, no LLM)
@@ -16,6 +16,7 @@ from typing import Any
 from loguru import logger
 
 from .config import settings
+from .parsed_document import PARSED_DOCUMENT_FILENAME, load_parsed_document
 from .tracing import create_trace, end_span, flush, span
 
 # ---------------------------------------------------------------------------
@@ -29,7 +30,7 @@ MINDMAP_DIR = Path("mindmap_storage")
 # ---------------------------------------------------------------------------
 
 def find_md_files(source: str | Path) -> list[Path]:
-    """Return MinerU-parsed .md files matching *source*.
+    """Return parser-produced .md files matching *source*.
 
     source can be:
       - A stem name like "运输层"  → searches output/parsed/{stem}/**/*.md
@@ -64,7 +65,18 @@ def find_md_files(source: str | Path) -> list[Path]:
         if md.stat().st_size > 500:
             candidates.append(md)
     if not candidates:
-        raise FileNotFoundError(f"No .md files found under {search_root}.")
+        # A provider is not required to emit Markdown. Materialize a stable text
+        # view from the canonical artifact so mindmap generation remains usable.
+        for artifact in search_root.rglob(PARSED_DOCUMENT_FILENAME):
+            document = load_parsed_document(artifact.parent)
+            text = document.extracted_text().strip()
+            if len(text) <= 500:
+                continue
+            fallback = artifact.parent / f"{Path(document.source_name).stem}_normalized.md"
+            fallback.write_text(text, encoding="utf-8")
+            candidates.append(fallback)
+    if not candidates:
+        raise FileNotFoundError(f"No usable parsed text found under {search_root}.")
     return candidates
 
 

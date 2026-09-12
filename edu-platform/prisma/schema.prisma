@@ -338,6 +338,12 @@ model Assignment {
   /// Array of question objects: [{id, type, objective, entity, question, options, answer, explanation, score, ...}]
   questions Json? @map("questions")
 
+  /// Immutable snapshot of the final AI-generated questions before teacher edits.
+  generatedQuestionsSnapshot Json? @map("generated_questions_snapshot")
+
+  /// Publication-time adoption statistics for the generated question set.
+  adoptionMetrics Json? @map("adoption_metrics")
+
   /// ReviewerAgent output: {overall_score, passed, threshold, question_reviews, failed_ids, summary}
   qualityReport Json? @map("quality_report")
 

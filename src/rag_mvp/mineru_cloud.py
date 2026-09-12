@@ -9,8 +9,8 @@ Flow for a single file
 4. Download full_zip_url → bytes
 5. Unzip into out_dir  (same layout as local MinerU output)
 
-The caller then reads *_content_list.json from out_dir, runs _fix_image_paths,
-and passes the result to insert_content_list — exactly the same as reindex_from_cache.
+The MinerU provider normalizes the extracted ``content_list`` into the application's
+provider-neutral ``ParsedDocument`` contract before downstream processing.
 """
 
 from __future__ import annotations

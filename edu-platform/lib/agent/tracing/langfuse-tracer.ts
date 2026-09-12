@@ -55,7 +55,7 @@ export function createTurnTrace(opts: {
       sessionId: opts.sessionId,
       input: opts.input,
       metadata: opts.metadata,
-      tags: ["edu-platform"],
+      tags: ["edu-platform", "feature:chat", `env:${process.env.NODE_ENV ?? "unknown"}`],
     });
   } catch (err) {
     console.warn("[Langfuse] createTurnTrace failed:", err);
@@ -96,7 +96,7 @@ export function createStandaloneTrace(opts: {
       metadata: opts.metadata,
       userId: opts.userId,
       sessionId: opts.sessionId,
-      tags: ["edu-platform"],
+      tags: ["edu-platform", `feature:${opts.name.split(".")[0]}`, `env:${process.env.NODE_ENV ?? "unknown"}`],
     });
   } catch (err) {
     console.warn("[Langfuse] createStandaloneTrace failed:", err);

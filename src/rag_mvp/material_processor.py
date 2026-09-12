@@ -1,4 +1,4 @@
-"""Course material pipeline: MinIO → MinerU parsing → PostgreSQL vector index.
+"""Course material pipeline: MinIO → document parsing → PostgreSQL vector index.
 
 If PostgreSQL reports ``another operation is in progress`` during indexing, try
 lowering ``MAX_PARALLEL_INSERT`` or ``EMBEDDING_MAX_ASYNC`` in ``rag_mvp`` settings.
@@ -45,9 +45,8 @@ except ImportError:  # pragma: no cover
 from loguru import logger
 
 from rag_mvp.config import settings
+from rag_mvp.document_parser import parse_document
 from rag_mvp.engine import (
-    _aparse_file,
-    _build_parser,
     _invalidate_course_rag_cache_for,
     _invalidate_personal_rag_cache,
     delete_material_course_async,
@@ -64,6 +63,7 @@ from rag_mvp.engine import (
     ingest_text_into_personal_sync,
     parse_file,
 )
+from rag_mvp.parsed_document import has_parsed_document, load_parsed_document
 from rag_mvp.worker_async_loop import is_worker_async_loop_started, run_worker_coroutine
 
 try:
@@ -114,10 +114,9 @@ def _bucket() -> str:
 
 
 async def _parse_material_file_async(local_file: Path) -> None:
-    """MinerU parse only (same behaviour as ``engine.parse_file``)."""
+    """Parse only, using the configured document parser provider."""
     logger.info("Parsing file: {}", local_file.name)
-    rag = _build_parser()
-    await _aparse_file(rag, local_file)
+    await parse_document(local_file)
 
 
 async def _ingest_parsed_material_worker_async(
@@ -519,15 +518,9 @@ def update_material_status(
         return (cur.rowcount or 0) > 0
 
 
-def _parse_output_has_content_list(material_id: str) -> bool:
-    """True if MinerU output dir exists and contains a content_list JSON for ingest."""
-    scan_dir = settings.output_dir / material_id
-    if not scan_dir.is_dir():
-        return False
-    for p in scan_dir.rglob("*_content_list.json"):
-        if "_content_list_v2" not in p.name:
-            return True
-    return False
+def _parse_output_has_artifact(material_id: str) -> bool:
+    """Return whether canonical or legacy parse artifacts are available."""
+    return has_parsed_document(settings.output_dir / material_id)
 
 
 def _claim_material_for_index_retry(
@@ -691,7 +684,7 @@ def _upload_material_images_to_minio(
     local_file: Path,
     conn: psycopg.Connection,
 ) -> None:
-    """Upload all images extracted by MinerU to MinIO and record in material_images table.
+    """Upload images exposed by the parser contract and record them in MinIO.
 
     This always runs regardless of text_only flag — images are stored for traceability
     even when multimodal embedding is disabled.
@@ -710,56 +703,71 @@ def _upload_material_images_to_minio(
 
     uploaded: list[tuple[int, str]] = []  # (page_idx, minio_url)
 
-    for json_path in scan_dir.rglob("*_content_list.json"):
-        if "_content_list_v2" in json_path.name:
-            continue
-        try:
-            raw: list = json.loads(json_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for item in raw:
-            if item.get("type") != "image":
-                continue
-            rel = item.get("img_path", "")
-            if not rel:
-                continue
-            page_idx = int(item.get("page_idx", 0))
+    try:
+        document = load_parsed_document(scan_dir)
+    except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Cannot load parsed images for material {}: {}", material_id, exc)
+        return
 
-            is_url = str(rel).startswith(("http://", "https://"))
-            if is_url:
-                # CDN image: download to a temp buffer and upload directly to MinIO
-                import io as _io
-                import urllib.request as _urlreq
-                try:
-                    with _urlreq.urlopen(rel, timeout=30) as resp:
-                        img_bytes = resp.read()
-                except Exception as exc:
-                    logger.warning("Failed to download CDN image {} for material {}: {}", rel, material_id, exc)
-                    continue
-                sha = hashlib.sha1(img_bytes).hexdigest()[:12]
-                url_suffix = "." + rel.rsplit(".", 1)[-1].split("?")[0] if "." in rel else ".jpg"
-                suffix = url_suffix.lower() or ".jpg"
-                minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
-                try:
-                    client.upload_fileobj(_io.BytesIO(img_bytes), bucket, minio_key)
-                except Exception as exc:
-                    logger.warning("Failed to upload CDN image {} for material {}: {}", rel, material_id, exc)
-                    continue
-            else:
-                img_abs = (json_path.parent / rel).resolve()
-                if not img_abs.exists():
-                    continue
-                sha = hashlib.sha1(img_abs.read_bytes()).hexdigest()[:12]
-                suffix = img_abs.suffix.lower() or ".jpg"
-                minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
-                try:
-                    client.upload_file(str(img_abs), bucket, minio_key)
-                except Exception as exc:
-                    logger.warning("Failed to upload image {} for material {}: {}", img_abs.name, material_id, exc)
-                    continue
+    for block in document.blocks:
+        if block.kind != "image":
+            continue
+        asset = block.resolved_asset(scan_dir)
+        if not asset:
+            continue
+        page_idx = block.page_idx or 0
 
-            url = f"{endpoint}/{bucket}/{minio_key}"
-            uploaded.append((page_idx, url))
+        if asset.startswith(("http://", "https://")):
+            import io as _io
+            import urllib.request as _urlreq
+
+            try:
+                with _urlreq.urlopen(asset, timeout=30) as resp:
+                    img_bytes = resp.read()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to download parsed image {} for material {}: {}",
+                    asset,
+                    material_id,
+                    exc,
+                )
+                continue
+            sha = hashlib.sha1(img_bytes).hexdigest()[:12]
+            url_suffix = (
+                "." + asset.rsplit(".", 1)[-1].split("?")[0] if "." in asset else ".jpg"
+            )
+            suffix = url_suffix.lower() or ".jpg"
+            minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
+            try:
+                client.upload_fileobj(_io.BytesIO(img_bytes), bucket, minio_key)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to upload parsed image {} for material {}: {}",
+                    asset,
+                    material_id,
+                    exc,
+                )
+                continue
+        else:
+            img_abs = Path(asset)
+            if not img_abs.exists():
+                continue
+            sha = hashlib.sha1(img_abs.read_bytes()).hexdigest()[:12]
+            suffix = img_abs.suffix.lower() or ".jpg"
+            minio_key = f"edu-images/{material_id}/p{page_idx:04d}_{sha}{suffix}"
+            try:
+                client.upload_file(str(img_abs), bucket, minio_key)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to upload image {} for material {}: {}",
+                    img_abs.name,
+                    material_id,
+                    exc,
+                )
+                continue
+
+        url = f"{endpoint}/{bucket}/{minio_key}"
+        uploaded.append((page_idx, url))
 
     if not uploaded:
         logger.debug("No images found to upload for material {}", material_id)
@@ -812,29 +820,16 @@ def _record_chunk_page_mappings(
 # Document summary — Map-Reduce (non-video materials)
 # ---------------------------------------------------------------------------
 
-def _extract_text_from_content_list(material_id: str) -> str:
-    """Concatenate all text/table items from MinerU *_content_list.json files."""
+def _extract_text_from_parsed_document(material_id: str) -> str:
+    """Extract summary text through the provider-neutral parser contract."""
     scan_dir = settings.output_dir / material_id
     if not scan_dir.exists():
         return ""
-    texts: list[str] = []
-    for json_path in sorted(scan_dir.rglob("*_content_list.json")):
-        if "_content_list_v2" in json_path.name:
-            continue
-        try:
-            raw: list = json.loads(json_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for item in raw:
-            t = str(item.get("type") or "")
-            txt = ""
-            if t == "text":
-                txt = str(item.get("text") or "").strip()
-            elif t == "table":
-                txt = str(item.get("text") or item.get("html") or "").strip()
-            if txt:
-                texts.append(txt)
-    return "\n\n".join(texts)
+    try:
+        return load_parsed_document(scan_dir).extracted_text()
+    except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Cannot extract parsed text for material {}: {}", material_id, exc)
+        return ""
 
 
 async def _generate_document_summary_async(
@@ -977,13 +972,13 @@ def _generate_and_save_document_summary(
 ) -> None:
     """Extract parsed text → async Map-Reduce → persist document_summary to DB.
 
-    Must be called while the MinerU output dir still exists (between PARSED and READY
+    Must be called while the parser artifact directory exists (between PARSED and READY
     status transitions). Non-fatal: any failure is logged but does not abort indexing.
     """
     if table not in {"materials", "personal_materials"}:
         raise ValueError(f"Invalid table: {table}")
     try:
-        full_text = _extract_text_from_content_list(material_id)
+        full_text = _extract_text_from_parsed_document(material_id)
         if not full_text.strip():
             logger.info("Document summary: no text extracted for material {}", material_id)
             return
@@ -1090,7 +1085,7 @@ def _run_material_download_parse_and_ingest(
         # Same parse stack as CLI `rag parse` (engine.parse_file), or worker persistent loop.
         _parse_file_dispatch(local_file)
 
-        # Checkpoint 2: after MinerU parse, before embedding starts (most expensive part).
+        # Checkpoint 2: after parsing, before embedding starts (most expensive part).
         if r is not None:
             _raise_if_cancelled(r, material_id, "pre-ingest")
 
@@ -1106,7 +1101,7 @@ def _run_material_download_parse_and_ingest(
             )
         parsed_committed = True
 
-        # Generate document summary while MinerU output dir still exists.
+        # Generate the summary while parser artifacts still exist.
         if settings.document_summary_enabled:
             _generate_and_save_document_summary(
                 conn, material_id, "materials", original_filename
@@ -1144,7 +1139,7 @@ def _run_material_download_parse_and_ingest(
                 raise RuntimeError(
                     f"Material {material_id} lost INDEXING state before READY commit",
                 )
-        # Remove MinerU cache for this stem to limit disk growth (re-parse on re-ingest).
+        # Remove parser cache for this stem to limit disk growth (re-parse on re-ingest).
         stem_dir = settings.output_dir / material_id
         if stem_dir.exists():
             shutil.rmtree(stem_dir, ignore_errors=True)
@@ -1321,7 +1316,7 @@ def process_parse_and_index(
     text_only: bool = True,
     r: redis.Redis | None = None,
 ) -> None:
-    """DB is source of truth; parse via MinerU and write the vector index."""
+    """DB is source of truth; parse with the configured provider and write the index."""
     # Checkpoint 0: before claiming the row — skip entirely if already cancelled.
     if r is not None and _is_cancel_requested(r, material_id):
         logger.info("process_parse_and_index: cancel signal detected before claim for material {}", material_id)
@@ -1363,9 +1358,9 @@ def process_index_only(
     minio_path = claimed["minio_path"]
     file_type = claimed["file_type"]
 
-    if not _parse_output_has_content_list(material_id):
+    if not _parse_output_has_artifact(material_id):
         logger.info(
-            "index_only: full reparse fallback for material {} (no local *_content_list.json)",
+            "index_only: full reparse fallback for material {} (no local parse artifact)",
             material_id,
         )
         with conn.transaction():
@@ -1893,7 +1888,7 @@ def _run_personal_material_download_parse_and_ingest(
             )
         parsed_committed = True
 
-        # Generate document summary while MinerU output dir still exists.
+        # Generate the summary while parser artifacts still exist.
         if settings.document_summary_enabled:
             _generate_and_save_document_summary(
                 conn, material_id, "personal_materials", original_filename
@@ -2227,9 +2222,9 @@ def process_personal_index_only(
     minio_path = claimed["minio_path"]
     file_type = claimed["file_type"]
 
-    if not _parse_output_has_content_list(material_id):
+    if not _parse_output_has_artifact(material_id):
         logger.info(
-            "personal_index_only: full reparse fallback for material {} (no local *_content_list.json)",
+            "personal_index_only: full reparse fallback for material {} (no local parse artifact)",
             material_id,
         )
         with conn.transaction():

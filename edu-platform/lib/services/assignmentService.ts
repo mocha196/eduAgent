@@ -22,12 +22,65 @@ import type {
   GenerateAssignmentBody,
   PatchAssignmentBody,
   QualityReport,
+  QuestionAdoptionMetrics,
   QuestionItem,
   RegenerateQuestionBody,
   StudentQuestionItem,
 } from "@/lib/dto/assignment.dto";
 
 const STREAM_NAME = process.env.RAG_TASK_STREAM_NAME ?? "edu:rag:tasks:stream";
+
+const ADOPTION_CONTENT_FIELDS = [
+  "type",
+  "objective",
+  "entities",
+  "importance_score",
+  "reasoning_steps",
+  "question",
+  "options",
+  "answer",
+  "explanation",
+  "source_chunk_ids",
+  "difficulty",
+] as const satisfies readonly (keyof QuestionItem)[];
+
+function adoptionFingerprint(question: QuestionItem): string {
+  return JSON.stringify(
+    Object.fromEntries(ADOPTION_CONTENT_FIELDS.map((field) => [field, question[field] ?? null])),
+  );
+}
+
+/** Calculate publication-time adoption without counting score or ordering changes as edits. */
+export function calculateQuestionAdoption(
+  generatedQuestions: QuestionItem[],
+  publishedQuestions: QuestionItem[],
+  calculatedAt = new Date(),
+): QuestionAdoptionMetrics {
+  const generatedById = new Map(generatedQuestions.map((question) => [question.id, question]));
+  const publishedById = new Map(publishedQuestions.map((question) => [question.id, question]));
+  let retainedCount = 0;
+  let unchangedCount = 0;
+
+  for (const [id, generated] of generatedById) {
+    const published = publishedById.get(id);
+    if (!published) continue;
+    retainedCount += 1;
+    if (adoptionFingerprint(generated) === adoptionFingerprint(published)) unchangedCount += 1;
+  }
+
+  const generatedCount = generatedById.size;
+  return {
+    generatedCount,
+    retainedCount,
+    unchangedCount,
+    modifiedCount: retainedCount - unchangedCount,
+    deletedCount: generatedCount - retainedCount,
+    teacherAddedCount: publishedQuestions.filter((question) => !generatedById.has(question.id)).length,
+    adoptionRate: generatedCount > 0 ? retainedCount / generatedCount : 0,
+    directAdoptionRate: generatedCount > 0 ? unchangedCount / generatedCount : 0,
+    calculatedAt: calculatedAt.toISOString(),
+  };
+}
 
 // ── Private helpers ─────────────────────────────────────────────────────────
 
@@ -71,6 +124,7 @@ function toDetail(a: {
   errorMessage: string | null;
   teacherRequest: string | null;
   structuredParams: unknown;
+  adoptionMetrics?: unknown;
 }): AssignmentDetailDto {
   const summary = toSummary(a);
   return {
@@ -79,6 +133,9 @@ function toDetail(a: {
     blueprint: a.blueprint ? (a.blueprint as Blueprint) : null,
     questions: a.questions ? (a.questions as QuestionItem[]) : null,
     qualityReport: a.qualityReport ? (a.qualityReport as QualityReport) : null,
+    adoptionMetrics: a.adoptionMetrics
+      ? (a.adoptionMetrics as unknown as QuestionAdoptionMetrics)
+      : null,
     publishedAt: a.publishedAt?.toISOString() ?? null,
     teacherRequest: a.teacherRequest,
     structuredParams: a.structuredParams ? (a.structuredParams as import("@/lib/dto/assignment.dto").StructuredGenerationParams) : null,
@@ -238,17 +295,34 @@ export async function publishAssignment(
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
   assertCanPublishAssignment(existing.status);
 
-  const changed = await prisma.assignment.updateMany({
-    where: { id: assignmentId, courseId, status: AssignmentStatus.DRAFT },
-    data: {
-      status: AssignmentStatus.PUBLISHED,
-      publishedAt: new Date(),
-    },
+  const generatedQuestions = Array.isArray(existing.generatedQuestionsSnapshot)
+    ? (existing.generatedQuestionsSnapshot as unknown as QuestionItem[])
+    : [];
+  const publishedQuestions = Array.isArray(existing.questions)
+    ? (existing.questions as unknown as QuestionItem[])
+    : [];
+  const calculatedAt = new Date();
+  const adoptionMetrics = calculateQuestionAdoption(
+    generatedQuestions,
+    publishedQuestions,
+    calculatedAt,
+  );
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const changed = await tx.assignment.updateMany({
+      where: { id: assignmentId, courseId, status: AssignmentStatus.DRAFT },
+      data: {
+        status: AssignmentStatus.PUBLISHED,
+        publishedAt: calculatedAt,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        adoptionMetrics: adoptionMetrics as any,
+      },
+    });
+    if (changed.count === 0) {
+      throw new ApiError(409, "CONFLICT", "Assignment is no longer publishable");
+    }
+    return tx.assignment.findFirst({ where: { id: assignmentId, courseId } });
   });
-  if (changed.count === 0) {
-    throw new ApiError(409, "CONFLICT", "Assignment is no longer publishable");
-  }
-  const updated = await prisma.assignment.findFirst({ where: { id: assignmentId, courseId } });
   if (!updated) throw new ApiError(404, "NOT_FOUND", "Assignment not found");
 
   // Best-effort: notify teacher + enrolled students asynchronously.

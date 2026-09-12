@@ -18,15 +18,21 @@
  */
 import http from 'k6/http';
 import { check } from 'k6';
-import { Counter, Trend } from 'k6/metrics';
+import { Counter, Rate, Trend } from 'k6/metrics';
 import { login, authHeaders, BASE_URL, COURSE_ID, vuUser, randomQuestion } from './utils.js';
 
 // 自定义指标：单独追踪聊天接口
 const chatDuration  = new Trend('chat_req_duration',  true);
 const chatErrors    = new Counter('chat_errors');
 const chatSuccesses = new Counter('chat_successes');
+const chatRequests  = new Counter('chat_requests_total');
+const toolCalls      = new Counter('tool_calls_total');
+const toolSuccess    = new Rate('tool_call_success_rate');
+const toolDuration   = new Trend('tool_call_duration', true);
+const sseErrors      = new Counter('chat_sse_errors');
 
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   scenarios: {
     // 场景 A：轻量并发（正常使用）
     scenario_light: {
@@ -52,6 +58,7 @@ export const options = {
     'chat_req_duration{scenario:heavy}': ['p(95)<60000'],
     chat_errors:                       ['count<10'],     // 允许少量错误
     http_req_failed:                   ['rate<0.05'],
+    tool_call_success_rate:            ['rate>0.95'],
   },
 };
 
@@ -94,6 +101,7 @@ export default function (data) {
   );
 
   const elapsed = Date.now() - start;
+  chatRequests.add(1);
   chatDuration.add(elapsed);
 
   const ok = check(res, {
@@ -107,6 +115,23 @@ export default function (data) {
   } else {
     chatErrors.add(1);
     console.warn(`VU ${__VU}: chat failed [${res.status}] q="${question.slice(0, 30)}"`);
+  }
+
+  for (const line of (res.body || '').split(/\r?\n/)) {
+    if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+    try {
+      const event = JSON.parse(line.slice(6));
+      if (event.type === 'tool_result') {
+        const tool = event.name || 'unknown';
+        toolCalls.add(1, { tool });
+        toolSuccess.add(event.success === true, { tool });
+        if (Number.isFinite(event.duration_ms)) toolDuration.add(event.duration_ms, { tool });
+      } else if (event.type === 'done' && event.error) {
+        sseErrors.add(1, { error: String(event.error).slice(0, 80) });
+      }
+    } catch {
+      // Ignore non-JSON SSE payloads; request-level checks cover malformed responses.
+    }
   }
 
   // 模拟用户阅读回答（2~5 秒）

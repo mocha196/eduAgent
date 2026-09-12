@@ -14,15 +14,19 @@
  */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Trend, Counter } from 'k6/metrics';
+import { Trend, Counter, Rate } from 'k6/metrics';
 import { RAG_URL, COURSE_ID } from './utils.js';
 
-const RAG_API_KEY = 'change-me-rag-service-key'; // 与 .env RAG_SERVICE_API_KEY 一致
+const RAG_API_KEY = __ENV.RAG_SERVICE_API_KEY || '';
 
 const ragQueryDuration = new Trend('rag_query_duration', true);
 const ragErrors        = new Counter('rag_errors');
+const ragQueries       = new Counter('rag_queries_total');
+const ragSuccess       = new Rate('rag_query_success_rate');
+const ragEmpty         = new Rate('rag_empty_result_rate');
 
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   stages: [
     { duration: '1m', target: 3  },
     { duration: '3m', target: 3  },
@@ -33,7 +37,8 @@ export const options = {
   thresholds: {
     rag_query_duration:    ['p(90)<15000', 'p(95)<25000'],
     rag_errors:            ['count<5'],
-    'http_req_failed{url:http://localhost:8001/rag/query}': ['rate<0.05'],
+    rag_query_success_rate: ['rate>0.95'],
+    'http_req_failed{endpoint:query}': ['rate<0.05'],
   },
 };
 
@@ -67,9 +72,10 @@ export default function () {
   const queryRes = http.post(
     `${RAG_URL}/rag/query`,
     JSON.stringify({
-      query:      query,
+      source:     'course',
+      user_id:    `perf-vu-${__VU}`,
       course_id:  COURSE_ID,
-      mode:       'hybrid',      // hybrid | local | global | naive
+      question:   query,
       top_k:      5,
     }),
     {
@@ -79,16 +85,20 @@ export default function () {
     },
   );
   ragQueryDuration.add(Date.now() - t0);
+  ragQueries.add(1);
+
+  let hasChunks = false;
+  try {
+    const body = queryRes.json();
+    hasChunks = Array.isArray(body.hits) && body.hits.length > 0;
+  } catch { /* recorded as an empty result below */ }
 
   const ok = check(queryRes, {
     'rag query 200': (r) => r.status === 200,
-    'rag has chunks': (r) => {
-      try {
-        const b = r.json();
-        return Array.isArray(b.chunks) && b.chunks.length > 0;
-      } catch { return false; }
-    },
+    'rag has hits': () => hasChunks,
   });
+  ragSuccess.add(ok);
+  ragEmpty.add(!hasChunks);
 
   if (!ok) {
     ragErrors.add(1);

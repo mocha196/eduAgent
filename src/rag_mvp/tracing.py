@@ -9,6 +9,7 @@ Compatible with langfuse >= 4.x (start_observation / span.start_observation API)
 from __future__ import annotations
 
 import os
+import contextvars
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -30,6 +31,17 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _client: "Langfuse | None | bool" = False  # False = not yet initialised
+_current_trace: contextvars.ContextVar["LangfuseSpan | None"] = contextvars.ContextVar(
+    "langfuse_current_trace", default=None
+)
+
+
+def get_current_trace() -> "LangfuseSpan | None":
+    return _current_trace.get()
+
+
+def clear_current_trace() -> None:
+    _current_trace.set(None)
 
 
 def get_langfuse_client() -> "Langfuse | None":
@@ -93,6 +105,7 @@ def create_assignment_trace(
             metadata={"assignment_id": assignment_id, "course_id": course_id},
         )
         root.set_trace_io(input=teacher_request)
+        _current_trace.set(root)
         return root  # type: ignore[return-value]
     except Exception as exc:  # pragma: no cover
         logger.warning("[Langfuse] create_assignment_trace failed: {}", exc)
@@ -114,14 +127,32 @@ def span(
         return None
 
 
-def end_span(sp: "LangfuseSpan | None", output: Any = None) -> None:
+def end_span(
+    sp: "LangfuseSpan | None",
+    output: Any = None,
+    *,
+    usage_details: "dict | None" = None,
+    level: str | None = None,
+    status_message: str | None = None,
+) -> None:
     """End a span (no-op if None)."""
     if sp is None:
         return
     try:
+        updates: dict[str, Any] = {}
         if output is not None:
-            sp.update(output=output)
+            updates["output"] = output
+        if usage_details:
+            updates["usage_details"] = usage_details
+        if level:
+            updates["level"] = level
+        if status_message:
+            updates["status_message"] = status_message
+        if updates:
+            sp.update(**updates)
         sp.end()
+        if sp is _current_trace.get():
+            _current_trace.set(None)
     except Exception as exc:  # pragma: no cover
         logger.warning("[Langfuse] end_span failed: {}", exc)
 
@@ -148,6 +179,7 @@ def create_trace(
             metadata=metadata or {},
         )
         root.set_trace_io(input=input)
+        _current_trace.set(root)
         return root  # type: ignore[return-value]
     except Exception as exc:  # pragma: no cover
         logger.warning("[Langfuse] create_trace '{}' failed: {}", name, exc)
@@ -171,9 +203,11 @@ def generation(
         return None
     try:
         gen = trace.start_observation(
+            as_type="generation",
             name=name,
             input=input,
-            metadata={"model": model, **(metadata or {})},
+            model=model,
+            metadata=metadata or {},
         )
         if output is not None:
             try:

@@ -1,4 +1,4 @@
-"""Turn MinerU ``content_list`` multimodal blocks into searchable text chunks."""
+"""Turn normalized multimodal document blocks into searchable text chunks."""
 
 from __future__ import annotations
 
@@ -168,7 +168,7 @@ async def content_item_to_surrogate_text_async(
 
 
 def content_item_to_surrogate_text(item: dict[str, Any]) -> str:
-    """Map one multimodal ``content_list`` item to a single searchable text blob."""
+    """Map one normalized multimodal item to a single searchable text blob."""
     ctype = str(item.get("type") or "unknown").strip()
 
     if ctype == "text":
@@ -286,7 +286,7 @@ def multimodal_items_to_custom_chunks(
     *,
     order_base: int,
 ) -> list[dict[str, Any]]:
-    """Convert multimodal MinerU items to ``ainsert_custom_kg`` chunk dicts."""
+    """Convert normalized multimodal items to ``ainsert_custom_kg`` chunk dicts."""
     out: list[dict[str, Any]] = []
     for mm_idx, item in enumerate(items):
         surrogate = content_item_to_surrogate_text(item)
@@ -310,7 +310,7 @@ async def multimodal_items_to_custom_chunks_async(
     order_base: int,
     use_vlm_for_images: bool,
 ) -> list[dict[str, Any]]:
-    """Convert multimodal MinerU items to chunks; optional per-image VLM with concurrency limit."""
+    """Convert normalized multimodal items to chunks; optionally summarize images with VLM."""
     from rag_mvp.config import settings
 
     sem = (

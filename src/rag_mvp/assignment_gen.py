@@ -27,7 +27,7 @@ from .config import settings
 from .engine import course_aquery_data
 from .llm import llm_chat_model_func
 from .material_processor import _notify_nextjs
-from .tracing import create_assignment_trace, end_span, flush, span
+from .tracing import clear_current_trace, create_assignment_trace, end_span, flush, span
 from .worker_async_loop import is_worker_async_loop_started, run_worker_coroutine
 from .question_gen import (
     DEFAULT_OBJECTIVE_WEIGHTS,
@@ -930,6 +930,7 @@ def generate_assignment(
 
     async def _pipeline() -> None:
         pipe_conn: Any = None
+        _trace = None
         if use_worker_loop:
             from .db import connect_sync
 
@@ -1158,11 +1159,18 @@ def generate_assignment(
                     pipe_conn,
                     assignment_id,
                     questions=questions,
+                    generated_questions_snapshot=questions,
+                    adoption_metrics=None,
                     quality_report=quality_report,
                     status="DRAFT",
                 )
                 final_score = quality_report.get("overall_score", "N/A")
                 end_span(_sp_review, output={"overall_score": final_score, "passed": quality_report.get("passed")})
+                end_span(_trace, output={
+                    "status": "DRAFT",
+                    "overall_score": final_score,
+                    "question_count": len(questions),
+                })
                 logger.info(
                     "Assignment {} DRAFT — final_score={} total_questions={}",
                     assignment_id, final_score, len(questions),
@@ -1175,6 +1183,7 @@ def generate_assignment(
                 })
 
             except Exception as exc:
+                end_span(_trace, output={"status": "FAILED"}, level="ERROR", status_message=str(exc))
                 logger.exception(
                     "Assignment generation failed assignment_id={}", assignment_id
                 )
@@ -1194,6 +1203,7 @@ def generate_assignment(
                     logger.warning("Could not write FAILED status to DB")
                 raise
         finally:
+            clear_current_trace()
             if use_worker_loop and pipe_conn is not None:
                 try:
                     pipe_conn.close()

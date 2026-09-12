@@ -14,7 +14,8 @@
     "db:push": "prisma db push",
     "db:seed": "prisma db seed",
     "skill:install": "node scripts/install-skill.mjs",
-    "review:scheduler": "tsx scripts/review-scheduler.ts"
+    "review:scheduler": "tsx scripts/review-scheduler.ts",
+    "perf:report": "node tests/perf/summarize-results.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1045.0",

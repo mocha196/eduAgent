@@ -487,30 +487,24 @@ def rag_parse_document(
         text, _ = _extract_text_plaintext(raw)
         return ParseDocumentResponse(text=text, pages=None)
 
-    # --- Office / image: try MinerU via temp file ---
-    _MINERU_SUFFIXES = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"})
-    if suffix in _MINERU_SUFFIXES:
+    # --- Office / image: use the configured parser provider ---
+    _PARSER_SUFFIXES = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"})
+    if suffix in _PARSER_SUFFIXES:
         try:
-            from rag_mvp.engine import parse_file
+            from rag_mvp.document_parser import parse_document
 
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp.write(raw)
-                tmp_path = Path(tmp.name)
-            try:
-                parse_file(tmp_path)
-                # Collect markdown output
-                out_dir = Path("output") / "parsed" / tmp_path.stem
-                md_texts: list[str] = []
-                if out_dir.exists():
-                    for md in sorted(out_dir.rglob("*.md")):
-                        if md.stat().st_size > 100:
-                            md_texts.append(md.read_text(encoding="utf-8", errors="replace"))
-                text = "\n\n".join(md_texts)
-                return ParseDocumentResponse(text=text, pages=None)
-            finally:
-                tmp_path.unlink(missing_ok=True)
+            with tempfile.TemporaryDirectory(prefix="rag_parse_document_") as tmpdir:
+                work_dir = Path(tmpdir)
+                tmp_path = work_dir / f"input{suffix}"
+                tmp_path.write_bytes(raw)
+                document = asyncio.run(
+                    parse_document(tmp_path, output_dir=work_dir / "parsed")
+                )
+                return ParseDocumentResponse(
+                    text=document.extracted_text(), pages=document.page_count
+                )
         except Exception as exc:
-            logger.warning("MinerU parse failed for {}: {}", filename, exc)
+            logger.warning("Document parser failed for {}: {}", filename, exc)
             raise HTTPException(status_code=422, detail=f"Document parse failed: {exc}") from exc
 
     raise HTTPException(status_code=415, detail=f"Unsupported file type: {suffix}")

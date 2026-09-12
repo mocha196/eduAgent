@@ -1,7 +1,7 @@
 [project]
 name = "rag-mvp"
 version = "0.1.0"
-description = "Multimodal vector RAG service powered by MinerU, PostgreSQL and pgvector"
+description = "Multimodal vector RAG service with pluggable document parsing and pgvector"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "mineru>=3.0.0",

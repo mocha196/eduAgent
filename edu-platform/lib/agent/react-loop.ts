@@ -209,6 +209,9 @@ async function _runLoop(
   let trace: LangfuseTraceClient | null = null;
   let loopSpan: LangfuseSpanClient | null = null;
   let finalAssistantText = "";
+  let completedToolCalls = 0;
+  let successfulToolCalls = 0;
+  let failedToolCalls = 0;
   if (ctx.traceId) {
     trace = createTurnTrace({
       traceId: ctx.traceId,
@@ -507,6 +510,9 @@ async function _runLoop(
         }
 
         const durationMs = Date.now() - toolStart;
+        completedToolCalls += 1;
+        if (success) successfulToolCalls += 1;
+        else failedToolCalls += 1;
         if (success) {
           log.info({ toolName: tc.name, durationMs, resultLen: toolContent.length }, "tool done");
         } else {
@@ -607,8 +613,32 @@ async function _runLoop(
 
   // Close Langfuse observations
   try {
-    loopSpan?.end({ output: { totalTokens, execTimeMs: execMs, error: streamError ?? null } });
-    if (finalAssistantText) trace?.update({ output: finalAssistantText });
+    loopSpan?.end({
+      output: {
+        totalTokens,
+        execTimeMs: execMs,
+        error: streamError ?? null,
+        completedToolCalls,
+        successfulToolCalls,
+        failedToolCalls,
+        toolSuccessRate: completedToolCalls > 0 ? successfulToolCalls / completedToolCalls : null,
+      },
+      metadata: { success: streamError == null, execTimeMs: execMs },
+      level: streamError ? ("ERROR" as const) : ("DEFAULT" as const),
+      statusMessage: streamError ?? undefined,
+    });
+    trace?.update({
+      output: finalAssistantText || undefined,
+      metadata: {
+        status: streamError ? "error" : "success",
+        latencyMs: execMs,
+        totalTokens,
+        completedToolCalls,
+        successfulToolCalls,
+        failedToolCalls,
+        toolSuccessRate: completedToolCalls > 0 ? successfulToolCalls / completedToolCalls : null,
+      },
+    });
   } catch { /* noop */ }
 
   log.info(

@@ -14,6 +14,7 @@ const {
   assignmentUpdateManyMock,
   xAddMock,
   getRedisMock,
+  transactionMock,
 } = vi.hoisted(() => ({
   assertTeacherOfCourseMock: vi.fn(),
   assignmentCreateMock: vi.fn(),
@@ -23,6 +24,7 @@ const {
   assignmentUpdateManyMock: vi.fn(),
   xAddMock: vi.fn(),
   getRedisMock: vi.fn(),
+  transactionMock: vi.fn(),
 }));
 
 vi.mock("@/lib/course-access", () => ({
@@ -40,6 +42,7 @@ vi.mock("@/lib/db", () => ({
       update: assignmentUpdateMock,
       updateMany: assignmentUpdateManyMock,
     },
+    $transaction: transactionMock,
   },
 }));
 
@@ -71,6 +74,8 @@ function makeAssignment(status: AssignmentStatus) {
     errorMessage: null,
     teacherRequest: "generate 5 MCQ",
     structuredParams: null,
+    generatedQuestionsSnapshot: null,
+    adoptionMetrics: null,
   };
 }
 
@@ -78,6 +83,12 @@ describe("triggerAssignmentGeneration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     assertTeacherOfCourseMock.mockResolvedValue(undefined);
+    transactionMock.mockImplementation(async (callback) => callback({
+      assignment: {
+        findFirst: assignmentFindFirstMock,
+        updateMany: assignmentUpdateManyMock,
+      },
+    }));
     assignmentDeleteMock.mockResolvedValue(undefined);
   });
 
@@ -139,6 +150,61 @@ describe("triggerAssignmentGeneration", () => {
     expect(result.status).toBe(AssignmentStatus.GENERATING);
     expect(result.id).toBe(ASSIGNMENT_ID);
     expect(assignmentDeleteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("calculateQuestionAdoption", () => {
+  it("distinguishes retained, modified, deleted, and teacher-added questions", async () => {
+    const { calculateQuestionAdoption } = await import("@/lib/services/assignmentService");
+    const base = {
+      type: "single_choice" as const,
+      objective: "knowledge" as const,
+      entities: ["TCP"],
+      importance_score: 1,
+      reasoning_steps: 1,
+      options: ["A", "B"],
+      answer: "A",
+      explanation: "Because",
+      source_chunk_ids: ["chunk-1"],
+      score: 5,
+      difficulty: "easy" as const,
+    };
+    const generated = [
+      { ...base, id: 1, question: "Q1" },
+      { ...base, id: 2, question: "Q2" },
+      { ...base, id: 3, question: "Q3" },
+    ];
+    const published = [
+      { ...generated[0], score: 10 },
+      { ...generated[1], question: "Q2 edited" },
+      { ...base, id: 999, question: "Teacher question" },
+    ];
+
+    const metrics = calculateQuestionAdoption(
+      generated,
+      published,
+      new Date("2026-09-08T00:00:00.000Z"),
+    );
+
+    expect(metrics).toEqual({
+      generatedCount: 3,
+      retainedCount: 2,
+      unchangedCount: 1,
+      modifiedCount: 1,
+      deletedCount: 1,
+      teacherAddedCount: 1,
+      adoptionRate: 2 / 3,
+      directAdoptionRate: 1 / 3,
+      calculatedAt: "2026-09-08T00:00:00.000Z",
+    });
+  });
+
+  it("returns zero rates for legacy assignments without a generated snapshot", async () => {
+    const { calculateQuestionAdoption } = await import("@/lib/services/assignmentService");
+    const metrics = calculateQuestionAdoption([], []);
+    expect(metrics.generatedCount).toBe(0);
+    expect(metrics.adoptionRate).toBe(0);
+    expect(metrics.directAdoptionRate).toBe(0);
   });
 });
 
@@ -209,6 +275,12 @@ describe("publishAssignment state machine (TC-ASSIGN-002)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     assertTeacherOfCourseMock.mockResolvedValue(undefined);
+    transactionMock.mockImplementation(async (callback) => callback({
+      assignment: {
+        findFirst: assignmentFindFirstMock,
+        updateMany: assignmentUpdateManyMock,
+      },
+    }));
   });
 
   it("GENERATING status cannot be published - should throw 409", async () => {

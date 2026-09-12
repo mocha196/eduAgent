@@ -5,8 +5,8 @@
 import http from 'k6/http';
 import { check } from 'k6';
 
-export const BASE_URL = 'http://localhost:3000';
-export const RAG_URL  = 'http://localhost:8001';
+export const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000';
+export const RAG_URL  = __ENV.RAG_URL || 'http://localhost:8001';
 
 // 测试用账号（由 prisma/seed-mock-students.ts 创建）
 // 用法: MOCK_USERS[__VU % MOCK_USERS.length]
@@ -17,7 +17,7 @@ export const MOCK_USERS = Array.from({ length: 30 }, (_, i) => ({
 
 // 目标课程 ID（mock 学生已加入该课程）
 // 计算机网络基础 — 含最多已索引材料，适合聊天测试
-export const COURSE_ID = 'c8b8787f-9c7e-4f37-bab5-fb94a438d9cf';
+export const COURSE_ID = __ENV.COURSE_ID || 'c8b8787f-9c7e-4f37-bab5-fb94a438d9cf';
 
 /**
  * 登录并返回 { token, refresh_token, userId }

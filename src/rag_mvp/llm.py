@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 
 from .config import settings
 from .http_env import ensure_loopback_bypass_http_proxy
+from .tracing import end_span, generation, get_current_trace
 
 
 async def openai_complete(
@@ -30,8 +31,36 @@ async def openai_complete(
     messages.extend(history_messages or [])
     messages.append({"role": "user", "content": prompt})
     client = AsyncOpenAI(api_key=api_key or "not-set", base_url=base_url or None)
-    response = await client.chat.completions.create(model=model, messages=messages, **kwargs)
-    return response.choices[0].message.content or ""
+    trace_generation = generation(
+        get_current_trace(),
+        name=f"llm:{_llm_role.get('default')}",
+        model=model,
+        input=[
+            {
+                "role": message.get("role"),
+                "content": str(message.get("content", ""))[:4000],
+            }
+            for message in messages
+        ],
+        metadata={"provider_base_url": base_url},
+    )
+    try:
+        response = await client.chat.completions.create(model=model, messages=messages, **kwargs)
+        content = response.choices[0].message.content or ""
+        usage = response.usage
+        end_span(
+            trace_generation,
+            output=content[:8000],
+            usage_details={
+                "input": usage.prompt_tokens,
+                "output": usage.completion_tokens,
+                "total": usage.total_tokens,
+            } if usage is not None else None,
+        )
+        return content
+    except Exception as exc:
+        end_span(trace_generation, level="ERROR", status_message=str(exc))
+        raise
 
 # Before any httpx / ollama calls: so Ollama and other loopback URLs ignore HTTP_PROXY.
 ensure_loopback_bypass_http_proxy()

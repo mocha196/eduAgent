@@ -17,6 +17,7 @@ import { check, sleep, group } from 'k6';
 import { login, authHeaders, BASE_URL, COURSE_ID, MOCK_USERS, vuUser, randomQuestion } from './utils.js';
 
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   stages: [
     { duration: '2m',  target: 5  },  // 热身: 爬升到 5 VUs
     { duration: '3m',  target: 5  },  // 保持 5 VUs

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -14,6 +13,7 @@ from .config import settings
 from .document_parser import parse_document
 from .llm import ensure_embedding_backend_reachable, llm_chat_model_func, vision_model_func
 from .multimodal_surrogate_chunks import content_item_to_surrogate_text_async
+from .parsed_document import PARSED_DOCUMENT_FILENAME, load_parsed_document
 from .text_chunking import split_text
 from .vector_store import (
     VectorChunk,
@@ -30,7 +30,6 @@ from .vector_store import (
 _SUPPORTED_SUFFIXES = frozenset(
     {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".txt", ".md", ".jpg", ".jpeg", ".png"}
 )
-_SKIP_TYPES = frozenset({"footer", "page_number", "header"})
 
 
 def material_stable_doc_id(material_id: str) -> str:
@@ -47,19 +46,6 @@ def _invalidate_personal_rag_cache(user_id: str | None = None) -> None:
 
 def _invalidate_course_rag_cache_for(course_id: str) -> None:
     """Compatibility no-op; the vector store has no process-local storage cache."""
-
-
-def _fix_image_paths(content_list: list, json_dir: Path) -> list:
-    fixed: list[dict[str, Any]] = []
-    for raw_item in content_list:
-        if not isinstance(raw_item, dict) or raw_item.get("type") in _SKIP_TYPES:
-            continue
-        item = dict(raw_item)
-        rel = item.get("img_path")
-        if rel and not str(rel).startswith(("http://", "https://")):
-            item["img_path"] = str((json_dir / str(rel)).resolve())
-        fixed.append(item)
-    return fixed
 
 
 def _sanitize_material_display_stem(raw: str) -> str:
@@ -122,22 +108,16 @@ async def _load_parsed_chunks(
     text_only: bool,
 ) -> tuple[list[VectorChunk], str]:
     scan_dir = settings.output_dir / source_file.stem
-    json_files = sorted(
-        path for path in scan_dir.rglob("*_content_list.json") if "_content_list_v2" not in path.name
-    )
-    if not json_files:
-        raise FileNotFoundError(f"No *_content_list.json under {scan_dir}")
+    document = load_parsed_document(scan_dir)
+    groups = document.grouped_content_items()
     all_chunks: list[VectorChunk] = []
     first_file_path = ""
-    for path in json_files:
-        sub_stem = path.stem.replace("_content_list", "")
+    for sub_stem, content_list in groups:
         display_stem = Path(original_filename).stem if original_filename else sub_stem
         rag_file_path = _make_material_file_path(
-            material_id, sub_stem if len(json_files) > 1 else display_stem
+            material_id, sub_stem if len(groups) > 1 else display_stem
         )
         first_file_path = first_file_path or rag_file_path
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        content_list = _fix_image_paths(raw, path.parent)
         file_chunks = await _content_list_chunks(
             content_list,
             file_path=rag_file_path,
@@ -402,14 +382,6 @@ async def personal_aquery_data(
     }
 
 
-async def _aparse_file(_parser: Any, file_path: Path) -> None:
-    await parse_document(file_path)
-
-
-def _build_parser() -> None:
-    return None
-
-
 def parse_file(file_path: str | Path) -> None:
     path = Path(file_path)
     if not path.exists():
@@ -457,19 +429,18 @@ def stable_local_material_id(path: Path) -> str:
 
 def reindex_from_cache(output_dir: str | Path | None = None, file_path: str | Path | None = None) -> None:
     scan_dir = Path(output_dir) if output_dir else settings.output_dir
-    json_files = sorted(
-        path for path in scan_dir.rglob("*_content_list.json") if "_content_list_v2" not in path.name
-    )
+    artifact_dirs = {path.parent for path in scan_dir.rglob(PARSED_DOCUMENT_FILENAME)}
+    for path in scan_dir.rglob("*_content_list.json"):
+        if "_content_list_v2" in path.name:
+            continue
+        relative = path.relative_to(scan_dir)
+        artifact_dirs.add(scan_dir / relative.parts[0] if len(relative.parts) > 1 else path.parent)
     if file_path is not None:
         stem = Path(file_path).stem
-        json_files = [path for path in json_files if stem in path.parts or path.stem.startswith(stem)]
+        artifact_dirs = {path for path in artifact_dirs if path.name == stem or stem in path.parts}
     seen_stems: set[str] = set()
-    for path in json_files:
-        if file_path:
-            source = Path(file_path)
-        else:
-            relative = path.relative_to(scan_dir)
-            source = Path((relative.parts[0] if len(relative.parts) > 1 else path.stem.replace("_content_list", "")) + ".pdf")
+    for artifact_dir in sorted(artifact_dirs):
+        source = Path(file_path) if file_path else Path(f"{artifact_dir.name}.pdf")
         if source.stem in seen_stems:
             continue
         seen_stems.add(source.stem)
