@@ -231,6 +231,16 @@ describe("personalMaterialService", () => {
 
       expect(putObjectStreamMock).toHaveBeenCalledOnce();
       expect(createMock).toHaveBeenCalledOnce();
+      const objectKey = putObjectStreamMock.mock.calls[0][0].objectKey as string;
+      expect(objectKey).toMatch(new RegExp(`^personal_materials/${BASE_MATERIAL.userId}/[^/]+/lecture\\.pdf$`));
+      expect(createMock).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          userId: BASE_MATERIAL.userId,
+          minioPath: objectKey,
+          previewPdfStatus: MaterialPreviewPdfStatus.NA,
+          status: MaterialStatus.UPLOADED,
+        }),
+      });
       expect(enqueueRagTaskMock).toHaveBeenCalledWith(
         expect.objectContaining({ operation: "personal_parse_and_index" }),
       );
@@ -258,6 +268,54 @@ describe("personalMaterialService", () => {
         expect.objectContaining({ operation: "personal_convert_preview" }),
       );
     });
+
+    it("does not create a personal record when object storage fails", async () => {
+      putObjectStreamMock.mockRejectedValue(new Error("MinIO unavailable"));
+
+      await expect(uploadPersonalMaterialStream(baseUploadParams)).rejects.toMatchObject({
+        status: 503,
+        code: "SERVICE_UNAVAILABLE",
+      });
+
+      expect(createMock).not.toHaveBeenCalled();
+      expect(enqueueRagTaskMock).not.toHaveBeenCalled();
+    });
+
+    it("cleans up the personal object when DB creation fails", async () => {
+      createMock.mockRejectedValue(new Error("DB unavailable"));
+
+      await expect(uploadPersonalMaterialStream(baseUploadParams)).rejects.toMatchObject({
+        status: 500,
+        code: "INTERNAL_ERROR",
+      });
+
+      expect(deleteObjectMock).toHaveBeenCalledWith(putObjectStreamMock.mock.calls[0][0].objectKey);
+      expect(enqueueRagTaskMock).not.toHaveBeenCalled();
+    });
+
+    it("marks enqueue failure only while the personal material is still UPLOADED", async () => {
+      createMock.mockResolvedValue(BASE_MATERIAL);
+      enqueueRagTaskMock.mockRejectedValue(new Error("Redis unavailable"));
+      updateManyMock.mockResolvedValue({ count: 1 });
+
+      await expect(uploadPersonalMaterialStream(baseUploadParams)).rejects.toMatchObject({
+        status: 503,
+        code: "SERVICE_UNAVAILABLE",
+      });
+
+      expect(updateManyMock).toHaveBeenCalledWith({
+        where: {
+          id: expect.any(String),
+          userId: BASE_MATERIAL.userId,
+          isDeleted: false,
+          status: MaterialStatus.UPLOADED,
+        },
+        data: {
+          status: MaterialStatus.FAILED,
+          statusMessage: "QUEUE_ENQUEUE_FAILED: Redis unavailable",
+        },
+      });
+    }, 15000);
   });
 
   // ─── getPersonalMaterial ──────────────────────────────────────────────────

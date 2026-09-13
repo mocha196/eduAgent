@@ -1,75 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
-import type { ReadableStream } from "node:stream/web";
 import {
-  MaterialPreviewPdfStatus,
   MaterialStatus,
   type PersonalMaterial,
 } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/http/api-error";
 import {
-  getMaterialMaxUploadBytes,
   getMaterialStaleSec,
-  getMinioConfig,
   getRedisUrl,
 } from "@/lib/config";
 import { assertUuid } from "@/lib/course-access";
-import { deleteObject, getObjectStream, putObjectStream } from "@/lib/minio";
+import { deleteObject, getObjectStream } from "@/lib/minio";
 import {
   isOfficeMaterialFileType,
   previewPdfObjectKey,
 } from "@/lib/material-office";
-import { enqueueRagTask, type RagQueueTask } from "@/lib/queue/ragTask";
+import type { RagQueueTask } from "@/lib/queue/ragTask";
+import { enqueueMaterialTaskWithRetry } from "@/lib/material-ingestion";
 import { getRedis } from "@/lib/redis";
-import { logger } from "@/lib/logger";
-
-const log = logger.child({ component: "personalMaterialService" });
 import type {
   PersonalMaterialCreatedDto,
   PersonalMaterialDetailDto,
   PersonalMaterialSummaryDto,
 } from "@/lib/dto/personal-material.dto";
-import { MATERIAL_UPLOAD_ALLOWED_EXT_SET } from "@/lib/material-upload-allowed";
 import { mapStorageReadError } from "@/lib/material-storage-errors";
-
-async function enqueueWithRetry(task: RagQueueTask, maxAttempts = 5): Promise<void> {
-  let last: unknown;
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      await enqueueRagTask(task);
-      return;
-    } catch (e) {
-      last = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      log.error({ err: msg, attempt: i + 1, maxAttempts, operation: task.operation, material_id: task.material_id }, "Enqueue attempt failed");
-      await new Promise((r) => setTimeout(r, 200 * (i + 1)));
-    }
-  }
-  throw last;
-}
-
-const ALLOWED_EXT = MATERIAL_UPLOAD_ALLOWED_EXT_SET;
-
-const _VIDEO_FILE_TYPES = new Set(["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"]);
-const _AUDIO_FILE_TYPES = new Set(["mp3", "wav", "m4a", "flac", "ogg", "opus"]);
-
-function isVideoOrAudio(fileType: string): boolean {
-  const t = fileType.toLowerCase();
-  return _VIDEO_FILE_TYPES.has(t) || _AUDIO_FILE_TYPES.has(t);
-}
-
-function extToFileType(ext: string): string {
-  const e = ext.toLowerCase();
-  if (e === "jpg" || e === "jpeg" || e === "png" || e === "webp") return "image";
-  return e;
-}
-
-function parseExtension(filename: string): string {
-  const i = filename.lastIndexOf(".");
-  if (i < 0) return "";
-  return filename.slice(i + 1);
-}
+import {
+  uploadMaterialCore,
+  type PersonalMaterialUploadInput,
+} from "@/lib/services/materialUploadService";
 
 const STALE_STATUSES = new Set<MaterialStatus>([
   MaterialStatus.PARSING,
@@ -134,121 +92,10 @@ export async function getPersonalMaterial(
   };
 }
 
-export async function uploadPersonalMaterialStream(params: {
-  userId: string;
-  originalFilename: string;
-  contentType: string | undefined;
-  contentLength: number;
-  body: ReadableStream<Uint8Array> | Readable;
-  textOnly?: boolean;
-}): Promise<PersonalMaterialCreatedDto> {
-  try {
-    getMinioConfig();
-  } catch {
-    throw new ApiError(503, "SERVICE_UNAVAILABLE", "Object storage is not configured");
-  }
-
-  const max = getMaterialMaxUploadBytes();
-  if (params.contentLength > max) {
-    throw new ApiError(400, "VALIDATION_ERROR", "File too large", { max_bytes: max });
-  }
-  if (!getRedisUrl()) {
-    throw new ApiError(503, "SERVICE_UNAVAILABLE", "REDIS_URL is required for material processing");
-  }
-
-  const ext = parseExtension(params.originalFilename);
-  if (!ext || !ALLOWED_EXT.has(ext.toLowerCase())) {
-    throw new ApiError(400, "VALIDATION_ERROR", "Unsupported file type", {
-      allowed: [...ALLOWED_EXT].sort(),
-    });
-  }
-
-  const fileType = extToFileType(ext);
-  const materialId = randomUUID();
-  const safeName = params.originalFilename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const minioPath = `personal_materials/${params.userId}/${materialId}/${safeName}`;
-  const previewPdfStatus = isOfficeMaterialFileType(fileType)
-    ? MaterialPreviewPdfStatus.PENDING
-    : MaterialPreviewPdfStatus.NA;
-
-  const nodeReadable =
-    params.body instanceof Readable
-      ? params.body
-      : Readable.fromWeb(params.body as ReadableStream<Uint8Array>);
-
-  try {
-    await putObjectStream({
-      objectKey: minioPath,
-      body: nodeReadable,
-      contentLength: params.contentLength,
-      contentType: params.contentType,
-    });
-  } catch (e) {
-    throw new ApiError(503, "SERVICE_UNAVAILABLE", "Object storage upload failed", {
-      detail: e instanceof Error ? e.message : String(e),
-    });
-  }
-
-  let material: PersonalMaterial;
-  try {
-    material = await prisma.personalMaterial.create({
-      data: {
-        id: materialId,
-        userId: params.userId,
-        originalFilename: params.originalFilename,
-        fileType,
-        fileSize: params.contentLength,
-        minioPath,
-        previewPdfStatus,
-        status: MaterialStatus.UPLOADED,
-      },
-    });
-  } catch (e) {
-    await deleteObject(minioPath).catch(() => {});
-    throw new ApiError(500, "INTERNAL_ERROR", "Failed to persist material after upload", {
-      detail: e instanceof Error ? e.message : String(e),
-    });
-  }
-
-  const textOnly = params.textOnly ?? true;
-  const operation = isOfficeMaterialFileType(fileType)
-    ? ("personal_convert_preview" as const)
-    : isVideoOrAudio(fileType)
-    ? ("personal_transcribe_and_index" as const)
-    : ("personal_parse_and_index" as const);
-
-  const task: RagQueueTask = {
-    task_id: randomUUID(),
-    material_id: materialId,
-    operation,
-    created_at: new Date().toISOString(),
-    text_only: textOnly,
-  };
-  try {
-    await enqueueWithRetry(task);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    await prisma.personalMaterial.updateMany({
-      where: { id: materialId, userId: params.userId, isDeleted: false },
-      data: {
-        status: MaterialStatus.FAILED,
-        statusMessage: `QUEUE_ENQUEUE_FAILED: ${msg.slice(0, 500)}`,
-      },
-    });
-    throw new ApiError(
-      503,
-      "SERVICE_UNAVAILABLE",
-      "Failed to queue material processing",
-      { detail: msg },
-    );
-  }
-
-  return {
-    id: material.id,
-    original_filename: material.originalFilename,
-    status: material.status,
-    created_at: material.createdAt.toISOString(),
-  };
+export async function uploadPersonalMaterialStream(
+  params: PersonalMaterialUploadInput,
+): Promise<PersonalMaterialCreatedDto> {
+  return uploadMaterialCore({ ...params, scope: "personal" });
 }
 
 export async function deletePersonalMaterial(
@@ -278,7 +125,7 @@ export async function deletePersonalMaterial(
   });
 
   try {
-    await enqueueWithRetry(task);
+    await enqueueMaterialTaskWithRetry(task);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await prisma.personalMaterial.update({
@@ -390,5 +237,5 @@ export async function retryPersonalMaterialIndex(
     created_at: new Date().toISOString(),
     text_only: textOnly ?? true,
   };
-  await enqueueWithRetry(task);
+  await enqueueMaterialTaskWithRetry(task);
 }

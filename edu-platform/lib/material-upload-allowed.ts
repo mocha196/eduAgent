@@ -1,5 +1,5 @@
 /**
- * Course material upload extensions. Keep in sync with RAG worker
+ * Course and personal material upload extensions. Keep in sync with RAG worker
  * (`parse_material` / `_OFFICE_SUFFIXES` / `_VIDEO_SUFFIXES` / `_AUDIO_SUFFIXES`
  * in `src/rag_mvp/material_processor.py` and `video_transcribe.py`).
  */

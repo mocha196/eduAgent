@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
-import type { ReadableStream } from "node:stream/web";
 import {
   MaterialPreviewPdfStatus,
   MaterialStatus,
@@ -10,8 +8,6 @@ import {
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/http/api-error";
 import {
-  getMaterialMaxUploadBytes,
-  getMinioConfig,
   getRedisUrl,
 } from "@/lib/config";
 import { assertTeacherOfCourse, getCourseIfMember, assertUuid } from "@/lib/course-access";
@@ -19,14 +15,17 @@ import {
   deleteObject,
   getObjectStream,
   objectExists,
-  putObjectStream,
 } from "@/lib/minio";
 import {
   isOfficeMaterialFileType,
   legacyConvertedPdfObjectKey,
   previewPdfObjectKey,
 } from "@/lib/material-office";
-import { enqueueRagTask, type RagQueueTask } from "@/lib/queue/ragTask";
+import type { RagQueueTask } from "@/lib/queue/ragTask";
+import {
+  enqueueMaterialTaskWithRetry,
+  isVideoOrAudioMaterialFileType,
+} from "@/lib/material-ingestion";
 import { getRedis } from "@/lib/redis";
 import { getMaterialStaleSec } from "@/lib/config";
 import { createNotification } from "@/lib/services/notificationService";
@@ -35,49 +34,11 @@ import type {
   MaterialDetailDto,
   MaterialSummaryDto,
 } from "@/lib/dto/material.dto";
-import { MATERIAL_UPLOAD_ALLOWED_EXT_SET } from "@/lib/material-upload-allowed";
 import { mapStorageReadError } from "@/lib/material-storage-errors";
-
-async function enqueueRagTaskWithRetry(task: RagQueueTask, maxAttempts = 5): Promise<void> {
-  let last: unknown;
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      await enqueueRagTask(task);
-      return;
-    } catch (e) {
-      last = e;
-      await new Promise((r) => setTimeout(r, 200 * (i + 1)));
-    }
-  }
-  throw last;
-}
-
-/** Must match worker `parse_material` (see review_phase7 H4). */
-const ALLOWED_EXT = MATERIAL_UPLOAD_ALLOWED_EXT_SET;
-
-const _VIDEO_FILE_TYPES = new Set(["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"]);
-const _AUDIO_FILE_TYPES = new Set(["mp3", "wav", "m4a", "flac", "ogg", "opus"]);
-
-function isVideoOrAudioFileType(fileType: string): boolean {
-  const t = fileType.toLowerCase();
-  return _VIDEO_FILE_TYPES.has(t) || _AUDIO_FILE_TYPES.has(t);
-}
-
-function extToFileType(ext: string): string {
-  const e = ext.toLowerCase();
-  if (e === "jpg" || e === "jpeg" || e === "png" || e === "webp") return "image";
-  if (e === "ppt") return "ppt";
-  if (e === "pptx") return "pptx";
-  if (e === "doc") return "doc";
-  if (e === "docx") return "docx";
-  return e;
-}
-
-function parseExtension(filename: string): string {
-  const i = filename.lastIndexOf(".");
-  if (i < 0) return "";
-  return filename.slice(i + 1);
-}
+import {
+  uploadMaterialCore,
+  type CourseMaterialUploadInput,
+} from "@/lib/services/materialUploadService";
 
 const STALE_PROCESSING_STATUSES = new Set<MaterialStatus>([
   MaterialStatus.PARSING,
@@ -160,7 +121,7 @@ async function markOfficePreviewReadyAndMaybeQueueParse(m: Material): Promise<vo
     return;
   }
   try {
-    await enqueueRagTaskWithRetry({
+    await enqueueMaterialTaskWithRetry({
       task_id: randomUUID(),
       material_id: m.id,
       operation: "parse_and_index",
@@ -243,158 +204,19 @@ export async function listMaterials(
   return { materials: reconciled.map(toSummary) };
 }
 
-export async function uploadMaterialStream(params: {
-  teacherUserId: string;
-  role: UserRole;
-  courseId: string;
-  originalFilename: string;
-  contentType: string | undefined;
-  contentLength: number;
-  body: ReadableStream<Uint8Array> | Readable;
-  lessonId?: string | null;
-  textOnly?: boolean;
-}): Promise<MaterialCreatedDto> {
-  try {
-    getMinioConfig();
-  } catch {
-    throw new ApiError(
-      503,
-      "SERVICE_UNAVAILABLE",
-      "Object storage is not configured",
-    );
-  }
-
-  const max = getMaterialMaxUploadBytes();
-  if (params.contentLength > max) {
-    throw new ApiError(400, "VALIDATION_ERROR", "File too large", {
-      max_bytes: max,
-    });
-  }
-  if (!getRedisUrl()) {
-    throw new ApiError(
-      503,
-      "SERVICE_UNAVAILABLE",
-      "REDIS_URL is required for material processing",
-    );
-  }
-
-  await assertTeacherOfCourse(params.teacherUserId, params.role, params.courseId);
-
-  if (params.lessonId) {
-    assertUuid(params.lessonId, "lesson_id");
-    const lesson = await prisma.lesson.findFirst({
-      where: {
-        id: params.lessonId,
-        courseId: params.courseId,
-        isDeleted: false,
-      },
-    });
-    if (!lesson) {
-      throw new ApiError(404, "NOT_FOUND", "Lesson not found");
-    }
-  }
-
-  const ext = parseExtension(params.originalFilename);
-  if (!ext || !ALLOWED_EXT.has(ext.toLowerCase())) {
-    throw new ApiError(400, "VALIDATION_ERROR", "Unsupported file type", {
-      allowed: [...ALLOWED_EXT].sort(),
-    });
-  }
-  const fileType = extToFileType(ext);
-  const materialId = randomUUID();
-  const safeName = params.originalFilename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const minioPath = `materials/${params.courseId}/${materialId}/${safeName}`;
-  const previewPdfStatus = isOfficeMaterialFileType(fileType)
-    ? MaterialPreviewPdfStatus.PENDING
-    : MaterialPreviewPdfStatus.NA;
-
-  const nodeReadable =
-    params.body instanceof Readable
-      ? params.body
-      : Readable.fromWeb(params.body as ReadableStream<Uint8Array>);
-
-  try {
-    await putObjectStream({
-      objectKey: minioPath,
-      body: nodeReadable,
-      contentLength: params.contentLength,
-      contentType: params.contentType,
-    });
-  } catch (e) {
-    throw new ApiError(
-      503,
-      "SERVICE_UNAVAILABLE",
-      "Object storage upload failed",
-      { detail: e instanceof Error ? e.message : String(e) },
-    );
-  }
-
-  let material: Material;
-  try {
-    material = await prisma.material.create({
-      data: {
-        id: materialId,
-        courseId: params.courseId,
-        lessonId: params.lessonId || null,
-        originalFilename: params.originalFilename,
-        fileType,
-        fileSize: params.contentLength,
-        minioPath,
-        previewPdfStatus,
-        status: MaterialStatus.UPLOADED,
-      } as never,
-    });
-  } catch (e) {
-    await deleteObject(minioPath).catch(() => {});
-    throw new ApiError(
-      500,
-      "INTERNAL_ERROR",
-      "Failed to persist material after upload",
-      { detail: e instanceof Error ? e.message : String(e) },
-    );
-  }
-
-  const textOnly = params.textOnly ?? true;
-  const task: RagQueueTask = isOfficeMaterialFileType(fileType)
-    ? {
-        task_id: randomUUID(),
-        material_id: materialId,
-        operation: "convert_preview",
-        created_at: new Date().toISOString(),
-        text_only: textOnly,
-      }
-    : isVideoOrAudioFileType(fileType)
-    ? {
-        task_id: randomUUID(),
-        material_id: materialId,
-        operation: "transcribe_and_index",
-        created_at: new Date().toISOString(),
-        text_only: textOnly,
-      }
-    : {
-        task_id: randomUUID(),
-        material_id: materialId,
-        operation: "parse_and_index",
-        created_at: new Date().toISOString(),
-        text_only: textOnly,
-      };
-  await enqueueRagTaskWithRetry(task);
-
+export async function uploadMaterialStream(
+  params: CourseMaterialUploadInput,
+): Promise<MaterialCreatedDto> {
+  const created = await uploadMaterialCore({ ...params, scope: "course" });
   // Notify the uploading teacher that the file is in the processing queue.
   void createNotification({
     userId: params.teacherUserId,
     type: "MATERIAL_UPLOADED",
     title: "课件上传成功",
     body: `《${params.originalFilename}》已上传，正在后台处理中。`,
-    metadata: { courseId: params.courseId, materialId: material.id },
+    metadata: { courseId: params.courseId, materialId: created.id },
   });
-
-  return {
-    id: material.id,
-    original_filename: material.originalFilename,
-    status: material.status,
-    created_at: material.createdAt.toISOString(),
-  };
+  return created;
 }
 
 export async function deleteMaterial(
@@ -429,7 +251,7 @@ export async function deleteMaterial(
     data: { isDeleted: true },
   });
   try {
-    await enqueueRagTaskWithRetry(task);
+    await enqueueMaterialTaskWithRetry(task);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await prisma.material.update({
@@ -491,7 +313,7 @@ export async function retryMaterialIndex(
     created_at: new Date().toISOString(),
     text_only: textOnly ?? true,
   };
-  await enqueueRagTaskWithRetry(task);
+  await enqueueMaterialTaskWithRetry(task);
 }
 
 /** Redis key used to signal the Python worker to abort processing. TTL = 2 h. */
@@ -569,7 +391,7 @@ export async function cancelMaterialProcessing(
     created_at: new Date().toISOString(),
   };
   try {
-    await enqueueRagTaskWithRetry(task);
+    await enqueueMaterialTaskWithRetry(task);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await prisma.material.update({
@@ -695,7 +517,7 @@ async function enqueuePreviewRepairIfFailed(materialId: string): Promise<boolean
     return false;
   }
   try {
-    await enqueueRagTaskWithRetry({
+    await enqueueMaterialTaskWithRetry({
       task_id: randomUUID(),
       material_id: materialId,
       operation: "repair_preview",
@@ -882,7 +704,7 @@ export async function openMaterialContentStream(
     };
   }
 
-  if (isVideoOrAudioFileType(ft)) {
+  if (isVideoOrAudioMaterialFileType(ft)) {
     const { body, contentType, contentLength, contentRange, isPartial } =
       await getObjectStream({ objectKey: m.minioPath, range: params.range });
     return {
