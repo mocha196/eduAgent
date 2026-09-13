@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "initial_operations": {
+    "course": {
+      "office": "convert_preview",
+      "media": "transcribe_and_index",
+      "document": "parse_and_index"
+    },
+    "personal": {
+      "office": "personal_convert_preview",
+      "media": "personal_transcribe_and_index",
+      "document": "personal_parse_and_index"
+    }
+  }
+}
